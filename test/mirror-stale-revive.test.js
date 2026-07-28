@@ -16,6 +16,12 @@
 // Fix: a successful LOCAL command marks the unit locally-authoritative, so stale
 // cloud/streaming updates are dropped for the authoritative window and never reach
 // the mirror.
+//
+// The off itself now travels through HeaterCooler's `Active` characteristic rather
+// than a Thermostat mode of OFF, which makes this regression *easier* to hit, not
+// harder: an off is no longer a mode transition iOS might collapse, so scenes send
+// it every time. The command on the wire is unchanged (`operationMode: 'off'`), and
+// so is the window it has to arm.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -28,11 +34,24 @@ function makeLog() { const noop = () => {}; return { info: noop, warn: noop, err
 const charCache = {};
 const Characteristic = new Proxy({}, {
   get(_t, prop) {
-    if (!charCache[prop]) { charCache[prop] = { _name: String(prop), OFF: 0, HEAT: 1, COOL: 2, AUTO: 3 }; }
+    if (!charCache[prop]) { charCache[prop] = {
+        _name: String(prop),
+        OFF: 0, HEAT: 1, COOL: 2, AUTO: 3,
+        INACTIVE: 0, ACTIVE: 1,
+        IDLE: 1, HEATING: 2, COOLING: 3,
+        SWING_DISABLED: 0, SWING_ENABLED: 1,
+        FIXED: 0, JAMMED: 1, SWINGING: 2,
+        HORIZONTAL: 0, VERTICAL: 1,
+        CELSIUS: 0, FAHRENHEIT: 1,
+      }; }
     return charCache[prop];
   },
 });
-const Service = { AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat', Switch: 'Switch', FilterMaintenance: 'FilterMaintenance' };
+const Service = {
+  AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat',
+  HeaterCooler: 'HeaterCooler', Slats: 'Slats', HumiditySensor: 'HumiditySensor',
+  Switch: 'Switch', FilterMaintenance: 'FilterMaintenance',
+};
 
 function makeCharacteristic() { const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } }; return ch; }
 function makeService(type, name, subtype) {
@@ -69,7 +88,11 @@ function makeLocalClient(over = {}) {
   };
 }
 function makeHarness({ localClient = null } = {}) {
-  const platform = { Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} }, localClient };
+  const platform = {
+    Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} },
+    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
+    localClient,
+  };
   const kumoAPI = { subscribeToDevice() {}, onDeviceProfileUpdate() {}, sendCommand() { return Promise.resolve(true); } };
   const handler = new KumoThermostatAccessory(platform, makeAccessory(), kumoAPI, 30);
   return { handler };
@@ -102,8 +125,11 @@ test('a stale cloud "cool" after a local OFF does not re-fire the mirror hook', 
   const seen = [];
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
-  // Skylight scene turns the source OFF over the LAN.
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  // Skylight scene turns the source OFF over the LAN. Under HeaterCooler the off
+  // arrives on Active, not as a mode — TargetHeaterCoolerState has no OFF member —
+  // but it is the same LAN command (`operationMode: 'off'`) and must arm the same
+  // local-authoritative window.
+  await handler.setActive(Characteristic.Active.INACTIVE);
 
   // The Kumo cloud lags and replays the pre-off "cool" state.
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1, spCool: 24 }));
@@ -124,7 +150,7 @@ test('a REAL local change after an OFF still fires the mirror hook (following pr
   const seen = [];
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  await handler.setActive(Characteristic.Active.INACTIVE);
 
   // A genuine local poll (e.g. someone used the wall thermostat) reads cool — the
   // mirror MUST still follow this (the fix only blocks stale *cloud* data, never

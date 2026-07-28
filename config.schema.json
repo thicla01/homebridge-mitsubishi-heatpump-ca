@@ -45,6 +45,24 @@
         "default": false,
         "description": "Enable verbose debug logging (requires running Homebridge with -D flag)"
       },
+      "showDrySwitch": {
+        "title": "Show Dry (dehumidify) switch",
+        "type": "boolean",
+        "default": false,
+        "description": "Add a separate Dry switch tile per unit. Off by default: HeaterCooler now carries fan speed and vane on the main tile, so the extra switches are only needed if you want one-tap access to dehumidify. Only added on units whose profile reports dry support."
+      },
+      "showFanOnlySwitch": {
+        "title": "Show Fan-only switch",
+        "type": "boolean",
+        "default": false,
+        "description": "Add a separate Fan-only switch tile per unit. Off by default. Note this is fan-ONLY mode (the unit runs its fan with no heating or cooling); adjusting fan speed while heating or cooling is done on the main tile and does not need this switch. Only added on units whose profile reports vent support."
+      },
+      "exposeVaneSlat": {
+        "title": "Expose vane as a Slat service",
+        "type": "boolean",
+        "default": true,
+        "description": "Expose vane direction through a HomeKit Slat service in addition to the swing on/off control on the main tile. Only added on units whose profile reports vane support."
+      },
       "excludeDevices": {
         "title": "Hide Device IDs",
         "type": "array",
@@ -103,7 +121,7 @@
       "mirror": {
         "title": "Device Mirroring",
         "type": "array",
-        "description": "Make one unit follow another. Whenever the source changes (via any control — wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
+        "description": "Make one unit follow another. Whenever the source changes (via any control \u2014 wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
         "items": {
           "type": "object",
           "properties": {
@@ -131,7 +149,10 @@
       "type": "fieldset",
       "title": "Kumo Cloud Credentials",
       "expandable": false,
-      "items": ["username", "password"]
+      "items": [
+        "username",
+        "password"
+      ]
     },
     {
       "type": "fieldset",
@@ -164,7 +185,10 @@
       "title": "Local Control (experimental)",
       "expandable": true,
       "expanded": false,
-      "items": ["localControl", "localPollInterval"]
+      "items": [
+        "localControl",
+        "localPollInterval"
+      ]
     },
     {
       "type": "fieldset",
@@ -177,7 +201,10 @@
           "type": "array",
           "title": "Mirror Pairs",
           "buttonText": "Add Mirror Pair",
-          "items": ["mirror[].source", "mirror[].target"]
+          "items": [
+            "mirror[].source",
+            "mirror[].target"
+          ]
         }
       ]
     }

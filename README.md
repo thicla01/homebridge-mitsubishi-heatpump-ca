@@ -59,6 +59,66 @@ npm run build
 npm link
 ```
 
+## Migrating from homebridge-mitsubishi-comfort
+
+This fork keeps the config `platform` key `KumoV3` and derives accessory UUIDs from
+the device serial, so **your existing `config.json` works unchanged and your
+accessories keep their identity** — room assignment, custom names, Favorites, and
+the child-bridge pairing all survive.
+
+### What survives
+
+| Thing | Survives? |
+|---|---|
+| `config.json` platform block | ✅ unchanged, `platform` is still `KumoV3` |
+| Child-bridge pairing | ✅ pairing lives at the bridge, `_bridge.username` untouched |
+| Room assignment, names, Favorites | ✅ accessory UUID is derived from `deviceSerial` |
+| `mirror` config | ✅ keyed on device serial |
+| **Automations, scenes, Shortcuts** | ❌ **these break — see below** |
+
+### What breaks: automations and scenes
+
+The primary service changed from `Thermostat` to `HeaterCooler`. HomeKit binds
+automations to a *service and characteristic instance*, not to the accessory, so
+**every automation, scene, trigger, or Shortcut that referenced the old thermostat
+stops working and must be rebuilt** against the new tile. The accessory itself is
+still there under the same name in the same room; only the controls beneath it are
+new. There is no way to migrate these automatically.
+
+### Upgrade steps
+
+1. **Stop Homebridge.** `sudo hb-service stop`
+2. **Uninstall the old plugin from the command line**, not the Homebridge UI:
+   ```bash
+   sudo hb-service remove homebridge-mitsubishi-comfort
+   ```
+   > ⚠️ **Do not uninstall via the Homebridge UI.** Its uninstall dialog defaults to
+   > "remove config", which deletes the whole platform block *including*
+   > `_bridge.username`. Losing that changes the child bridge's identity and forces
+   > you to re-pair all your units in the Home app.
+3. **Install this plugin.**
+   ```bash
+   sudo hb-service add homebridge-mitsubishi-heatpump
+   ```
+   > ⚠️ **Never have both installed at once.** Two plugins registering the `KumoV3`
+   > platform makes Homebridge throw an ambiguous-platform error, which it swallows
+   > into a misleading "Could not find the associated plugin" and drops your
+   > accessories.
+4. **Start Homebridge.** `sudo hb-service start`
+5. Rebuild your automations and scenes against the new HeaterCooler tiles.
+
+### New in this fork
+
+- **Fan speed** on the tile (`RotationSpeed`), all five speeds. Your units report
+  `numberOfFanSpeeds: 3` but accept all five — verified on real hardware — so the
+  profile count is treated as advisory.
+- **Vane control** via `SwingMode` and a `Slat` service. The write path for this did
+  not exist upstream at all.
+- **Fahrenheit-anchored setpoints.** Setpoints snap to the exact Celsius of a whole
+  °F, so the Home app and the Mitsubishi Comfort app agree by construction.
+- **Dry and Fan-only switches are now opt-in** (`showDrySwitch` / `showFanOnlySwitch`),
+  off by default, since fan speed now lives on the main tile.
+
 ## Configuration
 
 Add the following to your Homebridge `config.json`:

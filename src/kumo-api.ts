@@ -12,26 +12,42 @@ import {
   DeviceStatus,
   DeviceProfile,
   Commands,
+  CloudCommands,
   SendCommandRequest,
   SendCommandResponse,
+  isVaneDirection,
 } from './settings';
 
 /**
- * Translate internal Commands to the cloud wire shape. The mirror path carries a
- * verbatim adapter fan-speed string in `fanSpeedRaw`; the cloud expects `fanSpeed`,
- * so fold it in (and drop `fanSpeedRaw`) before posting. Best-effort — the cloud
- * reports these same strings, so echoing one back is accepted. Returns the input
- * unchanged when there is no `fanSpeedRaw` to translate.
+ * Translate internal Commands to the cloud wire shape. Two renames:
+ *  - `fanSpeedRaw` (the mirror path's verbatim adapter string) folds into `fanSpeed`,
+ *    which is what the cloud expects. Best-effort — the cloud reports these same
+ *    strings, so echoing one back is accepted.
+ *  - `vaneDir` (the local field name) becomes `airDirection` (the cloud field name
+ *    for the same thing).
+ *
+ * Throws on an out-of-vocabulary vane direction, matching buildLocalCommandBody.
+ * Both write boundaries must validate: a bad value that merely fell through the
+ * local transport would otherwise be retried against the cloud by the local-first
+ * fallback in accessory.sendDeviceCommand, and reach the hardware anyway.
+ *
+ * Returns the input unchanged when there is nothing to translate.
  */
-export function toCloudCommands(commands: Commands): Commands {
-  if (commands.fanSpeedRaw === undefined) {
+export function toCloudCommands(commands: Commands): CloudCommands {
+  if (commands.fanSpeedRaw === undefined && commands.vaneDir === undefined) {
     return commands;
   }
-  const wire: Commands = { ...commands };
-  if (wire.fanSpeed === undefined) {
-    wire.fanSpeed = wire.fanSpeedRaw as Commands['fanSpeed'];
+  const { fanSpeedRaw, vaneDir, ...rest } = commands;
+  const wire: CloudCommands = { ...rest };
+  if (fanSpeedRaw !== undefined && wire.fanSpeed === undefined) {
+    wire.fanSpeed = fanSpeedRaw;
   }
-  delete wire.fanSpeedRaw;
+  if (vaneDir !== undefined) {
+    if (!isVaneDirection(vaneDir)) {
+      throw new Error(`Invalid vane direction "${vaneDir}" — the cloud would accept and ignore it`);
+    }
+    wire.airDirection = vaneDir;
+  }
   return wire;
 }
 
@@ -528,7 +544,15 @@ export class KumoAPI {
           this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
           this.log.info(`      Temperature: ${a.roomTemp}°C (current) → Heat: ${a.spHeat}°C, Cool: ${a.spCool}°C, Auto: ${a.spAuto}°C`);
           this.log.info(`      Status: ${a.operationMode} mode, power=${a.power}, connected=${a.connected}`);
-          this.log.info(`      Fan: ${a.fanSpeed}, Direction: ${a.airDirection}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
+          // Fan speed and vane direction are NOT in the zones payload — this line
+          // used to print "Fan: undefined, Direction: undefined" for every unit on
+          // every poll, which read as "the cloud does not expose vane data" and is
+          // why upstream issue #6 stalled. They are real fields, just on other
+          // endpoints: the streaming `device_update` event and `GET /devices/{serial}`.
+          // Only claim them here when the payload actually carried them.
+          const fan = a.fanSpeed ?? 'n/a (not in zones payload)';
+          const vane = a.airDirection ?? 'n/a (not in zones payload)';
+          this.log.info(`      Fan: ${fan}, Direction: ${vane}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
           this.log.info(`      Signal: ${a.rssi !== undefined ? a.rssi + ' dBm' : 'N/A'}`);
         });
       }

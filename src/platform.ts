@@ -30,7 +30,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly accessories: PlatformAccessory[] = [];
   private readonly accessoryHandlers: KumoThermostatAccessory[] = [];
   private readonly kumoAPI: KumoAPI;
-  private readonly kumoConfig: KumoConfig;
+  // Read by KumoThermostatAccessory for the per-accessory display options
+  // (showDrySwitch / showFanOnlySwitch / exposeVaneSlat).
+  public readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
   private readonly degradedPollInterval: number;

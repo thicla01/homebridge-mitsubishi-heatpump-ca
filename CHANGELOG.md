@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to homebridge-mitsubishi-comfort.
+All notable changes to homebridge-mitsubishi-heatpump.
+
+Entries at 1.8.2 and below are inherited from
+[homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort),
+the upstream project this was forked from.
 
 - **1.8.2** - Keep retrying for local credentials; stop a scene setpoint from rewriting a mirror target (July 2026)
   - Fixed: **units silently stranded on the cloud for the life of the process.** The local password arrives only via the `adapter_update` socket event, and `initLocalControl` waited a fixed 25s for it before giving up for good. Measured on real hardware 2026-07-26: of five units, two answered the nudge in 6s, one took **65s** (well past the window), and two never answered at all — so a healthy unit could miss the window by timing alone and never get local control, losing the fast LAN path and its per-unit cloud fallback

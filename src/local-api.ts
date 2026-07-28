@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import fetch from 'node-fetch';
 import { Logger } from 'homebridge';
-import { Commands, DeviceStatus } from './settings';
+import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
 
 /**
  * Local LAN control of Mitsubishi Kumo adapters.
@@ -43,7 +43,15 @@ export interface LocalDeviceCreds {
   cryptoSerial: string; // hex, >= 9 bytes
 }
 
-/** Round to 0.1°C — strips float noise; the units honor 0.1 granularity (verified). */
+/**
+ * Round to 0.1°C — strips float noise; the units honor 0.1 granularity (verified).
+ *
+ * Belt and braces only. Setpoint quantization is now owned by `src/temperature.ts`
+ * and applied in accessory.ts BEFORE sendDeviceCommand, so every transport gets the
+ * same value. This stays as a defensive last resort against a caller that reaches
+ * the local transport without going through that path; it must never be the only
+ * quantizer, or local and cloud writes would disagree again.
+ */
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
@@ -78,8 +86,14 @@ export function computeLocalToken(passwordB64: string, cryptoSerialHex: string, 
 
 /**
  * Build the local command body for a set of our cloud-shaped Commands.
- * Maps `operationMode` → `mode`, rounds setpoints to 0.1°C, and DROPS `power`
- * (local control expresses on/off purely through `mode`).
+ * Maps `operationMode` → `mode` and `vaneDir` → `vaneDir`, rounds setpoints to
+ * 0.1°C, and DROPS `power` (local control expresses on/off purely through `mode`).
+ *
+ * Throws on an out-of-vocabulary vane direction or fan speed. This is the only
+ * validation that will ever happen: the adapter answers HTTP 200 to a write of
+ * `vaneDir:"notARealVane"` and silently ignores it, so dropping a bad value here
+ * would produce an invisible no-op — the unit would simply never move, with no
+ * error anywhere. Throwing also aborts before any I/O, so nothing is half-written.
  */
 export function buildLocalCommandBody(commands: Commands): Buffer {
   const status: Record<string, unknown> = {};
@@ -94,28 +108,28 @@ export function buildLocalCommandBody(commands: Commands): Buffer {
     status.spCool = round1(commands.spCool);
   }
   if (commands.fanSpeedRaw !== undefined) {
-    // Mirror path: the source's raw adapter fan-speed string (e.g. 'quiet',
-    // 'powerful') is already in the local vocabulary — write it verbatim rather
-    // than collapsing it through the coarse enum (which would mis-map, since
-    // 'low'/'auto' overlap between the two vocabularies with different meanings).
+    // Mirror path: a verbatim fan-speed string observed on the source unit. Written
+    // as-is and NOT validated — the source reported it, so the hardware produces it,
+    // even if it is a value this fork has not enumerated. Takes precedence over
+    // `fanSpeed` (a mirror push must copy the source faithfully).
     status.fanSpeed = commands.fanSpeedRaw;
   } else if (commands.fanSpeed !== undefined) {
-    status.fanSpeed = mapFanSpeedToLocal(commands.fanSpeed);
+    // Same vocabulary locally and in the cloud since the coarse auto/low/medium/high
+    // enum was removed, so there is nothing left to translate — just validate.
+    if (!isFanSpeed(commands.fanSpeed)) {
+      throw new Error(`Invalid fan speed "${commands.fanSpeed}" — the adapter would accept and ignore it`);
+    }
+    status.fanSpeed = commands.fanSpeed;
+  }
+  if (commands.vaneDir !== undefined) {
+    if (!isVaneDirection(commands.vaneDir)) {
+      throw new Error(`Invalid vane direction "${commands.vaneDir}" — the adapter would accept and ignore it`);
+    }
+    status.vaneDir = commands.vaneDir; // local `vaneDir` == cloud `airDirection`
   }
   // Note: commands.power is intentionally ignored — `mode` carries on/off locally.
 
   return Buffer.from(JSON.stringify({ c: { indoorUnit: { status } } }), 'utf8');
-}
-
-/** Our coarse cloud fan-speed vocabulary → the adapter's local fan-speed strings. */
-function mapFanSpeedToLocal(speed: NonNullable<Commands['fanSpeed']>): string {
-  switch (speed) {
-    case 'auto': return 'auto';
-    case 'low': return 'quiet';
-    case 'medium': return 'low';
-    case 'high': return 'powerful';
-    default: return 'auto';
-  }
 }
 
 /**
@@ -131,8 +145,14 @@ export function mapLocalStatus(local: Record<string, unknown>): Partial<DeviceSt
     spHeat: local.spHeat as number,
     spCool: local.spCool as number,
     spAuto: null, // these units have no spAuto; auto uses the spHeat/spCool band
-    fanSpeed: (local.fanSpeed as string) ?? 'auto',
-    airDirection: (local.vaneDir as string) ?? 'auto', // local `vaneDir` == cloud `airDirection`
+    // Both are kept as plain strings rather than narrowed to FanSpeed/VaneDirection.
+    // This is inbound device data behind an unchecked cast, so a closed union here
+    // would be a claim the compiler cannot enforce, and collapsing an unrecognized
+    // value to 'auto' would misreport the unit's real position. The write path
+    // (buildLocalCommandBody) is where the vocabularies are enforced. Verified live:
+    // vaneDir reports one of VANE_DIRECTIONS on all four units.
+    fanSpeed: typeof local.fanSpeed === 'string' ? local.fanSpeed : 'auto',
+    airDirection: typeof local.vaneDir === 'string' ? local.vaneDir : 'auto', // local `vaneDir` == cloud `airDirection`
     filterDirty: local.filterDirty === true,
     defrost: local.defrost === true,
     standby: local.standby === true,
