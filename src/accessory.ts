@@ -3,7 +3,7 @@ import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
   POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
-  FanSpeed, FAN_SPEEDS, isFanSpeed, VaneDirection, isVaneDirection,
+  FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 
@@ -693,8 +693,14 @@ export class KumoThermostatAccessory {
 
   /**
    * Called by the platform's local poller with a locally-read status.
-   * The local API has no humidity (it lives in a separate sensors/MHK2 query),
-   * so we preserve the last humidity from streaming rather than wiping it.
+   * Humidity is not in the local `indoorUnit.status`, but LocalKumoClient now
+   * fetches it from the unit's paired sensor (or an MHK2) in the same poll, so a
+   * local read usually carries one. Fall back to the last streaming value when it
+   * does not, rather than wiping it — a unit with no sensor has no local source.
+   *
+   * This matters under local control specifically: cloud updates are dropped for
+   * LOCAL_AUTHORITATIVE_MS after every local read, so a cloud-only humidity would
+   * go stale or never arrive at all on a locally-polled unit.
    */
   public updateFromLocal(status: Partial<DeviceStatus>) {
     if (status.roomTemp === undefined || status.roomTemp === null) {
@@ -710,7 +716,7 @@ export class KumoThermostatAccessory {
         spHeat: status.spHeat!,
         spCool: status.spCool!,
         spAuto: status.spAuto ?? null,
-        humidity: this.currentStatus?.humidity ?? null, // local has none — keep streaming's
+        humidity: status.humidity ?? this.currentStatus?.humidity ?? null,
         power: status.power!,
         operationMode: status.operationMode!,
         previousOperationMode: status.operationMode!,
@@ -718,7 +724,8 @@ export class KumoThermostatAccessory {
         airDirection: status.airDirection || 'auto',
         connected: true,
         isSimulator: false,
-        hasSensor: this.currentStatus?.humidity !== null && this.currentStatus?.humidity !== undefined,
+        hasSensor: (status.humidity ?? this.currentStatus?.humidity) !== null &&
+          (status.humidity ?? this.currentStatus?.humidity) !== undefined,
         hasMhk2: false,
         scheduleOwner: 'adapter',
         scheduleHoldEndTime: 0,
@@ -1263,10 +1270,21 @@ export class KumoThermostatAccessory {
 
   // ---- HeaterCooler: fan speed --------------------------------------------
 
-  /** Fan speed -> RotationSpeed percent. `auto` is 0; see ROTATION_STEP. */
+  /**
+   * Fan speed -> RotationSpeed percent. `auto` is 0; see ROTATION_STEP.
+   *
+   * Case-insensitive on the way in: pykumo reports `Low` (capitalised) on
+   * 4-speed units, and an exact match would score that -1 and render it as auto.
+   */
   private fanSpeedToRotation(speed: string): number {
-    const i = FAN_SPEEDS.indexOf(speed as FanSpeed);
-    return i < 0 ? 0 : i * ROTATION_STEP;
+    const known = normalizeFanSpeed(speed);
+    if (!known) {
+      this.platform.log.debug(
+        `${this.accessory.displayName}: unrecognised fan speed "${speed}" from the unit`,
+      );
+      return 0;
+    }
+    return FAN_SPEEDS.indexOf(known) * ROTATION_STEP;
   }
 
   /** RotationSpeed percent -> fan speed, snapped to the nearest detent. */

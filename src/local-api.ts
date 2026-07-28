@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { Agent } from 'http';
 import fetch from 'node-fetch';
 import { Logger } from 'homebridge';
 import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
@@ -36,6 +37,45 @@ const W_PARAM = Buffer.from(
 
 /** The query body for a full status read (empty leaves = "report everything"). */
 export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}', 'utf8');
+
+/**
+ * A dedicated agent with keep-alive OFF.
+ *
+ * Node's global agent defaults to `keepAlive: true` with a 5s timeout, so every
+ * request would park a live TCP connection on the adapter for 5s after the reply.
+ * These WiFi adapters have a very small connection table and treat a parked socket
+ * as an occupied slot — both reference implementations tear the connection down
+ * after every exchange for exactly this reason (pykumo `_drop_session()` with
+ * pool_maxsize=1; mitsubishi-comfort `disconnect()` in a finally). Reusing a
+ * pooled socket also produces the failure mode in `request` below: the adapter
+ * closes an idle connection and the next write on it fails.
+ */
+const LOCAL_AGENT = new Agent({ keepAlive: false, maxSockets: 1 });
+
+/**
+ * Why a local request produced no data.
+ *
+ * The distinction that matters is `auth` versus `busy`. Discovery sweeps the
+ * subnet and asks every host to authenticate a token; only `auth` means "this is
+ * some other Kumo unit, stop considering this IP". `busy` covers the adapter's
+ * transient self-reported failures — it is out of memory or mid-serialization —
+ * which say nothing about identity. Collapsing the two (as before) let a unit
+ * that happened to be busy during the sweep get written off as a stranger and
+ * stranded on cloud control.
+ */
+export type LocalErrorKind = 'none' | 'transport' | 'auth' | 'busy' | 'malformed' | 'no-creds';
+
+/** Map an adapter `_api_error` string onto a kind. Vocabulary from pykumo. */
+export function classifyApiError(code: string): LocalErrorKind {
+  if (code === 'device_authentication_error') {
+    return 'auth';
+  }
+  // `serializer_error` and `__no_memory` are the adapter saying "not right now".
+  if (code === 'serializer_error' || code === '__no_memory') {
+    return 'busy';
+  }
+  return 'malformed';
+}
 
 export interface LocalDeviceCreds {
   ip: string;
@@ -205,48 +245,97 @@ export class LocalKumoClient {
    * (timeout, network error, auth error, malformed reply). Null means "no data" —
    * never interpret it as a device state.
    */
+  /** Units that reported no sensor and no MHK2; stop paying for the lookup. */
+  private readonly noSensor: Set<string> = new Set();
+  /** Last seen tempSource|activeThermistor per unit, to detect a source change. */
+  private readonly lastTempSource: Map<string, string> = new Map();
+
   async request(serial: string, body: Buffer): Promise<Record<string, unknown> | null> {
+    return (await this.requestDetailed(serial, body)).result;
+  }
+
+  /**
+   * Send a signed PUT, retrying once on a transport error.
+   *
+   * The retry is safe because every command this plugin sends is an idempotent
+   * absolute-value write (a setpoint, a mode, a fan speed — never a delta), so
+   * re-sending can only re-assert the same state. Both reference implementations
+   * retry once for the same reason. The failure it targets is a connection the
+   * adapter closed while it sat idle; a fresh one almost always succeeds.
+   *
+   * Returns the `r` payload plus a classification of *why* it failed, which
+   * discovery needs in order to tell "not this device" from "busy right now".
+   */
+  async requestDetailed(
+    serial: string,
+    body: Buffer,
+  ): Promise<{ result: Record<string, unknown> | null; error: LocalErrorKind }> {
     const creds = this.creds.get(serial);
     if (!creds) {
-      return null;
+      return { result: null, error: 'no-creds' };
     }
 
     return this.withLock(serial, async () => {
-      const token = computeLocalToken(creds.password, creds.cryptoSerial, body);
-      try {
-        const fetchPromise = fetch(`http://${creds.ip}/api?m=${token}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/plain, */*',
-          },
-          body,
-        });
-        // node-fetch v3 dropped the `timeout` option, so race the request against a
-        // timer — an unreachable unit must not stall the poll. The losing fetch is
-        // left to settle in the background; swallow its eventual rejection.
-        fetchPromise.catch(() => undefined);
-        const res = await Promise.race([
-          fetchPromise,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), this.timeoutMs)),
-        ]);
-        if (!res) {
-          this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: timed out after ${this.timeoutMs}ms`);
-          return null;
+      let last: LocalErrorKind = 'transport';
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const outcome = await this.attempt(serial, creds, body);
+        if (outcome.result) {
+          return outcome;
         }
-        const json = await res.json().catch(() => null) as Record<string, unknown> | null;
-        if (json && json.r && typeof json.r === 'object') {
-          return json.r as Record<string, unknown>;
+        last = outcome.error;
+        // Only a transport failure is worth a second try. An auth rejection or a
+        // well-formed error reply will say the same thing again.
+        if (outcome.error !== 'transport') {
+          return outcome;
         }
-        if (json && json._api_error) {
-          this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: api error ${json._api_error}`);
-        }
-        return null;
-      } catch (err) {
-        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: request failed (${(err as Error).message})`);
-        return null;
+        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: transport failure, retrying once`);
       }
+      return { result: null, error: last };
     });
+  }
+
+  private async attempt(
+    serial: string,
+    creds: LocalDeviceCreds,
+    body: Buffer,
+  ): Promise<{ result: Record<string, unknown> | null; error: LocalErrorKind }> {
+    const token = computeLocalToken(creds.password, creds.cryptoSerial, body);
+    try {
+      const fetchPromise = fetch(`http://${creds.ip}/api?m=${token}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*',
+        },
+        body,
+        agent: LOCAL_AGENT,
+      } as Parameters<typeof fetch>[1]);
+      // node-fetch v3 dropped the `timeout` option, so race the request against a
+      // timer — an unreachable unit must not stall the poll. The losing fetch is
+      // left to settle in the background; swallow its eventual rejection.
+      fetchPromise.catch(() => undefined);
+      const res = await Promise.race([
+        fetchPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), this.timeoutMs)),
+      ]);
+      if (!res) {
+        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: timed out after ${this.timeoutMs}ms`);
+        return { result: null, error: 'transport' };
+      }
+      const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+      if (json && json.r && typeof json.r === 'object') {
+        return { result: json.r as Record<string, unknown>, error: 'none' };
+      }
+      if (json && json._api_error) {
+        const kind = classifyApiError(String(json._api_error));
+        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: api error ${json._api_error} (${kind})`);
+        return { result: null, error: kind };
+      }
+      return { result: null, error: 'malformed' };
+    } catch (err) {
+      this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: request failed (${(err as Error).message})`);
+      return { result: null, error: 'transport' };
+    }
   }
 
   /** Read and map the unit's current status locally, or null if unreachable. */
@@ -257,7 +346,102 @@ export class LocalKumoClient {
     if (!status || status.roomTemp === undefined) {
       return null;
     }
-    return mapLocalStatus(status);
+    const mapped = mapLocalStatus(status);
+
+    // Only ask for the remote sensor when the unit says one is driving the
+    // reading. `tempSource`/`activeThermistor` are 'sensorN' on a unit with a
+    // paired wireless sensor and 'unset' on one running off its own thermistor —
+    // no point spending a request on a unit that has nothing to report.
+    if (this.deviceHasSensor(serial, status)) {
+      const extra = await this.getSensorReadings(serial);
+      if (extra) {
+        if (extra.humidity !== undefined) {
+          mapped.humidity = extra.humidity;
+        }
+        // Prefer the sensor's own temperature over the unit's `roomTemp`.
+        // The unit quantizes to 0.5°C before reporting; the sensor gives ~6
+        // decimals. Measured 2026-07-27: sensor 22.648632°C against roomTemp
+        // 22.5. In °F that is the difference between an unambiguous 72.77 (both
+        // apps show 73) and exactly 72.50, which one app rounds to 73 while the
+        // other truncates to 72. The finer value removes the ambiguity.
+        if (extra.temperature !== undefined) {
+          mapped.roomTemp = extra.temperature;
+        }
+      }
+    }
+    return mapped;
+  }
+
+  /**
+   * Whether this unit's reading is coming from a paired wireless sensor.
+   *
+   * Also resets the `noSensor` latch when the unit's temperature source CHANGES,
+   * which is the only event that can make a previously fruitless lookup worth
+   * retrying (a sensor being paired, or one dropping off). Clearing the latch
+   * merely because the unit currently claims a sensor would defeat it entirely:
+   * a unit reporting `tempSource: sensor0` whose sensors leaf returns nothing
+   * usable would be re-probed on every single poll, forever.
+   */
+  private deviceHasSensor(serial: string, status: Record<string, unknown>): boolean {
+    const src = typeof status.tempSource === 'string' ? status.tempSource : '';
+    const active = typeof status.activeThermistor === 'string' ? status.activeThermistor : '';
+    const signature = `${src}|${active}`;
+
+    const previous = this.lastTempSource.get(serial);
+    if (previous !== undefined && previous !== signature) {
+      this.noSensor.delete(serial);
+    }
+    this.lastTempSource.set(serial, signature);
+
+    return src.startsWith('sensor') || active.startsWith('sensor');
+  }
+
+  /**
+   * Read the paired sensor (and, failing that, an MHK2 wall thermostat).
+   *
+   * Humidity is not in `indoorUnit.status` at all — upstream therefore left it
+   * cloud-only, which is wrong under local control: cloud updates are dropped for
+   * 45s after every local read, so a local-authoritative unit's humidity would go
+   * stale or never arrive. Both reference implementations read it from these
+   * leaves in the same poll.
+   *
+   * Sensor slots are consecutive; the first slot with no `uuid` ends the list.
+   * A unit that reports neither sensors nor MHK2 is remembered in `noSensor` so
+   * the poll stops paying for the lookup, mirroring mitsubishi-comfort's latch.
+   */
+  private async getSensorReadings(
+    serial: string,
+  ): Promise<{ humidity?: number | null; temperature?: number } | null> {
+    if (this.noSensor.has(serial)) {
+      return null;
+    }
+
+    for (let i = 0; i < 4; i++) {
+      const r = await this.request(serial, Buffer.from(`{"c":{"sensors":{"${i}":{}}}}`, 'utf8'));
+      const sensors = r?.sensors as Record<string, unknown> | undefined;
+      const sensor = sensors?.[String(i)] as Record<string, unknown> | undefined;
+      if (!sensor || !sensor.uuid) {
+        break; // slots are consecutive: no uuid here means no more sensors
+      }
+      const temperature = typeof sensor.temperature === 'number' ? sensor.temperature : undefined;
+      const humidity = typeof sensor.humidity === 'number' ? sensor.humidity : undefined;
+      if (temperature !== undefined || humidity !== undefined) {
+        return { temperature, humidity };
+      }
+    }
+
+    // No usable sensor — try an MHK2 wall thermostat, which reports humidity only.
+    const r = await this.request(serial, Buffer.from('{"c":{"mhk2":{"status":{}}}}', 'utf8'));
+    const mhk2 = r?.mhk2 as Record<string, unknown> | undefined;
+    const st = mhk2?.status as Record<string, unknown> | undefined;
+    const indoorHumid = st?.indoorHumid;
+    if (typeof indoorHumid === 'number') {
+      return { humidity: indoorHumid };
+    }
+
+    this.noSensor.add(serial);
+    this.log.debug(`[LOCAL] ${serial}: no sensor or MHK2 humidity source — not asking again`);
+    return null;
   }
 
   /** Send a control command locally. Returns true iff the unit acknowledged with `r`. */
@@ -299,8 +483,15 @@ type ProbeResult = 'match' | 'kumo' | null;
 /**
  * Probe one IP with one device's token via a status read:
  *  - 'match' → the adapter authenticated this device (returns r.indoorUnit): IP found
- *  - 'kumo'  → a Kumo adapter, but a different device (returns _api_error)
- *  - null    → unreachable / not a Kumo adapter
+ *  - 'kumo'  → a Kumo adapter that rejected THIS device's token: a different unit
+ *  - null    → unreachable, not a Kumo adapter, or a Kumo adapter that was busy
+ *
+ * Only `device_authentication_error` proves the IP belongs to a different unit.
+ * The adapter's other self-reported errors (`serializer_error`, `__no_memory`)
+ * mean "ask me again" and say nothing about identity — previously they were all
+ * read as 'kumo', so a unit that happened to be out of memory during the sweep
+ * was written off and left on cloud control until a later retry re-swept it.
+ * Returning null instead leaves the IP eligible to be probed again.
  */
 async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
   try {
@@ -309,7 +500,8 @@ async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: numbe
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
       body: STATUS_READ_BODY,
-    });
+      agent: LOCAL_AGENT,
+    } as Parameters<typeof fetch>[1]);
     fetchPromise.catch(() => undefined);
     const res = await Promise.race([
       fetchPromise,
@@ -323,7 +515,7 @@ async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: numbe
       return 'match';
     }
     if (json && json._api_error) {
-      return 'kumo';
+      return classifyApiError(String(json._api_error)) === 'auth' ? 'kumo' : null;
     }
     return null;
   } catch {

@@ -224,6 +224,27 @@ export function isFanSpeed(v: unknown): v is FanSpeed {
   return typeof v === 'string' && (FAN_SPEEDS as readonly string[]).includes(v);
 }
 
+/**
+ * Match a fan speed REPORTED by a unit against our vocabulary, ignoring case.
+ *
+ * Read path only. pykumo lists both `low` and `Low` in its vocabulary and returns
+ * the capitalised form for units reporting `numberOfFanSpeeds: 4`, so an exact
+ * match would miss it: the speed would fall through to index -1 and render as
+ * "auto" on the tile, and the real speed could never be selected again. Writes
+ * still go out in our canonical lower-case form, which is what the adapter
+ * accepted on every unit tested.
+ *
+ * Returns undefined for a genuinely unknown speed — callers must not silently
+ * treat that as 'auto', since it would misreport the unit's actual state.
+ */
+export function normalizeFanSpeed(v: unknown): FanSpeed | undefined {
+  if (typeof v !== 'string') {
+    return undefined;
+  }
+  const lower = v.toLowerCase();
+  return FAN_SPEEDS.find((f) => f.toLowerCase() === lower);
+}
+
 export interface Commands {
   spHeat?: number;
   spCool?: number;
