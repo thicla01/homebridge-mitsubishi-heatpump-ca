@@ -353,3 +353,54 @@ test('registering SwingMode publishes it to HomeKit', () => {
     'adding SwingMode after publish must re-publish the accessory',
   );
 });
+
+// ---- Slats must be opt-IN ------------------------------------------------
+//
+// Apple Home categorises Slats as a WINDOW COVERING. Shipped on by default, the
+// vane services joined the blinds/shades grouping of a house with real Matter
+// blinds — four heat-pump louvres showed up among the window coverings, where a
+// room-level blinds control can reach them. Observed live 2026-07-27.
+//
+// Swing on/off stays on the HeaterCooler tile via SwingMode either way; the
+// Slats service only adds discrete tilt angles. Defaulting it off is the whole
+// point, so these tests guard the default specifically, not just the plumbing.
+
+test('no Slats service unless exposeVaneSlat is explicitly true', () => {
+  const { accessory, applyProfile } = makeHarness({});   // no display options at all
+  applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
+
+  assert.strictEqual(accessory.getService(Service.Slats), null,
+    'a vane-capable unit must NOT get a Slats service by default — it would land ' +
+    'in the Home app window-covering group alongside real blinds');
+});
+
+test('exposeVaneSlat: false is honoured explicitly too', () => {
+  const { accessory, applyProfile } = makeHarness(
+    { showDrySwitch: false, showFanOnlySwitch: false, exposeVaneSlat: false });
+  applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
+
+  assert.strictEqual(accessory.getService(Service.Slats), null);
+});
+
+test('opting in still works for anyone who wants fixed vane angles', () => {
+  const { accessory, applyProfile } = makeHarness(
+    { showDrySwitch: false, showFanOnlySwitch: false, exposeVaneSlat: true });
+  applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
+
+  assert.notStrictEqual(accessory.getService(Service.Slats), null,
+    'the capability is not removed, only made opt-in');
+});
+
+test('swing stays available on the main tile with Slats off', () => {
+  // The important half of the fix: turning the Slats service off must not cost
+  // the user vane control entirely — SwingMode is registered on the HeaterCooler
+  // itself and is unaffected by exposeVaneSlat.
+  const { heaterCooler, applyProfile } = makeHarness({});
+  applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
+
+  // `chars` is the mock's record of every characteristic the code actually
+  // reached for — inspecting it does not create one, unlike getCharacteristic.
+  const registered = [...heaterCooler.chars.keys()].map((c) => c._name);
+  assert.ok(registered.includes('SwingMode'),
+    `SwingMode must still be registered on the HeaterCooler when Slats is off; got ${registered}`);
+});

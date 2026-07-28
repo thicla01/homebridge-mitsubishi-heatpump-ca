@@ -38,7 +38,19 @@ export interface KumoConfig {
   showDrySwitch?: boolean;
   /** Add a per-unit "Fan" switch (fan-only mode, no heating/cooling). Default false. */
   showFanOnlySwitch?: boolean;
-  /** Expose vane direction as a HomeKit Slats service in addition to SwingMode. Default true. */
+  /**
+   * Expose vane direction as a HomeKit Slats service in addition to SwingMode.
+   * Default FALSE, deliberately.
+   *
+   * Apple Home categorises Slats as a WINDOW COVERING. On a home with real
+   * blinds or shades, a vane Slats service joins their room grouping and their
+   * category summary tile, so the heat pump's louvre starts appearing among the
+   * blinds — and a room-level "close the blinds" control can reach it. Observed
+   * 2026-07-27 on a house with Matter blinds paired directly to HomeKit.
+   *
+   * Swing on/off is always available on the HeaterCooler tile itself via
+   * SwingMode; this option only adds the discrete tilt positions.
+   */
   exposeVaneSlat?: boolean;
   // Device mirroring (opt-in). Each pair makes `target` follow `source`: whenever
   // the source's commanded state changes (via any control path — wall thermostat,

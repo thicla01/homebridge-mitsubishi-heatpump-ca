@@ -319,8 +319,10 @@ export class KumoThermostatAccessory {
       this.publishStructureChange();
     }
 
-    // Discrete vane positions, opt-out via config (default on).
-    const wantSlats = this.platform.kumoConfig.exposeVaneSlat !== false;
+    // Discrete vane positions, opt-IN via config (default off). Apple Home files
+    // Slats under window coverings, so on by default it pollutes the blinds
+    // grouping of any home that has real shades. See KumoConfig.exposeVaneSlat.
+    const wantSlats = this.platform.kumoConfig.exposeVaneSlat === true;
     if (profile.hasVaneDir && wantSlats) {
       this.setupSlatsService();
     } else {

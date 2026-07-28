@@ -60,8 +60,8 @@
       "exposeVaneSlat": {
         "title": "Expose vane as a Slat service",
         "type": "boolean",
-        "default": true,
-        "description": "Expose vane direction through a HomeKit Slat service in addition to the swing on/off control on the main tile. Only added on units whose profile reports vane support."
+        "default": false,
+        "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main tile regardless of this setting. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
       },
       "excludeDevices": {
         "title": "Hide Device IDs",

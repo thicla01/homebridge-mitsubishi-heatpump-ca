@@ -112,12 +112,25 @@ new. There is no way to migrate these automatically.
 - **Fan speed** on the tile (`RotationSpeed`), all five speeds. Your units report
   `numberOfFanSpeeds: 3` but accept all five — verified on real hardware — so the
   profile count is treated as advisory.
-- **Vane control** via `SwingMode` and a `Slat` service. The write path for this did
-  not exist upstream at all.
+- **Vane control** via `SwingMode` on the main tile. The write path for this did not
+  exist upstream at all. Discrete tilt positions are available through an optional
+  `Slats` service (`exposeVaneSlat`), **off by default** — see the warning below.
 - **Fahrenheit-anchored setpoints.** Setpoints snap to the exact Celsius of a whole
   °F, so the Home app and the Mitsubishi Comfort app agree by construction.
 - **Dry and Fan-only switches are now opt-in** (`showDrySwitch` / `showFanOnlySwitch`),
   off by default, since fan speed now lives on the main tile.
+
+### ⚠️ A note on `exposeVaneSlat`
+
+Apple Home categorises a HAP `Slats` service as a **window covering**. Turned on, each
+unit's vane appears in the same Home app grouping as your real blinds and shades — it
+lands in their rooms' window-covering summary, and a room-level "close the blinds"
+control can reach your louvres. This was observed on a house with Matter blinds paired
+directly to HomeKit.
+
+It is therefore **off by default**. Swing on/off is always available on the HeaterCooler
+tile itself via `SwingMode` regardless; the option only adds fixed tilt angles. Enable it
+only if you want those and have no window coverings in HomeKit to collide with.
 
 ## Configuration
 
