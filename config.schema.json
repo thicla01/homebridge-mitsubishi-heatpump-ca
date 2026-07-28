@@ -2,8 +2,8 @@
   "pluginAlias": "KumoV3",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Homebridge plugin for Mitsubishi heat pumps using Kumo Cloud v3 API.",
-  "footerDisplay": "For help and support, visit the [GitHub repository](https://github.com/burtherman/homebridge-mitsubishi-comfort).",
+  "headerDisplay": "Homebridge plugin for Mitsubishi ductless heat pumps (MLZ/MSZ) over the Mitsubishi Comfort v3 API. Exposes each unit as a HeaterCooler with fan speed and vane control.",
+  "footerDisplay": "For help and support, visit the [GitHub repository](https://github.com/ukaratay/homebridge-mitsubishi-heatpump).",
   "schema": {
     "type": "object",
     "properties": {

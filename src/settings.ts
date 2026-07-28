@@ -1,5 +1,9 @@
+// NOTE: PLATFORM_NAME is deliberately left as 'KumoV3' across the fork. It is the
+// `platform` key in every existing user's config.json; changing it would orphan
+// their configured platform block and re-create every accessory. The npm package
+// rename does not require it (Homebridge resolves plugin renames separately).
 export const PLATFORM_NAME = 'KumoV3';
-export const PLUGIN_NAME = 'homebridge-mitsubishi-comfort';
+export const PLUGIN_NAME = 'homebridge-mitsubishi-heatpump';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';
 export const SOCKET_BASE_URL = 'https://socket-prod.kumocloud.com';
 export const TOKEN_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes (actual token lifetime)

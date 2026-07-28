@@ -1,4 +1,14 @@
-# Homebridge Mitsubishi Comfort
+# Homebridge Mitsubishi Heat Pump
+
+> **Fork notice.** This is a hard fork of
+> [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort)
+> at v1.8.2. It exposes each unit as a HomeKit **HeaterCooler** (not a Thermostat),
+> adds **fan speed** and **vane** control, and uses a **Fahrenheit-anchored**
+> setpoint grid. The config `platform` key is still `KumoV3`, so an existing
+> config.json keeps working — but see [Migrating from
+> homebridge-mitsubishi-comfort](#migrating-from-homebridge-mitsubishi-comfort)
+> before upgrading: the service-type change breaks existing automations.
+
 
 A Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API.
 
@@ -36,14 +46,14 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 ### Install from NPM
 
 ```bash
-npm install -g homebridge-mitsubishi-comfort
+npm install -g homebridge-mitsubishi-heatpump
 ```
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/burtherman/homebridge-mitsubishi-comfort.git
-cd homebridge-mitsubishi-comfort
+git clone https://github.com/ukaratay/homebridge-mitsubishi-heatpump.git
+cd homebridge-mitsubishi-heatpump
 npm install
 npm run build
 npm link
@@ -308,21 +318,15 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 ## License
 
-Apache License 2.0
+Apache License 2.0 — see [LICENSE](LICENSE).
 
-Copyright 2024
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+This is a fork of [burtherman/homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump)
+(forked at v1.8.2). The upstream repository shipped no license file and declared
+MIT in `package.json` while reproducing Apache-2.0 boilerplate in its README;
+Apache-2.0 is the only choice valid under either reading. Attribution, the
+statement of changes required by Apache-2.0 section 4(b), and third-party
+notices (including the pykumo port that upstream did not attribute) are in
+[NOTICE](NOTICE).
 
 ## Credits
 

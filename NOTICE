@@ -1,0 +1,93 @@
+homebridge-mitsubishi-heatpump
+Copyright 2026 Durmus Karatay
+
+This product includes software developed as part of the following projects.
+
+================================================================================
+1. homebridge-mitsubishi-comfort (upstream)
+================================================================================
+
+This work is a fork of:
+
+    https://github.com/burtherman/homebridge-mitsubishi-comfort
+    Copyright (c) burtherman
+
+Forked at upstream v1.8.2 (commit 49549b7).
+
+LICENSE AMBIGUITY IN THE UPSTREAM WORK
+--------------------------------------
+As of the fork point, the upstream repository contained no LICENSE, COPYING, or
+NOTICE file in any commit on any branch, and its published npm tarballs contain
+no license file. It shipped two conflicting license declarations:
+
+  - package.json declared:  "license": "MIT"
+  - README.md reproduced the Apache License 2.0 boilerplate, under the heading
+    "## License / Apache License 2.0 / Copyright 2024"
+
+Because the governing license could not be determined with certainty, this fork
+is distributed under the Apache License, Version 2.0. That choice is valid under
+either reading of the upstream grant: if the upstream work is MIT-licensed, the
+MIT permission to sublicense allows redistribution under Apache-2.0 with the
+original notice preserved; if the upstream work is Apache-2.0-licensed, then
+Apache-2.0 is required. Distributing under MIT alone would not be safe under the
+second reading.
+
+STATEMENT OF CHANGES (Apache-2.0 section 4(b))
+----------------------------------------------
+Files in this distribution have been modified from the upstream work. The
+principal changes are:
+
+  - The primary HomeKit service was changed from Thermostat to HeaterCooler.
+  - Fan speed control was added (HAP RotationSpeed).
+  - Vane control was added (HAP SwingMode and Slat), including the device
+    write path, which did not exist upstream.
+  - Setpoint handling was changed to a Fahrenheit-anchored quantization grid.
+  - Dry and Fan-only switches were made opt-in via configuration.
+  - A single TargetTemperature write in AUTO no longer collapses the setpoint
+    band (originally submitted upstream as PR #23).
+
+See CHANGELOG.md for the full list.
+
+================================================================================
+2. pykumo
+================================================================================
+
+The local LAN transport's security-token algorithm in src/local-api.ts is a port
+of the corresponding routine in pykumo, used under the MIT License:
+
+    https://github.com/dlarrick/pykumo
+    Copyright (c) 2019 Doug Larrick
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+This attribution was absent from the upstream repository and is added here.
+
+================================================================================
+3. Independent verification sources (no code derived)
+================================================================================
+
+The local protocol's field vocabulary was verified against, but not copied from:
+
+  - nikolairahimi/mitsubishi-comfort (no declared license; used only to confirm
+    field names already observed on real hardware)
+  - The Mitsubishi Comfort v3 API as observed directly from the author's own
+    devices.
+
+Vane and fan-speed value domains were established empirically against
+MLZ-KX06NL-U1, MLZ-KX12NL-U1 and MSZ-GX06NL-U1 hardware.
