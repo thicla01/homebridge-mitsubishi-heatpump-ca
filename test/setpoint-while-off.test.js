@@ -210,3 +210,50 @@ test('setting a target temperature while HEATING still sends the setpoint (contr
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
     'sends the quantized heat setpoint with no spurious fields');
 });
+
+// ---- Fan and vane are NOT setpoints --------------------------------------
+//
+// A bare, mode-less SETPOINT write resumes a powered-off unit on the LAN path,
+// which is what the guard above exists for (upstream 1.7.2). Fan speed and vane
+// do not behave that way. Verified live 2026-07-27: with the Garage powered off,
+// all six named fan speeds and all seven vane positions were written in sequence
+// and the unit reported mode=off throughout.
+//
+// Both are stored preferences that apply when the unit next runs, so blocking
+// them on an idle unit made a perfectly ordinary request — "set every fan to
+// quiet" — silently skip whichever units happened to be off. What must still be
+// blocked is a command trailing an off inside a concurrent scene burst; that is
+// covered in off-scene-setpoint-race.test.js and guarded by offInFlight().
+
+test('a fan-speed change reaches a unit that is merely OFF', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setRotationSpeed(20); // superQuiet
+
+  assert.strictEqual(sendCommandCalls.length, 1,
+    'an idle unit must still accept a fan-speed preference');
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' },
+    'and it carries no mode, so it cannot revive the unit');
+});
+
+test('a vane change reaches a unit that is merely OFF', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setSwingMode(1); // SWING_ENABLED
+
+  assert.strictEqual(sendCommandCalls.length, 1);
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { vaneDir: 'swing' });
+});
+
+test('but a setpoint still does NOT reach an OFF unit (the guard is intact)', async () => {
+  // Control: proves the two tests above narrowed the guard rather than removing it.
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setHeatingThresholdTemperature(21);
+
+  assert.strictEqual(sendCommandCalls.length, 0,
+    'a bare setpoint on an off unit is still suppressed — it would revive it');
+});

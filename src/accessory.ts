@@ -1107,6 +1107,21 @@ export class KumoThermostatAccessory {
     return this.shouldSuppressSetpoint() ? 'suppressed' : 'send';
   }
 
+  /**
+   * True only while a HomeKit "off" is in flight — the concurrent scene burst.
+   *
+   * Distinct from shouldSuppressSetpoint(), which is ALSO true for a unit that
+   * has simply been off for a while. That distinction matters for fan speed and
+   * vane: both are stored preferences it is perfectly reasonable to set on an
+   * idle unit ("set every fan to quiet"), and neither revives it — verified live
+   * 2026-07-27 by writing all six speeds and all seven vane positions to the
+   * powered-off Garage, which reported mode=off throughout. What must still be
+   * blocked is a command trailing an off inside the same scene burst.
+   */
+  private offInFlight(): boolean {
+    return Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS;
+  }
+
   private shouldSuppressSetpoint(): boolean {
     if (!this.currentStatus) {
       return false;
@@ -1306,12 +1321,12 @@ export class KumoThermostatAccessory {
       `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${value} -> "${fanSpeed}"`,
     );
 
-    // A fan-speed write carries no mode, so on an off unit it would either 400
-    // (cloud) or silently power the unit on (local commands express on/off purely
-    // through `mode`). Same reasoning as the setpoint guard.
-    if (this.shouldSuppressSetpoint()) {
+    // Guarded on offInFlight(), NOT shouldSuppressSetpoint(): a fan write is fine
+    // on a unit that is merely off (it is a stored preference and does not revive
+    // it), but must not trail an off inside a scene burst.
+    if (this.offInFlight()) {
       this.platform.log.debug(
-        `[FAN SPEED] ${this.accessory.displayName}: unit is off / turning off — not sending`,
+        `[FAN SPEED] ${this.accessory.displayName}: an off is in flight — not sending`,
       );
       return;
     }
@@ -1408,11 +1423,11 @@ export class KumoThermostatAccessory {
       return false;
     }
 
-    // A bare vane write carries no mode; on an off unit the local path would
-    // power it back on (mode alone carries on/off). Same guard as setpoints.
-    if (this.shouldSuppressSetpoint()) {
+    // Same rule as fan speed: allowed on an idle unit, blocked while an off is
+    // in flight so it cannot trail an off in a scene burst.
+    if (this.offInFlight()) {
       this.platform.log.debug(
-        `[${label}] ${this.accessory.displayName}: unit is off / turning off — not sending vane`,
+        `[${label}] ${this.accessory.displayName}: an off is in flight — not sending vane`,
       );
       return false;
     }
