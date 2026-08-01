@@ -40,7 +40,8 @@ const Characteristic = new Proxy({}, {
 });
 const Service = {
   AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler', Slats: 'Slats', HumiditySensor: 'HumiditySensor',
+  HeaterCooler: 'HeaterCooler',
+  Fanv2: 'Fanv2', Slats: 'Slats', HumiditySensor: 'HumiditySensor',
   Switch: 'Switch', FilterMaintenance: 'FilterMaintenance',
 };
 

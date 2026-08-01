@@ -57,6 +57,7 @@ const Service = {
   AccessoryInformation: 'AccessoryInformation',
   Thermostat: 'Thermostat',
   HeaterCooler: 'HeaterCooler',
+  Fanv2: 'Fanv2',
   Slats: 'Slats',
   HumiditySensor: 'HumiditySensor',
   Switch: 'Switch',
@@ -143,8 +144,9 @@ function makeHarness(kumoConfig = ALL_ON) {
   const accessory = makeAccessory();
   const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
   const heaterCooler = accessory.getService(Service.HeaterCooler);
+  const fan = accessory.getServiceById(Service.Fanv2, 'airflow');
   return {
-    handler, accessory, updates, config, heaterCooler,
+    handler, accessory, updates, config, heaterCooler, fan,
     applyProfile: (p) => profileCb(SERIAL, p),
   };
 }
@@ -338,15 +340,22 @@ test('the humidity service is published only once, not on every reading', () => 
 // Fix: call this.publishStructureChange() inside the
 // `if (profile.hasVaneSwing && !this.swingModeRegistered)` block.
 test('registering SwingMode publishes it to HomeKit', () => {
-  const { updates, applyProfile, heaterCooler } = makeHarness({});
+  const { updates, applyProfile, fan, heaterCooler } = makeHarness({});
 
   applyProfile(profile({
     hasVaneSwing: true, hasVaneDir: false, hasModeVent: false, hasModeDry: false,
   }));
 
+  // Swing lives on the Fanv2 service with the rest of the air-movement controls,
+  // not on the HeaterCooler. It still arrives from the async profile event, so it
+  // still has to re-publish to reach HomeKit.
   assert.ok(
-    heaterCooler.chars.has(Characteristic.SwingMode),
-    'SwingMode added to the already-published HeaterCooler service',
+    fan.chars.has(Characteristic.SwingMode),
+    'SwingMode added to the already-published Fanv2 service',
+  );
+  assert.ok(
+    !heaterCooler.chars.has(Characteristic.SwingMode),
+    'and NOT left on the HeaterCooler, which would be two controls for one field',
   );
   assert.ok(
     updates.length >= 1,
@@ -391,16 +400,16 @@ test('opting in still works for anyone who wants fixed vane angles', () => {
     'the capability is not removed, only made opt-in');
 });
 
-test('swing stays available on the main tile with Slats off', () => {
-  // The important half of the fix: turning the Slats service off must not cost
-  // the user vane control entirely — SwingMode is registered on the HeaterCooler
-  // itself and is unaffected by exposeVaneSlat.
-  const { heaterCooler, applyProfile } = makeHarness({});
+test('swing stays available with Slats off', () => {
+  // The important half of the Slats fix: dropping the Slats service must not cost
+  // vane control entirely. SwingMode is registered on the Fanv2 service and is
+  // unaffected by exposeVaneSlat.
+  const { fan, applyProfile } = makeHarness({});
   applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
 
   // `chars` is the mock's record of every characteristic the code actually
   // reached for — inspecting it does not create one, unlike getCharacteristic.
-  const registered = [...heaterCooler.chars.keys()].map((c) => c._name);
+  const registered = [...fan.chars.keys()].map((c) => c._name);
   assert.ok(registered.includes('SwingMode'),
-    `SwingMode must still be registered on the HeaterCooler when Slats is off; got ${registered}`);
+    `SwingMode must be registered on the Fanv2 service when Slats is off; got ${registered}`);
 });

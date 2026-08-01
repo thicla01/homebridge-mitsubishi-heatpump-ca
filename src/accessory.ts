@@ -8,19 +8,26 @@ import {
 import { cToF, quantizeSetpointInRange } from './temperature';
 
 /**
- * Fan speed <-> HomeKit RotationSpeed (0-100).
+ * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
  *
- * HeaterCooler has no "fan auto" characteristic (TargetFanState lives on Fanv2,
- * not here), so `auto` has to share the one slider. It takes 0 — the bottom of
- * the slider — because every other position is a real airflow level and `auto`
- * is not on that ladder. 0 is safe: on HeaterCooler the unit's on/off is the
- * `Active` characteristic, so RotationSpeed 0 never means "off".
+ * The slider carries ONLY the five real airflow levels: 20/40/60/80/100 map to
+ * FAN_SPEEDS[1..5] (superQuiet..superPowerful). `auto` is deliberately NOT on it.
  *
- * Step is 20, giving exactly six detents. All five named speeds are offered on
- * every unit regardless of `numberOfFanSpeeds`, which is advisory — a unit
- * reporting 3 accepted all five on live hardware (see settings.ts).
+ * An earlier version put `auto` at 0 on the HeaterCooler's own RotationSpeed and
+ * it was wrong twice over: RotationSpeed is a percentage, and 0 reads as "off"
+ * everywhere else in HomeKit; and `auto` is not a point on the airflow ladder at
+ * all — in auto the unit may be blowing at full power while a 0 slider claims it
+ * is at its slowest. Auto is an orthogonal mode, so it belongs on the
+ * characteristic HAP provides for exactly that, TargetFanState — which exists on
+ * Fanv2 and not on HeaterCooler. That is the reason the fan moved services.
+ *
+ * minValue is 20, so the slider has no zero position: there are five detents and
+ * every one of them is a real speed. All five are offered on every unit
+ * regardless of `numberOfFanSpeeds`, which is advisory — a unit reporting 3
+ * accepted all five on live hardware (see settings.ts).
  */
-const ROTATION_STEP = 20;
+const FAN_PCT_STEP = 20;
+const FAN_PCT_MIN = FAN_PCT_STEP; // index 1 = superQuiet; index 0 (auto) is off-slider
 
 /**
  * Vane position <-> HomeKit tilt angle, for the optional Slats service.
@@ -69,6 +76,11 @@ export class KumoThermostatAccessory {
   // SwingMode is only registered on units whose profile reports vane swing, so
   // track that rather than probing the service for the characteristic.
   private swingModeRegistered = false;
+  private fanService: Service | null = null;
+  // TargetFanState is a toggle, but the device stores one fan field whose values
+  // include 'auto'. Switching back to MANUAL has to pick a speed, so remember the
+  // last real one the unit was seen at. Mirrors lastFixedVane.
+  private lastManualFan: FanSpeed = 'quiet';
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
   // but not sent). An "AC off" scene captures each thermostat's full state and
@@ -184,11 +196,13 @@ export class KumoThermostatAccessory {
       .onGet(this.getCoolingThresholdTemperature.bind(this))
       .onSet(this.setCoolingThresholdTemperature.bind(this));
 
-    // --- fan speed ---
-    this.service.getCharacteristic(this.platform.Characteristic.RotationSpeed)
-      .setProps({ minValue: 0, maxValue: 100, minStep: ROTATION_STEP })
-      .onGet(this.getRotationSpeed.bind(this))
-      .onSet(this.setRotationSpeed.bind(this));
+    // --- fan ---
+    // Fan speed and swing live on a Fanv2 service, not here. See setupFanService.
+    // An accessory cached by an earlier version carries RotationSpeed (and maybe
+    // SwingMode) on the HeaterCooler; strip them so the unit does not end up with
+    // two competing fan controls.
+    this.removeStaleCharacteristic(this.service, this.platform.Characteristic.RotationSpeed);
+    this.setupFanService();
 
     // --- display units ---
     // Upstream never handled this and left it hardwired to Celsius, which is
@@ -306,12 +320,16 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
     // Swing lives on the main tile when the unit supports it.
-    if (profile.hasVaneSwing && !this.swingModeRegistered) {
+    if (profile.hasVaneSwing && !this.swingModeRegistered && this.fanService) {
       const C = this.platform.Characteristic;
-      this.service.getCharacteristic(C.SwingMode)
+      // Swing belongs with the fan, not on the thermostat tile: both are about
+      // where the air goes. It also keeps every air-movement control in one place.
+      this.fanService.getCharacteristic(C.SwingMode)
         .onGet(this.getSwingMode.bind(this))
         .onSet(this.setSwingMode.bind(this));
       this.swingModeRegistered = true;
+      // Strip a SwingMode left on the HeaterCooler by an earlier version.
+      this.removeStaleCharacteristic(this.service, C.SwingMode);
       // The profile arrives via an async streaming event, after this accessory has
       // already been published. Adding a characteristic now is invisible to HomeKit
       // (and never persisted to the cache) unless the accessory is re-published —
@@ -579,6 +597,7 @@ export class KumoThermostatAccessory {
       this.filterMaintenanceService =
         this.accessory.getService(this.platform.Service.FilterMaintenance) ||
         this.accessory.addService(this.platform.Service.FilterMaintenance);
+      this.linkSecondaryService(this.filterMaintenanceService);
       this.publishStructureChange();
       this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
     }
@@ -882,11 +901,9 @@ export class KumoThermostatAccessory {
         this.mapToTargetHeaterCoolerState(status),
       );
 
-      // Fan speed and vane ride along with every status update.
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.RotationSpeed,
-        this.fanSpeedToRotation(status.fanSpeed),
-      );
+      // Fan and vane ride along with every status update. Both live on the
+      // Fanv2 service now, so they go through their own sync helpers.
+      this.syncFanCharacteristics(status.fanSpeed);
       this.syncVaneCharacteristics(status.airDirection);
 
       // Only update temperature if valid
@@ -1285,29 +1302,181 @@ export class KumoThermostatAccessory {
       this.mapToTargetHeaterCoolerState(this.currentStatus));
   }
 
-  // ---- HeaterCooler: fan speed --------------------------------------------
+  // ---- Fanv2: speed, auto/manual, swing -----------------------------------
 
   /**
-   * Fan speed -> RotationSpeed percent. `auto` is 0; see ROTATION_STEP.
+   * The Fanv2 service: everything about air movement in one place.
    *
-   * Case-insensitive on the way in: pykumo reports `Low` (capitalised) on
-   * 4-speed units, and an exact match would score that -1 and render it as auto.
+   * HeaterCooler cannot express "fan auto" — TargetFanState is a Fanv2
+   * characteristic — which is the whole reason this service exists. Speed lives
+   * on RotationSpeed (five real detents, no zero), auto/manual on TargetFanState,
+   * and swing on SwingMode once the profile confirms the unit has one.
    */
+  private setupFanService(): void {
+    if (this.fanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const name = `${this.accessory.context.device.displayName} Fan`;
+    const existing = this.accessory.getServiceById(this.platform.Service.Fanv2, 'airflow');
+
+    this.fanService = existing ||
+      this.accessory.addService(this.platform.Service.Fanv2, name, 'airflow');
+    this.fanService.setCharacteristic(C.Name, name);
+    this.fanService.setCharacteristic(C.ConfiguredName, name);
+
+    this.fanService.getCharacteristic(C.Active)
+      .onGet(this.getFanActive.bind(this))
+      .onSet(this.setFanActive.bind(this));
+
+    this.fanService.getCharacteristic(C.CurrentFanState)
+      .onGet(this.getCurrentFanState.bind(this));
+
+    this.fanService.getCharacteristic(C.TargetFanState)
+      .onGet(this.getTargetFanState.bind(this))
+      .onSet(this.setTargetFanState.bind(this));
+
+    this.fanService.getCharacteristic(C.RotationSpeed)
+      .setProps({ minValue: FAN_PCT_MIN, maxValue: 100, minStep: FAN_PCT_STEP })
+      .onGet(this.getRotationSpeed.bind(this))
+      .onSet(this.setRotationSpeed.bind(this));
+
+    this.linkSecondaryService(this.fanService);
+
+    // Deliberately NO publishStructureChange() here. This runs from the
+    // constructor, where the HeaterCooler itself is also added without one:
+    // Homebridge's own registration (and its cache save) picks up everything the
+    // constructor builds. Publishing here would fire before the accessory is
+    // registered on a fresh install, and it would break the invariant that
+    // nothing is published until a device profile actually changes something.
+    // The lazy services (Slats, HumiditySensor, the switches) DO publish, because
+    // they are created later from async profile/status events.
+  }
+
+  /**
+   * Remove a characteristic an earlier version of this plugin left on a service.
+   *
+   * Guarded on the methods existing: hap-nodejs Services have testCharacteristic
+   * and removeCharacteristic, but a stub may not, and this runs during
+   * construction where a throw would take out the whole accessory.
+   */
+  /**
+   * Declare the HeaterCooler as this accessory's primary service and hang the
+   * secondary ones off it.
+   *
+   * `primary` and `linked` are both part of a service's HAP representation, so
+   * controllers are told which tile is the accessory and which services belong
+   * *to* it rather than standing alone. This is the documented way to say "the
+   * fan is part of this heat pump", as opposed to being an independent fan that
+   * a room-level or category-wide command should sweep up.
+   *
+   * Guarded because a bare Service stub has neither method, and this runs from
+   * the constructor where a throw would take out the whole accessory.
+   */
+  private linkSecondaryService(secondary: Service | null): void {
+    if (!secondary) {
+      return;
+    }
+    const primary = this.service as unknown as {
+      setPrimaryService?: (v?: boolean) => void;
+      addLinkedService?: (s: Service) => void;
+    };
+    if (typeof primary.setPrimaryService === 'function') {
+      primary.setPrimaryService(true);
+    }
+    if (typeof primary.addLinkedService === 'function') {
+      primary.addLinkedService(secondary);
+    }
+  }
+
+  private removeStaleCharacteristic(service: Service, char: unknown): void {
+    const svc = service as unknown as {
+      testCharacteristic?: (c: unknown) => boolean;
+      getCharacteristic?: (c: unknown) => unknown;
+      removeCharacteristic?: (c: unknown) => void;
+    };
+    if (typeof svc.testCharacteristic !== 'function' ||
+        typeof svc.removeCharacteristic !== 'function' ||
+        typeof svc.getCharacteristic !== 'function') {
+      return;
+    }
+    if (svc.testCharacteristic(char)) {
+      svc.removeCharacteristic(svc.getCharacteristic(char));
+      this.platform.log.debug(
+        `${this.accessory.displayName}: removed a stale characteristic left by an earlier version`,
+      );
+    }
+  }
+
+  /** Fan speed -> RotationSpeed percent. `auto` has no slider position. */
   private fanSpeedToRotation(speed: string): number {
+    // Case-insensitive: pykumo reports `Low` (capitalised) on 4-speed units, and
+    // an exact match would score that -1 and render it as the slowest speed.
     const known = normalizeFanSpeed(speed);
     if (!known) {
       this.platform.log.debug(
         `${this.accessory.displayName}: unrecognised fan speed "${speed}" from the unit`,
       );
-      return 0;
+      return FAN_SPEEDS.indexOf(this.lastManualFan) * FAN_PCT_STEP;
     }
-    return FAN_SPEEDS.indexOf(known) * ROTATION_STEP;
+    if (known === 'auto') {
+      // In auto the slider shows the last real speed observed. TargetFanState is
+      // what actually tells the user the unit is choosing for itself.
+      return FAN_SPEEDS.indexOf(this.lastManualFan) * FAN_PCT_STEP;
+    }
+    return FAN_SPEEDS.indexOf(known) * FAN_PCT_STEP;
   }
 
-  /** RotationSpeed percent -> fan speed, snapped to the nearest detent. */
+  /** RotationSpeed percent -> a real fan speed. Never returns 'auto'. */
   private rotationToFanSpeed(pct: number): FanSpeed {
-    const i = Math.round(pct / ROTATION_STEP);
-    return FAN_SPEEDS[Math.min(Math.max(i, 0), FAN_SPEEDS.length - 1)];
+    const i = Math.round(pct / FAN_PCT_STEP);
+    // Clamp to 1..5: index 0 is the auto sentinel and is not on this slider.
+    return FAN_SPEEDS[Math.min(Math.max(i, 1), FAN_SPEEDS.length - 1)];
+  }
+
+  async getFanActive(): Promise<CharacteristicValue> {
+    if (!this.currentStatus) {
+      return this.platform.Characteristic.Active.INACTIVE;
+    }
+    return this.mapToActive(this.currentStatus);
+  }
+
+  /**
+   * The fan tile's on/off is the unit's on/off.
+   *
+   * A ductless mini-split cannot run its fan with the unit off — the only such
+   * state is the dedicated vent mode, which is a whole operating mode rather than
+   * a fan setting. So this delegates to the same path as the HeaterCooler's
+   * Active and the two tiles always agree.
+   */
+  async setFanActive(value: CharacteristicValue): Promise<void> {
+    await this.setActive(value);
+  }
+
+  async getCurrentFanState(): Promise<CharacteristicValue> {
+    const C = this.platform.Characteristic.CurrentFanState;
+    if (!this.currentStatus ||
+        this.mapToActive(this.currentStatus) === this.platform.Characteristic.Active.INACTIVE) {
+      return C.INACTIVE;
+    }
+    // Standby means the compressor is idle: the unit is on but not working.
+    return this.currentStatus.standby === true ? C.IDLE : C.BLOWING_AIR;
+  }
+
+  async getTargetFanState(): Promise<CharacteristicValue> {
+    const C = this.platform.Characteristic.TargetFanState;
+    return this.currentStatus?.fanSpeed === 'auto' ? C.AUTO : C.MANUAL;
+  }
+
+  async setTargetFanState(value: CharacteristicValue): Promise<void> {
+    const C = this.platform.Characteristic.TargetFanState;
+    // Leaving AUTO has to name a speed, since the device stores one fan field.
+    const fanSpeed: FanSpeed = value === C.AUTO ? 'auto' : this.lastManualFan;
+    this.platform.log.info(
+      `[FAN] ${this.accessory.displayName}: HomeKit sent ` +
+      `${value === C.AUTO ? 'AUTO' : 'MANUAL'} -> "${fanSpeed}"`,
+    );
+    await this.writeFanSpeed(fanSpeed);
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
@@ -1316,11 +1485,19 @@ export class KumoThermostatAccessory {
 
   async setRotationSpeed(value: CharacteristicValue): Promise<void> {
     const fanSpeed = this.rotationToFanSpeed(value as number);
-
     this.platform.log.info(
       `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${value} -> "${fanSpeed}"`,
     );
+    // Choosing a speed is inherently leaving auto; reflect that on the toggle.
+    this.fanService?.updateCharacteristic(
+      this.platform.Characteristic.TargetFanState,
+      this.platform.Characteristic.TargetFanState.MANUAL,
+    );
+    await this.writeFanSpeed(fanSpeed);
+  }
 
+  /** Send a fan speed and reconcile the fan characteristics. */
+  private async writeFanSpeed(fanSpeed: FanSpeed): Promise<void> {
     // Guarded on offInFlight(), NOT shouldSuppressSetpoint(): a fan write is fine
     // on a unit that is merely off (it is a stored preference and does not revive
     // it), but must not trail an off inside a scene burst.
@@ -1334,20 +1511,42 @@ export class KumoThermostatAccessory {
     const success = await this.sendDeviceCommand({ fanSpeed });
 
     if (success) {
+      if (fanSpeed !== 'auto') {
+        this.lastManualFan = fanSpeed;
+      }
       if (this.currentStatus) {
         this.currentStatus.fanSpeed = fanSpeed;
       }
+      this.syncFanCharacteristics(fanSpeed);
       this.notifyStatusListeners();
     } else {
-      this.platform.log.error(`[FAN SPEED] ${this.accessory.displayName}: failed to set "${fanSpeed}"`);
-      setTimeout(() => {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.RotationSpeed,
-          this.fanSpeedToRotation(this.currentStatus?.fanSpeed ?? 'auto'),
-        );
-      }, 100);
+      this.platform.log.error(
+        `[FAN SPEED] ${this.accessory.displayName}: failed to set "${fanSpeed}"`,
+      );
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
     }
   }
+
+  /** Push every fan-derived characteristic from one device value. */
+  private syncFanCharacteristics(speed: string): void {
+    if (!this.fanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const known = normalizeFanSpeed(speed);
+    if (known && known !== 'auto') {
+      this.lastManualFan = known;
+    }
+    this.fanService.updateCharacteristic(
+      C.TargetFanState,
+      known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL,
+    );
+    this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
+    if (this.currentStatus) {
+      this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
+    }
+  }
+
 
   // ---- Display units -------------------------------------------------------
 
@@ -1503,6 +1702,7 @@ export class KumoThermostatAccessory {
       .onSet(this.setTargetTiltAngle.bind(this));
 
     this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
+    this.linkSecondaryService(this.slatsService);
 
     if (!existing) {
       this.publishStructureChange();
@@ -1540,6 +1740,7 @@ export class KumoThermostatAccessory {
     this.humidityService.setCharacteristic(this.platform.Characteristic.Name, name);
     this.humidityService.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
       .onGet(this.getCurrentRelativeHumidity.bind(this));
+    this.linkSecondaryService(this.humidityService);
 
     if (!existing) {
       this.publishStructureChange();
@@ -1910,8 +2111,7 @@ export class KumoThermostatAccessory {
           this.platform.Characteristic.CoolingThresholdTemperature, commands.spCool);
       }
       if (fan) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.RotationSpeed, this.fanSpeedToRotation(fan));
+        this.syncFanCharacteristics(fan);
       }
       if (this.dryService) {
         this.dryService.updateCharacteristic(

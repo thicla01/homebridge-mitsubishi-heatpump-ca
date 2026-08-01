@@ -74,6 +74,7 @@ const Service = {
   AccessoryInformation: 'AccessoryInformation',
   Thermostat: 'Thermostat',
   HeaterCooler: 'HeaterCooler',
+  Fanv2: 'Fanv2',
   Slats: 'Slats',
   HumiditySensor: 'HumiditySensor',
   Switch: 'Switch',
