@@ -10,8 +10,10 @@ import { cToF, quantizeSetpointInRange } from './temperature';
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
  *
- * The slider carries ONLY the five real airflow levels: 20/40/60/80/100 map to
- * FAN_SPEEDS[1..5] (superQuiet..superPowerful). `auto` is deliberately NOT on it.
+ * The slider carries ONLY the five real airflow levels, evenly spaced across the
+ * whole range at 25% intervals: 0/25/50/75/100 map to FAN_SPEEDS[1..5]
+ * (superQuiet..superPowerful). Every position is a distinct speed — no value is
+ * duplicated and none is dead. `auto` is deliberately NOT on the slider.
  *
  * An earlier version put `auto` at 0 on the HeaterCooler's own RotationSpeed and
  * it was wrong twice over: RotationSpeed is a percentage, and 0 reads as "off"
@@ -21,13 +23,16 @@ import { cToF, quantizeSetpointInRange } from './temperature';
  * characteristic HAP provides for exactly that, TargetFanState — which exists on
  * Fanv2 and not on HeaterCooler. That is the reason the fan moved services.
  *
- * minValue is 20, so the slider has no zero position: there are five detents and
- * every one of them is a real speed. All five are offered on every unit
- * regardless of `numberOfFanSpeeds`, which is advisory — a unit reporting 3
- * accepted all five on live hardware (see settings.ts).
+ * 0 is the quietest speed, not "off". Power lives on the climate tile's Active,
+ * and routing an off through the fan would put the heat pump back within reach of
+ * a scene or voice command aimed at "the fan" (see setFanActive). Note the
+ * trade-off this accepts: a fan reporting 0% can lead some controllers to send
+ * 100% on activation, so watch for a unit coming on at full blast.
+ *
+ * All five speeds are offered on every unit regardless of `numberOfFanSpeeds`,
+ * which is advisory — a unit reporting 3 accepted all five on live hardware.
  */
-const FAN_PCT_STEP = 20;
-const FAN_PCT_MIN = FAN_PCT_STEP; // index 1 = superQuiet; index 0 (auto) is off-slider
+const FAN_PCT_STEP = 25;
 
 /**
  * Vane position <-> HomeKit tilt angle, for the optional Slats service.
@@ -1355,8 +1360,11 @@ export class KumoThermostatAccessory {
 
     this.fanService = existing ||
       this.accessory.addService(this.platform.Service.Fanv2, name, 'airflow');
+    // Name only. ConfiguredName is NOT in Fanv2's required or optional set, and
+    // adding it makes Homebridge log a characteristic warning on every start
+    // ("Adding anyway"). The same is true of Switch, so the Dry/Fan-only switches
+    // inherited from upstream will warn too if they are enabled.
     this.fanService.setCharacteristic(C.Name, name);
-    this.fanService.setCharacteristic(C.ConfiguredName, name);
 
     this.fanService.getCharacteristic(C.Active)
       .onGet(this.getFanActive.bind(this))
@@ -1370,13 +1378,11 @@ export class KumoThermostatAccessory {
     // cannot do it would just produce a command it ignores.
 
     this.fanService.getCharacteristic(C.RotationSpeed)
-      // minValue stays 0. hap-nodejs REJECTS a client write below minValue with
-      // -70410 INVALID_VALUE_IN_REQUEST rather than clamping it (Characteristic.js
-      // "Client supplied value ... is less than the minimum allowed"), and the Home
-      // app does send 0 when a fan slider is dragged to the bottom. A 0 write is
-      // absorbed in setRotationSpeed instead. The slider still never REPORTS 0,
-      // because fanSpeedToRotation falls back to the last real speed, so there is
-      // no "activation slams the fan to 100%" problem either.
+      // Five evenly spaced positions across the full range: 0/25/50/75/100, one
+      // per real speed, no duplicates and nothing dead. minValue must stay 0
+      // regardless — hap-nodejs REJECTS a client write below minValue with -70410
+      // rather than clamping it, and the Home app sends 0 when a fan slider is
+      // dragged to the bottom.
       .setProps({ minValue: 0, maxValue: 100, minStep: FAN_PCT_STEP })
       .onGet(this.getRotationSpeed.bind(this))
       .onSet(this.setRotationSpeed.bind(this));
@@ -1457,20 +1463,21 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `${this.accessory.displayName}: unrecognised fan speed "${speed}" from the unit`,
       );
-      return FAN_SPEEDS.indexOf(this.lastManualFan) * FAN_PCT_STEP;
+      return (FAN_SPEEDS.indexOf(this.lastManualFan) - 1) * FAN_PCT_STEP;
     }
     if (known === 'auto') {
       // In auto the slider shows the last real speed observed. TargetFanState is
       // what actually tells the user the unit is choosing for itself.
-      return FAN_SPEEDS.indexOf(this.lastManualFan) * FAN_PCT_STEP;
+      return (FAN_SPEEDS.indexOf(this.lastManualFan) - 1) * FAN_PCT_STEP;
     }
-    return FAN_SPEEDS.indexOf(known) * FAN_PCT_STEP;
+    return (FAN_SPEEDS.indexOf(known) - 1) * FAN_PCT_STEP;
   }
 
   /** RotationSpeed percent -> a real fan speed. Never returns 'auto'. */
   private rotationToFanSpeed(pct: number): FanSpeed {
-    const i = Math.round(pct / FAN_PCT_STEP);
-    // Clamp to 1..5: index 0 is the auto sentinel and is not on this slider.
+    // 0/25/50/75/100 -> FAN_SPEEDS[1..5]; index 0 is the auto sentinel and is not
+    // reachable from this slider.
+    const i = Math.round(pct / FAN_PCT_STEP) + 1;
     return FAN_SPEEDS[Math.min(Math.max(i, 1), FAN_SPEEDS.length - 1)];
   }
 
@@ -1576,15 +1583,9 @@ export class KumoThermostatAccessory {
 
   async setRotationSpeed(value: CharacteristicValue): Promise<void> {
     const pct = value as number;
-    // A 0 means the quietest speed, not "off".
-    //
-    // The position has to exist — hap-nodejs rejects a client write below
-    // minValue instead of clamping, and the Home app sends 0 when a fan slider is
-    // dragged to the bottom — but it does not have to be dead. Mapping it to
-    // superQuiet makes "drag down for quieter" behave the way it looks, with no
-    // detent that silently does nothing. Off deliberately stays on the climate
-    // tile: honouring 0 as a power-off would put the heat pump back within reach
-    // of a scene or voice command aimed at "the fan" (see setFanActive).
+    // 0 is the quietest speed, not "off" — see the note on FAN_PCT_STEP. Off
+    // stays on the climate tile so a command aimed at "the fan" cannot stop the
+    // heat pump (see setFanActive).
     const fanSpeed = this.rotationToFanSpeed(pct);
     this.platform.log.info(
       `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${pct} -> "${fanSpeed}"`,

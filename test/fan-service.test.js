@@ -176,37 +176,37 @@ test('the fan lives on its own Fanv2 service, not on the HeaterCooler', () => {
   assert.ok(!fan.chars.has(Characteristic.SwingMode));
 });
 
-test('the slider keeps a 0 position, and 0 means the quietest speed', async () => {
-  // minValue MUST stay 0: hap-nodejs rejects a client write below minValue with
-  // -70410 INVALID_VALUE_IN_REQUEST instead of clamping it, and the Home app does
-  // send 0 when a fan slider is dragged to the bottom.
-  //
-  // But the position does not have to be dead. Mapping it to the quietest speed
-  // makes "drag down for quieter" behave the way it looks, with no detent that
-  // silently does nothing. Off deliberately stays on the climate tile — honouring
-  // 0 as a power-off would put the heat pump back within reach of a scene or
-  // voice command aimed at "the fan".
-  const { fan, handler, sendCommandCalls } = makeHarness();
+test('the five speeds fill the slider evenly, one position each', async () => {
+  // 0/25/50/75/100 — every position is a distinct real speed. No duplicates (the
+  // earlier 20%-step scale had 0 and 20 both meaning superQuiet) and nothing dead.
+  const { fan } = makeHarness();
   const props = fan.chars.get(Characteristic.RotationSpeed).props;
 
-  assert.strictEqual(props.minValue, 0, 'a rejected write would surface as an error in Home');
-  assert.strictEqual(props.minStep, 20);
+  assert.strictEqual(props.minValue, 0);
   assert.strictEqual(props.maxValue, 100);
-  // 20..100 == exactly the five named speeds, auto excluded.
-  assert.strictEqual((props.maxValue - 20) / props.minStep + 1, FAN_SPEEDS.length - 1);
+  assert.strictEqual(props.minStep, 25);
+  const positions = (props.maxValue - props.minValue) / props.minStep + 1;
+  assert.strictEqual(positions, FAN_SPEEDS.length - 1,
+    'exactly one detent per real speed, auto excluded');
+});
 
+test('0 is the quietest speed, not off', async () => {
+  // minValue must stay 0 regardless: hap-nodejs rejects a client write below
+  // minValue with -70410 instead of clamping, and Home sends 0 when a fan slider
+  // is dragged to the bottom. Power stays on the climate tile.
+  const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+
   await handler.setRotationSpeed(0);
   await tick();
 
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' },
-    'the bottom of the slider is the quietest speed, not a no-op and not an off');
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' });
 });
 
 // ---- Speed round-trip ----------------------------------------------------
 
 test('each detent maps to its own real speed', async () => {
-  const cases = [[20, 'superQuiet'], [40, 'quiet'], [60, 'low'], [80, 'powerful'], [100, 'superPowerful']];
+  const cases = [[0, 'superQuiet'], [25, 'quiet'], [50, 'low'], [75, 'powerful'], [100, 'superPowerful']];
   for (const [pct, speed] of cases) {
     const { handler, sendCommandCalls } = makeHarness();
     handler.updateFromZone(zone());
@@ -223,7 +223,7 @@ test('the slider can never produce "auto"', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone());
 
-  await handler.setRotationSpeed(20);
+  await handler.setRotationSpeed(0);
   await tick();
 
   assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' });
@@ -234,7 +234,7 @@ test('a reported speed reads back as its own detent', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
 
-  assert.strictEqual(await handler.getRotationSpeed(), 80);
+  assert.strictEqual(await handler.getRotationSpeed(), 75);
   assert.strictEqual(await handler.getTargetFanState(), Characteristic.TargetFanState.MANUAL);
 });
 
@@ -280,7 +280,7 @@ test('in auto the slider shows the last real speed, not zero', async () => {
   handler.updateFromZone(zone({ fanSpeed: 'low' }));
   handler.updateFromZone(zone({ fanSpeed: 'auto' }));
 
-  assert.strictEqual(await handler.getRotationSpeed(), 60,
+  assert.strictEqual(await handler.getRotationSpeed(), 50,
     'the slider keeps a meaningful position; TargetFanState carries the auto-ness');
 });
 
@@ -288,7 +288,7 @@ test('moving the slider leaves auto', async () => {
   const { handler, fan, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'auto' }));
 
-  await handler.setRotationSpeed(40);
+  await handler.setRotationSpeed(25);
   await tick();
 
   assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'quiet' });
@@ -307,7 +307,7 @@ test('an explicit AUTO beats a speed sent in the same burst', async () => {
 
   await Promise.all([
     handler.setTargetFanState(Characteristic.TargetFanState.AUTO),
-    handler.setRotationSpeed(80),
+    handler.setRotationSpeed(75),
   ]);
   await tick();
 
@@ -321,7 +321,7 @@ test('the same burst in the other order still resolves to auto', async () => {
   handler.updateFromZone(zone({ fanSpeed: 'quiet' }));
 
   await Promise.all([
-    handler.setRotationSpeed(80),
+    handler.setRotationSpeed(75),
     handler.setTargetFanState(Characteristic.TargetFanState.AUTO),
   ]);
   await tick();
@@ -433,4 +433,28 @@ test('lazily-created services are linked too', () => {
   // The humidity sensor arrives from a status update rather than the profile.
   accessory.getServiceById(Service.Fanv2, 'airflow');
   assert.ok(linked.length >= 1, 'linkage is not limited to constructor-time services');
+});
+
+test('no two slider positions mean the same speed', async () => {
+  // The regression this replaces: with a 20% step, 0 and 20 both produced
+  // superQuiet, so the bottom of the slider had a dead twin.
+  const { handler } = makeHarness();
+  const seen = new Map();
+  for (const pct of [0, 25, 50, 75, 100]) {
+    handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+    const speed = FAN_SPEEDS[Math.round(pct / 25) + 1];
+    assert.ok(!seen.has(speed), `${pct}% duplicates ${seen.get(speed)}% (both ${speed})`);
+    seen.set(speed, pct);
+  }
+  assert.strictEqual(seen.size, 5);
+});
+
+test('every real speed round-trips to its own position and back', async () => {
+  const { handler } = makeHarness();
+  for (const speed of FAN_SPEEDS.slice(1)) {
+    handler.updateFromZone(zone({ fanSpeed: speed }));
+    const pct = await handler.getRotationSpeed();
+    assert.strictEqual(FAN_SPEEDS[Math.round(pct / 25) + 1], speed,
+      `${speed} reported as ${pct}% must map back to itself`);
+  }
 });

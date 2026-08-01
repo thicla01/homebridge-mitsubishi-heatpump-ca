@@ -230,7 +230,7 @@ test('a fan-speed change reaches a unit that is merely OFF', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
-  await handler.setRotationSpeed(20); // superQuiet
+  await handler.setRotationSpeed(0); // superQuiet — the bottom of the slider
   await new Promise((r) => setTimeout(r, 5)); // fan writes coalesce onto the next tick
 
   assert.strictEqual(sendCommandCalls.length, 1,
