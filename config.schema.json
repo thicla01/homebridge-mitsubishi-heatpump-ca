@@ -45,6 +45,12 @@
         "default": false,
         "description": "Enable verbose debug logging (requires running Homebridge with -D flag)"
       },
+      "showHumiditySensor": {
+        "title": "Show indoor humidity",
+        "type": "boolean",
+        "default": true,
+        "description": "Expose each unit's indoor humidity as a HumiditySensor service. Turn this OFF if humidity is dominating the accessory tile in the Apple Home app: Home collapses an accessory's services into a single tile and favours a sensor reading for what that tile displays, so a unit with a humidity sensor can show humidity where you wanted temperature and fan. Home's per-accessory \"Show as Separate Tiles\" setting is the alternative that keeps both."
+      },
       "showDrySwitch": {
         "title": "Show Dry (dehumidify) switch",
         "type": "boolean",

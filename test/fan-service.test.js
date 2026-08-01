@@ -176,11 +176,16 @@ test('the fan lives on its own Fanv2 service, not on the HeaterCooler', () => {
   assert.ok(!fan.chars.has(Characteristic.SwingMode));
 });
 
-test('the slider keeps a 0 position, but 0 is absorbed rather than obeyed', async () => {
+test('the slider keeps a 0 position, and 0 means the quietest speed', async () => {
   // minValue MUST stay 0: hap-nodejs rejects a client write below minValue with
   // -70410 INVALID_VALUE_IN_REQUEST instead of clamping it, and the Home app does
-  // send 0 when a fan slider is dragged to the bottom. The five real speeds live
-  // at 20/40/60/80/100 and a 0 is swallowed in the setter.
+  // send 0 when a fan slider is dragged to the bottom.
+  //
+  // But the position does not have to be dead. Mapping it to the quietest speed
+  // makes "drag down for quieter" behave the way it looks, with no detent that
+  // silently does nothing. Off deliberately stays on the climate tile — honouring
+  // 0 as a power-off would put the heat pump back within reach of a scene or
+  // voice command aimed at "the fan".
   const { fan, handler, sendCommandCalls } = makeHarness();
   const props = fan.chars.get(Characteristic.RotationSpeed).props;
 
@@ -190,12 +195,12 @@ test('the slider keeps a 0 position, but 0 is absorbed rather than obeyed', asyn
   // 20..100 == exactly the five named speeds, auto excluded.
   assert.strictEqual((props.maxValue - 20) / props.minStep + 1, FAN_SPEEDS.length - 1);
 
-  handler.updateFromZone(zone({ fanSpeed: 'quiet' }));
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
   await handler.setRotationSpeed(0);
   await tick();
-  assert.strictEqual(sendCommandCalls.length, 0,
-    'a 0 must not be sent: on a mini-split no airflow means the unit is off, and ' +
-    'off belongs on the climate tile');
+
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'superQuiet' },
+    'the bottom of the slider is the quietest speed, not a no-op and not an off');
 });
 
 // ---- Speed round-trip ----------------------------------------------------

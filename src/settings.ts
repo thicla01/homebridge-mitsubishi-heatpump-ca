@@ -39,6 +39,17 @@ export interface KumoConfig {
   /** Add a per-unit "Fan" switch (fan-only mode, no heating/cooling). Default false. */
   showFanOnlySwitch?: boolean;
   /**
+   * Expose indoor humidity as a HumiditySensor service. Default TRUE.
+   *
+   * Turn this off if humidity is dominating the accessory's tile in the Apple
+   * Home app. Home collapses an accessory's services into a single tile and
+   * favours a sensor reading for what that tile displays, so a unit with a
+   * paired humidity sensor can show humidity where you wanted temperature and
+   * fan. Home's per-accessory "Show as Separate Tiles" setting is the
+   * alternative that keeps both.
+   */
+  showHumiditySensor?: boolean;
+  /**
    * Expose vane direction as a HomeKit Slats service in addition to SwingMode.
    * Default FALSE, deliberately.
    *

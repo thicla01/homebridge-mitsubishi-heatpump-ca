@@ -256,9 +256,16 @@ export class KumoThermostatAccessory {
     if (this.accessory.getService(this.platform.Service.Slats)) {
       this.setupSlatsService();
     }
-    if (this.accessory.getService(this.platform.Service.HumiditySensor)) {
-      this.hasHumiditySensor = true;
-      this.setupHumidityService();
+    const cachedHumidity = this.accessory.getService(this.platform.Service.HumiditySensor);
+    if (cachedHumidity) {
+      if (this.platform.kumoConfig.showHumiditySensor === false) {
+        // Opted out since the last run — drop the cached service so the tile stops
+        // being dominated by the humidity reading.
+        this.accessory.removeService(cachedHumidity);
+      } else {
+        this.hasHumiditySensor = true;
+        this.setupHumidityService();
+      }
     }
 
     // Register for streaming updates
@@ -873,7 +880,8 @@ export class KumoThermostatAccessory {
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
       // (it was optional on Thermostat), so humidity needs its own service.
       const hasHumidity = zone.adapter.humidity !== null && zone.adapter.humidity !== undefined;
-      if (hasHumidity && !this.hasHumiditySensor) {
+      const wantHumidity = this.platform.kumoConfig.showHumiditySensor !== false;
+      if (hasHumidity && wantHumidity && !this.hasHumiditySensor) {
         this.hasHumiditySensor = true;
         this.setupHumidityService();
         this.platform.log.debug(`Added humidity sensor for device ${this.deviceSerial}`);
@@ -1568,16 +1576,15 @@ export class KumoThermostatAccessory {
 
   async setRotationSpeed(value: CharacteristicValue): Promise<void> {
     const pct = value as number;
-    // A 0 is absorbed, not obeyed. The Home app sends it when a fan slider is
-    // dragged to the bottom, but on a mini-split "no airflow" means the unit is
-    // off, and off lives on the climate tile — see setFanActive.
-    if (pct === 0) {
-      this.platform.log.debug(
-        `[FAN SPEED] ${this.accessory.displayName}: ignoring a 0 speed (power lives on the climate tile)`,
-      );
-      this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
-      return;
-    }
+    // A 0 means the quietest speed, not "off".
+    //
+    // The position has to exist — hap-nodejs rejects a client write below
+    // minValue instead of clamping, and the Home app sends 0 when a fan slider is
+    // dragged to the bottom — but it does not have to be dead. Mapping it to
+    // superQuiet makes "drag down for quieter" behave the way it looks, with no
+    // detent that silently does nothing. Off deliberately stays on the climate
+    // tile: honouring 0 as a power-off would put the heat pump back within reach
+    // of a scene or voice command aimed at "the fan" (see setFanActive).
     const fanSpeed = this.rotationToFanSpeed(pct);
     this.platform.log.info(
       `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${pct} -> "${fanSpeed}"`,
