@@ -55,3 +55,6 @@ test-*.js
 
 # local pack output
 *.tgz
+
+# compiled tests
+dist-test/
