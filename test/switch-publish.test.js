@@ -346,16 +346,17 @@ test('registering SwingMode publishes it to HomeKit', () => {
     hasVaneSwing: true, hasVaneDir: false, hasModeVent: false, hasModeDry: false,
   }));
 
-  // Swing lives on the Fanv2 service with the rest of the air-movement controls,
-  // not on the HeaterCooler. It still arrives from the async profile event, so it
-  // still has to re-publish to reach HomeKit.
+  // Swing stays on the HeaterCooler: Apple Home's default collapsed tile renders
+  // a fan's speed but hides its Oscillate toggle, so swing on the Fanv2 would be
+  // invisible on a default install (and Slats is off by default). It still
+  // arrives from the async profile event, so it still has to re-publish.
   assert.ok(
-    fan.chars.has(Characteristic.SwingMode),
-    'SwingMode added to the already-published Fanv2 service',
+    heaterCooler.chars.has(Characteristic.SwingMode),
+    'SwingMode added to the already-published HeaterCooler service',
   );
   assert.ok(
-    !heaterCooler.chars.has(Characteristic.SwingMode),
-    'and NOT left on the HeaterCooler, which would be two controls for one field',
+    !fan.chars.has(Characteristic.SwingMode),
+    'and NOT on the fan service, where Home would hide it',
   );
   assert.ok(
     updates.length >= 1,
@@ -404,12 +405,12 @@ test('swing stays available with Slats off', () => {
   // The important half of the Slats fix: dropping the Slats service must not cost
   // vane control entirely. SwingMode is registered on the Fanv2 service and is
   // unaffected by exposeVaneSlat.
-  const { fan, applyProfile } = makeHarness({});
+  const { heaterCooler, applyProfile } = makeHarness({});
   applyProfile(profile({ hasVaneDir: true, hasVaneSwing: true }));
 
   // `chars` is the mock's record of every characteristic the code actually
   // reached for — inspecting it does not create one, unlike getCharacteristic.
-  const registered = [...fan.chars.keys()].map((c) => c._name);
+  const registered = [...heaterCooler.chars.keys()].map((c) => c._name);
   assert.ok(registered.includes('SwingMode'),
-    `SwingMode must be registered on the Fanv2 service when Slats is off; got ${registered}`);
+    `SwingMode must be on the climate tile when Slats is off; got ${registered}`);
 });

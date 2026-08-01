@@ -231,6 +231,7 @@ test('a fan-speed change reaches a unit that is merely OFF', async () => {
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
 
   await handler.setRotationSpeed(20); // superQuiet
+  await new Promise((r) => setTimeout(r, 5)); // fan writes coalesce onto the next tick
 
   assert.strictEqual(sendCommandCalls.length, 1,
     'an idle unit must still accept a fan-speed preference');

@@ -81,6 +81,10 @@ export class KumoThermostatAccessory {
   // include 'auto'. Switching back to MANUAL has to pick a speed, so remember the
   // last real one the unit was seen at. Mirrors lastFixedVane.
   private lastManualFan: FanSpeed = 'quiet';
+  // Fan writes arriving in one HAP request are coalesced; see queueFanIntent.
+  private pendingFan: { auto?: boolean; speed?: FanSpeed } | null = null;
+  private fanFlushTimer: NodeJS.Timeout | null = null;
+  private targetFanStateRegistered = false;
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
   // but not sent). An "AC off" scene captures each thermostat's full state and
@@ -320,16 +324,37 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
     // Swing lives on the main tile when the unit supports it.
-    if (profile.hasVaneSwing && !this.swingModeRegistered && this.fanService) {
+    if (profile.hasFanSpeedAuto && !this.targetFanStateRegistered && this.fanService) {
+      this.fanService.getCharacteristic(this.platform.Characteristic.TargetFanState)
+        .onGet(this.getTargetFanState.bind(this))
+        .onSet(this.setTargetFanState.bind(this));
+      this.targetFanStateRegistered = true;
+      // Arrives from the async profile event, so it needs a re-publish to reach
+      // HomeKit — same as the switches and Slats.
+      this.publishStructureChange();
+    }
+
+    if (profile.hasVaneSwing && !this.swingModeRegistered) {
       const C = this.platform.Characteristic;
-      // Swing belongs with the fan, not on the thermostat tile: both are about
-      // where the air goes. It also keeps every air-movement control in one place.
-      this.fanService.getCharacteristic(C.SwingMode)
+      // SwingMode stays on the HeaterCooler, NOT the fan service, and this is not
+      // a stylistic choice. Apple Home collapses an accessory's services into one
+      // tile by default, and in that collapsed state it renders the fan's speed
+      // but NOT its Oscillate toggle (first-hand:
+      // cbrandlehner/homebridge-daikin-local#346, corroborated by
+      // mp-consulting/homebridge-daikin-cloud). Swing on the fan service is
+      // therefore invisible unless the user has opted into "Show as Separate
+      // Tiles" — and with the Slats service off by default, that would leave vane
+      // control unreachable in the Home app on a default install.
+      // Home Assistant's own HeaterCooler migration (core#148231) moves only
+      // RotationSpeed and keeps swing on the climate service for the same reason.
+      this.service.getCharacteristic(C.SwingMode)
         .onGet(this.getSwingMode.bind(this))
         .onSet(this.setSwingMode.bind(this));
       this.swingModeRegistered = true;
-      // Strip a SwingMode left on the HeaterCooler by an earlier version.
-      this.removeStaleCharacteristic(this.service, C.SwingMode);
+      // Strip a SwingMode left on the fan service by the version that moved it.
+      if (this.fanService) {
+        this.removeStaleCharacteristic(this.fanService, C.SwingMode);
+      }
       // The profile arrives via an async streaming event, after this accessory has
       // already been published. Adding a characteristic now is invisible to HomeKit
       // (and never persisted to the cache) unless the accessory is re-published —
@@ -1332,12 +1357,19 @@ export class KumoThermostatAccessory {
     this.fanService.getCharacteristic(C.CurrentFanState)
       .onGet(this.getCurrentFanState.bind(this));
 
-    this.fanService.getCharacteristic(C.TargetFanState)
-      .onGet(this.getTargetFanState.bind(this))
-      .onSet(this.setTargetFanState.bind(this));
+    // TargetFanState is registered from applyDeviceProfile, gated on the unit
+    // actually having an auto fan mode — offering an Auto segment on a unit that
+    // cannot do it would just produce a command it ignores.
 
     this.fanService.getCharacteristic(C.RotationSpeed)
-      .setProps({ minValue: FAN_PCT_MIN, maxValue: 100, minStep: FAN_PCT_STEP })
+      // minValue stays 0. hap-nodejs REJECTS a client write below minValue with
+      // -70410 INVALID_VALUE_IN_REQUEST rather than clamping it (Characteristic.js
+      // "Client supplied value ... is less than the minimum allowed"), and the Home
+      // app does send 0 when a fan slider is dragged to the bottom. A 0 write is
+      // absorbed in setRotationSpeed instead. The slider still never REPORTS 0,
+      // because fanSpeedToRotation falls back to the last real speed, so there is
+      // no "activation slams the fan to 100%" problem either.
+      .setProps({ minValue: 0, maxValue: 100, minStep: FAN_PCT_STEP })
       .onGet(this.getRotationSpeed.bind(this))
       .onSet(this.setRotationSpeed.bind(this));
 
@@ -1442,14 +1474,35 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * The fan tile's on/off is the unit's on/off.
+   * Turning the fan tile OFF is refused; turning it ON turns the unit on.
    *
-   * A ductless mini-split cannot run its fan with the unit off — the only such
-   * state is the dedicated vent mode, which is a whole operating mode rather than
-   * a fan setting. So this delegates to the same path as the HeaterCooler's
-   * Active and the two tiles always agree.
+   * Apple documents room-scoped Siri fan commands ("Turn off the fan.", "Turn on
+   * the fan in the office."), and a HomePod answers a bare "turn off the fan" for
+   * its own room. If this delegated an INACTIVE write through to the unit's
+   * power, any of those would shut down the heat pump — the same shape as the
+   * Slats service being swept up by a blinds command.
+   *
+   * So an off is bounced: the characteristic is put back a moment later, which is
+   * what Home Assistant's HomeKit bridge does for exactly this case
+   * (climate_base.py `_set_fan_active` -> `_reject_char_write`). Off belongs on
+   * the climate tile, where the user is unambiguously talking about the unit.
    */
   async setFanActive(value: CharacteristicValue): Promise<void> {
+    const C = this.platform.Characteristic.Active;
+    if (value === C.INACTIVE) {
+      this.platform.log.info(
+        `[FAN] ${this.accessory.displayName}: ignoring a fan-tile OFF — a mini-split's ` +
+        'fan cannot run independently, and honouring this would let a room-wide ' +
+        '"turn off the fan" shut down the heat pump. Use the climate tile to turn it off.',
+      );
+      setTimeout(() => {
+        if (this.currentStatus) {
+          this.fanService?.updateCharacteristic(
+            this.platform.Characteristic.Active, this.mapToActive(this.currentStatus));
+        }
+      }, 100);
+      return;
+    }
     await this.setActive(value);
   }
 
@@ -1470,13 +1523,43 @@ export class KumoThermostatAccessory {
 
   async setTargetFanState(value: CharacteristicValue): Promise<void> {
     const C = this.platform.Characteristic.TargetFanState;
-    // Leaving AUTO has to name a speed, since the device stores one fan field.
-    const fanSpeed: FanSpeed = value === C.AUTO ? 'auto' : this.lastManualFan;
     this.platform.log.info(
       `[FAN] ${this.accessory.displayName}: HomeKit sent ` +
-      `${value === C.AUTO ? 'AUTO' : 'MANUAL'} -> "${fanSpeed}"`,
+      `${value === C.AUTO ? 'AUTO' : 'MANUAL'}`,
     );
-    await this.writeFanSpeed(fanSpeed);
+    this.queueFanIntent({ auto: value === C.AUTO });
+  }
+
+  /**
+   * Collect the fan writes of a single HAP request before sending anything.
+   *
+   * HomeKit sends a scene as ONE write request carrying several characteristics,
+   * and hap-nodejs dispatches every handler in that request concurrently without
+   * awaiting (Accessory.js runs `handleCharacteristicWrite(...).then(...)` in a
+   * plain loop). A scene that sets "fan auto" also re-sends the captured
+   * RotationSpeed, so whichever handler ran last used to win: setting auto landed
+   * in manual roughly at random. Buffering to the next tick makes the pair one
+   * intent, and an explicit AUTO beats the mode merely implied by a slider value.
+   */
+  private queueFanIntent(patch: { auto?: boolean; speed?: FanSpeed }): void {
+    this.pendingFan = { ...(this.pendingFan ?? {}), ...patch };
+    if (this.fanFlushTimer) {
+      return;
+    }
+    this.fanFlushTimer = setTimeout(() => {
+      this.fanFlushTimer = null;
+      const intent = this.pendingFan;
+      this.pendingFan = null;
+      if (!intent) {
+        return;
+      }
+      // Explicit AUTO wins over any speed in the same burst; otherwise the speed
+      // (or, for a bare MANUAL, the last real speed the unit was seen at).
+      const speed: FanSpeed = intent.auto === true
+        ? 'auto'
+        : (intent.speed ?? this.lastManualFan);
+      void this.writeFanSpeed(speed);
+    }, 0);
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
@@ -1484,16 +1567,25 @@ export class KumoThermostatAccessory {
   }
 
   async setRotationSpeed(value: CharacteristicValue): Promise<void> {
-    const fanSpeed = this.rotationToFanSpeed(value as number);
+    const pct = value as number;
+    // A 0 is absorbed, not obeyed. The Home app sends it when a fan slider is
+    // dragged to the bottom, but on a mini-split "no airflow" means the unit is
+    // off, and off lives on the climate tile — see setFanActive.
+    if (pct === 0) {
+      this.platform.log.debug(
+        `[FAN SPEED] ${this.accessory.displayName}: ignoring a 0 speed (power lives on the climate tile)`,
+      );
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+      return;
+    }
+    const fanSpeed = this.rotationToFanSpeed(pct);
     this.platform.log.info(
-      `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${value} -> "${fanSpeed}"`,
+      `[FAN SPEED] ${this.accessory.displayName}: HomeKit sent ${pct} -> "${fanSpeed}"`,
     );
-    // Choosing a speed is inherently leaving auto; reflect that on the toggle.
-    this.fanService?.updateCharacteristic(
-      this.platform.Characteristic.TargetFanState,
-      this.platform.Characteristic.TargetFanState.MANUAL,
-    );
-    await this.writeFanSpeed(fanSpeed);
+    // Deliberately NOT force-pushing MANUAL here: that is what let a scene's
+    // trailing speed override an explicit AUTO in the same burst. queueFanIntent
+    // resolves the two together.
+    this.queueFanIntent({ speed: fanSpeed });
   }
 
   /** Send a fan speed and reconcile the fan characteristics. */
@@ -1537,10 +1629,12 @@ export class KumoThermostatAccessory {
     if (known && known !== 'auto') {
       this.lastManualFan = known;
     }
-    this.fanService.updateCharacteristic(
-      C.TargetFanState,
-      known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL,
-    );
+    if (this.targetFanStateRegistered) {
+      this.fanService.updateCharacteristic(
+        C.TargetFanState,
+        known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL,
+      );
+    }
     this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
     if (this.currentStatus) {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
