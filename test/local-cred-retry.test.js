@@ -182,3 +182,117 @@ test('cleanup clears the retry timer', async () => {
 
   assert.strictEqual(platform.localCredRetryTimer, null);
 });
+
+// ---- backoff and giving up ------------------------------------------------
+//
+// Since 2026-07-31 the cloud stopped serving BOTH halves of the local key
+// (`password` is gone from adapter_update, `cryptoSerial` from GET
+// /devices/{serial}/status — reproduced on unrelated accounts and on pykumo).
+// Every pass then re-nudges every device for the whole 10s window and never
+// succeeds, so the retry has to back off and eventually stop instead of paying
+// that cost forever against a cloud that is not going to answer.
+
+/**
+ * Run N fruitless passes without waiting on any timer, in the same order the
+ * self-scheduling chain does it (schedule, then run), since the delay grows at
+ * schedule time.
+ */
+async function failPasses(platform, n) {
+  platform.gatherLocalCreds = async () => new Map();
+  for (let i = 0; i < n; i++) {
+    platform.scheduleLocalCredRetry();
+    if (platform.localCredRetryTimer) {
+      clearTimeout(platform.localCredRetryTimer);
+      platform.localCredRetryTimer = null;
+    }
+    await platform.retryLocalCreds();
+  }
+}
+
+test('the retry delay doubles per failed pass and caps at 30 minutes', () => {
+  const { platform } = makePlatform();
+  const delays = [];
+  for (let i = 0; i < 8; i++) {
+    platform.scheduleLocalCredRetry();
+    delays.push(platform.localCredRetryTimer._idleTimeout);
+    clearTimeout(platform.localCredRetryTimer);
+    platform.localCredRetryTimer = null;
+  }
+
+  assert.deepStrictEqual(delays.slice(0, 6), [60000, 120000, 240000, 480000, 960000, 1800000],
+    'a fixed 60s interval against a cloud that never answers is ~1440 wasted emits an hour');
+  assert.deepStrictEqual(delays.slice(6), [1800000, 1800000], 'and it stops growing at the cap');
+});
+
+test('a pass that yields credentials resets the backoff for the stragglers', async () => {
+  const { platform, kumo } = makePlatform();
+  await failPasses(platform, 2);
+  assert.ok(platform.localCredRetryDelayMs > 60000, 'the delay grew while nothing answered');
+
+  // A's adapter finally answers; B is still pending.
+  delete platform.gatherLocalCreds;
+  kumo.passwords.set(A, 'pw-a');
+  await platform.retryLocalCreds();
+
+  assert.strictEqual(platform.localCredFailedPasses, 0);
+  assert.strictEqual(platform.localCredRetryDelayMs, 60000,
+    'credentials are flowing again — chase the straggler at the base interval');
+  assert.deepStrictEqual(platform.pendingLocalSerials(), [B]);
+});
+
+test('after six fruitless passes the retry gives up and says so once', async () => {
+  const { platform, kumo } = makePlatform();
+  const warns = [];
+  platform.log.warn = (msg) => warns.push(msg);
+
+  await failPasses(platform, 6);
+
+  assert.strictEqual(platform.localCredGaveUp, true);
+  assert.strictEqual(warns.length, 1, 'exactly one warning, not one per pass');
+  assert.match(warns[0], /cloud-side change/,
+    'the user must not be sent hunting their own network for a cloud-side fault');
+
+  // And it stays stopped.
+  kumo.nudges.length = 0;
+  platform.scheduleLocalCredRetry();
+  assert.strictEqual(platform.localCredRetryTimer, null, 'no further passes are scheduled');
+  await platform.retryLocalCreds();
+  assert.strictEqual(kumo.nudges.length, 0, 'and nothing is nudged after giving up');
+});
+
+test('giving up with nothing local drops the local client so writes go straight to cloud', async () => {
+  // accessory.sendDeviceCommand guards on platform.localClient; leaving a client
+  // that can never authenticate makes every write try the LAN first and time out.
+  const { platform } = makePlatform();
+  await failPasses(platform, 6);
+
+  assert.strictEqual(platform.localClient, null);
+});
+
+test('giving up KEEPS the client when some units did get credentials', async () => {
+  const { platform, kumo } = makePlatform();
+  kumo.passwords.set(A, 'pw-a');
+  await platform.admitLocalDevices(await platform.gatherLocalCreds([A, B], 50));
+  assert.strictEqual(platform.countLocalDevices(), 1);
+
+  await failPasses(platform, 6);
+
+  assert.strictEqual(platform.localCredGaveUp, true);
+  assert.notStrictEqual(platform.localClient, null,
+    'A still works locally — only the chase for B stops');
+  assert.strictEqual(platform.localClient.hasLocal(A), true);
+});
+
+test('the give-up is in-memory only, so a restart tries again', async () => {
+  // Nothing is persisted and config.json is never rewritten: localControl stays
+  // true, so local control returns on its own if the cloud restores the fields.
+  const { platform } = makePlatform();
+  await failPasses(platform, 6);
+  assert.strictEqual(platform.localCredGaveUp, true);
+
+  const { platform: restarted } = makePlatform();
+
+  assert.strictEqual(restarted.localCredGaveUp, false);
+  assert.strictEqual(restarted.config.localControl, true);
+  assert.strictEqual(restarted.localCredRetryDelayMs, 60000);
+});

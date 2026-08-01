@@ -11,6 +11,7 @@ import {
   Zone,
   DeviceStatus,
   DeviceProfile,
+  SensorReading,
   Commands,
   CloudCommands,
   SendCommandRequest,
@@ -55,6 +56,20 @@ export function toCloudCommands(commands: Commands): CloudCommands {
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
 export type DeviceConnectionCallback = (deviceSerial: string, connected: boolean) => void;
+export type SensorUpdateCallback = (reading: SensorReading) => void;
+
+/**
+ * Accept a value only if it really is a finite number; anything else becomes null.
+ *
+ * The `sensor_update` payload is not schema-checked by us and the cloud has already
+ * demonstrated it will drop fields without notice (see the local-credential outage
+ * documented on SensorReading). A string, null, or absent field must not reach a
+ * consumer as if it were a reading — null is the honest answer, and NaN/Infinity are
+ * rejected too since either would poison a temperature straight onto the tile.
+ */
+function asNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
 
 export class KumoAPI {
   private accessToken: string | null = null;
@@ -80,6 +95,19 @@ export class KumoAPI {
   // local LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
   private adapterPasswords: Map<string, string> = new Map();
   private adapterPasswordCallbacks: Set<(serial: string, password: string) => void> = new Set();
+
+  // Paired wireless sensor readings, via the `sensor_update` event.
+  private sensorUpdateCallbacks: Set<SensorUpdateCallback> = new Set();
+
+  // Local-credential outage detection. Since 2026-07-31 the cloud has been sending
+  // `adapter_update` without `password` and `/devices/{serial}/status` without
+  // `cryptoSerial`, which silently disables local control. Each cause warns exactly
+  // once — these events arrive continuously, so an unlatched warning would flood the
+  // log. The password counter is consecutive, so a single odd event (an adapter_update
+  // that legitimately carries no credential) does not trip it.
+  private adapterUpdatesWithoutPassword: number = 0;
+  private warnedNoAdapterPassword: boolean = false;
+  private warnedNoCryptoSerial: boolean = false;
 
   // Streaming health tracking
   private streamingHealthCallbacks: Set<(isHealthy: boolean) => void> = new Set();
@@ -738,6 +766,7 @@ export class KumoAPI {
         // Capture the local password for the LAN transport (it appears ONLY here,
         // never in a REST response). Keep stripping it from all log output.
         if (data.deviceSerial && password) {
+          this.adapterUpdatesWithoutPassword = 0;
           this.adapterPasswords.set(data.deviceSerial, password);
           for (const cb of this.adapterPasswordCallbacks) {
             try {
@@ -745,6 +774,19 @@ export class KumoAPI {
             } catch (e) {
               this.log.debug('Adapter password callback error');
             }
+          }
+        } else if (data.deviceSerial) {
+          // An adapter_update for a real device that carried no password at all.
+          // Three in a row is the cloud having stopped sending it, not a one-off.
+          this.adapterUpdatesWithoutPassword++;
+          if (this.adapterUpdatesWithoutPassword >= 3 && !this.warnedNoAdapterPassword) {
+            this.warnedNoAdapterPassword = true;
+            this.log.warn(
+              'Kumo cloud has stopped sending the per-device local password in adapter_update, so '
+              + 'local LAN control cannot authenticate and the plugin is using cloud control. This '
+              + 'is a cloud-side change, not a problem with your network or config. Set '
+              + 'localControl: false to silence this.',
+            );
           }
         }
         this.log.debug(`Adapter update for ${serial}: fw=${safeData.firmwareVersion}, rssi=${safeData.routerRssi}`);
@@ -810,6 +852,51 @@ export class KumoAPI {
         this.log.debug(`A-coil update for ${serial}`);
       });
 
+      // A paired wireless sensor reported. This is the cloud's replacement for the
+      // local `{"c":{"sensors":...}}` leaf, which became unreachable when the cloud
+      // stopped serving local credentials (see SensorReading in settings.ts).
+      this.socket.on('sensor_update', (data: any) => {
+        try {
+          // Key off deviceSerial: it is present and matches the unit (verified live
+          // by a capture handler that filtered on it). We deliberately do NOT resolve
+          // the sensor's own `uuid` back to a device — an event we cannot attribute is
+          // dropped rather than guessed at, since attributing a temperature to the
+          // wrong unit is worse than having none.
+          const serial = data?.deviceSerial;
+          if (typeof serial !== 'string' || serial.length === 0) {
+            this.log.debug('Ignoring sensor_update with no deviceSerial');
+            return;
+          }
+
+          const reading: SensorReading = {
+            deviceSerial: serial,
+            uuid: typeof data.uuid === 'string' ? data.uuid : undefined,
+            battery: asNumberOrNull(data.battery),
+            rssi: asNumberOrNull(data.rssi),
+            txPower: asNumberOrNull(data.txPower),
+            temperature: asNumberOrNull(data.temperature),
+            humidity: asNumberOrNull(data.humidity),
+          };
+
+          this.log.debug(
+            `Sensor update for ${serial}: temp=${reading.temperature}°C, `
+            + `humidity=${reading.humidity}%, battery=${reading.battery}%, rssi=${reading.rssi}`,
+          );
+
+          for (const callback of this.sensorUpdateCallbacks) {
+            try {
+              callback(reading);
+            } catch (e) {
+              this.log.debug('Sensor update callback error');
+            }
+          }
+        } catch (e) {
+          // A throw here would escape into socket.io's emit loop and could take down
+          // the listener for every other event on this socket.
+          this.log.debug('Malformed sensor_update ignored');
+        }
+      });
+
       this.socket.on('disconnect', (reason) => {
         this.log.warn(`✗ Streaming disconnected: ${reason}`);
 
@@ -862,6 +949,11 @@ export class KumoAPI {
     this.deviceProfileCallbacks.add(callback);
   }
 
+  /** Notified whenever a paired wireless sensor reports, via `sensor_update`. */
+  onSensorUpdate(callback: SensorUpdateCallback): void {
+    this.sensorUpdateCallbacks.add(callback);
+  }
+
   // ---- Local-control credential accessors ---------------------------------
 
   /** Notified whenever a device's local password arrives via `adapter_update`. */
@@ -879,6 +971,22 @@ export class KumoAPI {
     const status = await this.makeAuthenticatedRequest<{ cryptoSerial?: string }>(
       `/devices/${serial}/status`,
     );
+    // A null status is a failed request, already logged by makeAuthenticatedRequest.
+    // A status object that simply OMITS cryptoSerial is the cloud-side change: the
+    // endpoint still answers 200, just without the field. That used to return null
+    // silently, so the only symptom a user got was local control never starting.
+    if (status && (typeof status.cryptoSerial !== 'string' || status.cryptoSerial.length === 0)) {
+      if (!this.warnedNoCryptoSerial) {
+        this.warnedNoCryptoSerial = true;
+        this.log.warn(
+          'Kumo cloud has stopped returning cryptoSerial from /devices/<serial>/status, so local '
+          + 'LAN control cannot authenticate and the plugin is using cloud control. This is a '
+          + 'cloud-side change, not a problem with your network or config. Set localControl: false '
+          + 'to silence this.',
+        );
+      }
+      return null;
+    }
     return status?.cryptoSerial ?? null;
   }
 

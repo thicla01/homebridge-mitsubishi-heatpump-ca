@@ -18,8 +18,16 @@ import { MirrorController } from './mirror';
 
 /** How long the initial credential gather waits before falling back to retries. */
 const LOCAL_CRED_INITIAL_WAIT_MS = 25000;
-/** How often to re-nudge devices that still owe us local credentials. */
-const LOCAL_CRED_RETRY_MS = 60000;
+/** First retry delay for devices that still owe us local credentials. */
+const LOCAL_CRED_RETRY_BASE_MS = 60000;
+/** Ceiling for the credential retry backoff. */
+const LOCAL_CRED_RETRY_MAX_MS = 1800000; // 30 minutes
+/**
+ * Consecutive fruitless retry passes before we stop asking. With the doubling
+ * backoff the passes land at 1, 3, 7, 15, 31 and 61 minutes after startup, so six
+ * passes is roughly an hour of wall time.
+ */
+const LOCAL_CRED_MAX_FAILED_PASSES = 6;
 /** How long each retry pass waits for a nudged device to answer. */
 const LOCAL_CRED_RETRY_WAIT_MS = 10000;
 
@@ -46,6 +54,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private localSerials: string[] = [];
   private localCredRetryTimer: NodeJS.Timeout | null = null;
   private localCredRetryRunning: boolean = false;
+  private localCredRetryDelayMs: number = LOCAL_CRED_RETRY_BASE_MS; // doubles per failed pass
+  private localCredFailedPasses: number = 0;
+  // Set once we stop chasing credentials. In-memory only: config.json is never
+  // rewritten, so a restart retries from scratch and local control comes back by
+  // itself if the cloud starts serving the credentials again.
+  private localCredGaveUp: boolean = false;
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -442,7 +456,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     // recover from a wedged cloud session), so a fixed startup window silently
     // strands them on the cloud for the life of the process. Keep nudging the
     // stragglers in the background and admit each one the moment its
-    // credentials show up.
+    // credentials show up. The nudging backs off and eventually gives up: since
+    // 2026-07-31 the cloud serves no credentials at all, and an endless retry
+    // against that is only noise (see abandonLocalCreds).
     this.scheduleLocalCredRetry();
   }
 
@@ -533,22 +549,29 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
   /**
    * Background retry for devices that haven't yielded local credentials yet.
-   * A nudge is a single socket emit, so retrying costs nothing; the expensive
-   * part (the LAN sweep) only runs when a device actually hands over its
-   * credentials. Stops once every device is local.
+   * A nudge is a single socket emit and the expensive part (the LAN sweep) only
+   * runs when a device actually hands over its credentials, but a pass re-nudges
+   * every pending device every couple of seconds for the length of its window, so
+   * a fixed 60s interval against devices that will never answer cost ~1440 emits
+   * an hour and never stopped. Same self-scheduling backoff as
+   * scheduleDiscoveryRetry: 60s doubling to a 30 minute cap, then give up.
+   * Stops early once every device is local.
    */
   private scheduleLocalCredRetry(): void {
-    if (this.localCredRetryTimer || this.pendingLocalSerials().length === 0) {
+    if (this.localCredRetryTimer || this.localCredGaveUp || this.pendingLocalSerials().length === 0) {
       return;
     }
-    this.localCredRetryTimer = setInterval(() => {
-      void this.retryLocalCreds();
-    }, LOCAL_CRED_RETRY_MS);
+    this.localCredRetryTimer = setTimeout(() => {
+      this.localCredRetryTimer = null;
+      void this.retryLocalCreds().then(() => this.scheduleLocalCredRetry());
+    }, this.localCredRetryDelayMs);
+
+    this.localCredRetryDelayMs = Math.min(this.localCredRetryDelayMs * 2, LOCAL_CRED_RETRY_MAX_MS);
   }
 
   private async retryLocalCreds(): Promise<void> {
-    // A sweep can outlast the interval; never let two passes overlap.
-    if (this.localCredRetryRunning || !this.localClient) {
+    // A sweep can outlast the delay; never let two passes overlap.
+    if (this.localCredRetryRunning || !this.localClient || this.localCredGaveUp) {
       return;
     }
     const pending = this.pendingLocalSerials();
@@ -560,9 +583,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     try {
       const creds = await this.gatherLocalCreds(pending, LOCAL_CRED_RETRY_WAIT_MS);
       if (creds.size === 0) {
-        this.log.debug(`Local control: still waiting on ${pending.length} device(s)`);
+        this.log.debug(
+          `Local control: still waiting on ${pending.length} device(s) ` +
+          `(pass ${this.localCredFailedPasses + 1}/${LOCAL_CRED_MAX_FAILED_PASSES})`,
+        );
+        this.noteFailedCredPass(pending);
         return;
       }
+      // Credentials are flowing again, so restart the backoff at its base delay
+      // for whatever is still pending.
+      this.localCredFailedPasses = 0;
+      this.localCredRetryDelayMs = LOCAL_CRED_RETRY_BASE_MS;
       this.log.info(`Local control: credentials arrived for ${creds.size} more device(s)`);
       await this.admitLocalDevices(creds);
       const localCount = this.countLocalDevices();
@@ -576,14 +607,66 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
     } catch (error) {
       this.log.debug(`Local control retry failed: ${(error as Error).message}`);
+      this.noteFailedCredPass(pending);
     } finally {
       this.localCredRetryRunning = false;
     }
   }
 
+  /** Count one fruitless pass and stop for good once we hit the ceiling. */
+  private noteFailedCredPass(pending: string[]): void {
+    this.localCredFailedPasses++;
+    if (this.localCredFailedPasses >= LOCAL_CRED_MAX_FAILED_PASSES) {
+      this.abandonLocalCreds(pending);
+    }
+  }
+
+  /**
+   * Stop chasing credentials that are not coming, and say so once.
+   *
+   * Verified 2026-07-31: Mitsubishi's v3 cloud stopped distributing both halves of
+   * the local key. `password` is gone from the `adapter_update` socket event and
+   * `cryptoSerial` is gone from GET /devices/{serial}/status. Reproduced on
+   * unrelated accounts and on a second client stack (pykumo issue #78), so it is a
+   * cloud-side change, not a per-account or per-network fault. Retrying forever is
+   * noise, and a debug-only line is a silent failure.
+   *
+   * Nothing is persisted: the give-up flag lives in this process only and the
+   * plugin never rewrites config.json, so `localControl` stays true and the next
+   * Homebridge restart runs the whole credential gather again. If the cloud starts
+   * serving the fields, local control returns with no user action.
+   */
+  private abandonLocalCreds(pending: string[]): void {
+    this.localCredGaveUp = true;
+    this.stopLocalCredRetry();
+
+    // With no device on the local path, keeping a client around only makes the
+    // plugin present as local-capable: accessory.sendDeviceCommand and
+    // scheduleSetpointReconcile evaluate their local guards on every write for a
+    // path that cannot work. Drop it so they go straight to the cloud. A partial
+    // result (some units local) keeps the client, since those units still work.
+    if (this.countLocalDevices() === 0) {
+      this.localClient = null;
+      if (this.localPollTimer) {
+        clearInterval(this.localPollTimer);
+        this.localPollTimer = null;
+      }
+    }
+
+    this.log.warn(
+      `Local control unavailable: Kumo Cloud stopped returning the per-device local credentials ` +
+      `(the adapter password in adapter_update and cryptoSerial in GET /devices/{serial}/status are ` +
+      `both absent), so after ${LOCAL_CRED_MAX_FAILED_PASSES} attempts over about an hour ` +
+      `${pending.length} device(s) are using cloud control. This is a cloud-side change, not a ` +
+      `problem with your network or your units, and every feature keeps working over the cloud. ` +
+      `Set "localControl": false in the Homebridge config to silence this; leaving it true costs ` +
+      `nothing and local control resumes on its own at the next restart if the credentials come back.`,
+    );
+  }
+
   private stopLocalCredRetry(): void {
     if (this.localCredRetryTimer) {
-      clearInterval(this.localCredRetryTimer);
+      clearTimeout(this.localCredRetryTimer);
       this.localCredRetryTimer = null;
     }
   }

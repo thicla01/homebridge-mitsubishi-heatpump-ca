@@ -160,6 +160,41 @@ export interface DeviceStatus {
   standby?: boolean;
   defrost?: boolean;
   filterDirty?: boolean;
+  /** Wireless-sensor battery percent, when the unit has a paired sensor. */
+  sensorBattery?: number | null;
+}
+
+/**
+ * A reading from a unit's paired wireless sensor, via the cloud `sensor_update` event.
+ *
+ * This exists because the v3 cloud stopped distributing the two secrets local LAN
+ * control needs: the per-device `password` vanished from the `adapter_update` payload
+ * and `cryptoSerial` vanished from `GET /devices/{serial}/status` (confirmed cloud-side
+ * and account-independent — pykumo issue #78, 2026-07-31, reproduced by its maintainer).
+ * Local control is dead until that reverses, and with it went the `{"c":{"sensors":...}}`
+ * leaf that `local-api.ts:getSensorReadings` used for the sensor's fine-grained
+ * temperature, humidity and battery.
+ *
+ * A `sensor_update` Socket.IO event appeared in the same window carrying exactly that
+ * data per device, so it is now the only source for it. It matters for more than
+ * humidity: the unit quantizes `roomTemp` to 0.5°C before reporting while the sensor
+ * reports ~6 decimals (22.30543 against 22.5), and three of the four units tested
+ * regulate FROM the sensor (`tempSource: 'sensor0'`), so the sensor is the real
+ * thermostat. The finer value also removes a display ambiguity: 22.5°C is exactly
+ * 72.5°F, the one 0.5°C step where a rounding renderer shows 73 and a truncating one
+ * shows 72.
+ *
+ * Every field but `deviceSerial` is optional and nullable: the event is coerced
+ * defensively, and anything that did not arrive as a number becomes null.
+ */
+export interface SensorReading {
+  deviceSerial: string;
+  uuid?: string;
+  battery?: number | null;
+  rssi?: number | null;
+  txPower?: number | null;
+  temperature?: number | null;
+  humidity?: number | null;
 }
 
 export interface DeviceProfile {

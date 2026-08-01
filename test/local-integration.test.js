@@ -32,7 +32,9 @@ const Characteristic = new Proxy({}, {
         _name: String(prop),
         OFF: 0, HEAT: 1, COOL: 2, AUTO: 3,
         INACTIVE: 0, ACTIVE: 1,
-        IDLE: 1, HEATING: 2, COOLING: 3,
+        IDLE: 1, HEATING: 2, COOLING: 3, BLOWING_AIR: 2,
+        // hap-nodejs values: FilterChangeIndication FILTER_OK=0 / CHANGE_FILTER=1.
+        FILTER_OK: 0, CHANGE_FILTER: 1,
         SWING_DISABLED: 0, SWING_ENABLED: 1,
         FIXED: 0, JAMMED: 1, SWINGING: 2,
         HORIZONTAL: 0, VERTICAL: 1,
@@ -62,7 +64,7 @@ function makeCharacteristic() {
 function makeService(type, name, subtype) {
   const chars = new Map();
   const svc = {
-    type, name, subtype,
+    type, name, subtype, chars,
     getCharacteristic(id) { if (!chars.has(id)) chars.set(id, makeCharacteristic()); return chars.get(id); },
     setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
     updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
@@ -97,6 +99,7 @@ function makeLocalClient(over = {}) {
 
 function makeHarness({ localClient = null } = {}) {
   const sendCommandCalls = [];
+  let streamCb = null;
   const platform = {
     Service,
     Characteristic,
@@ -106,12 +109,20 @@ function makeHarness({ localClient = null } = {}) {
     localClient,
   };
   const kumoAPI = {
-    subscribeToDevice() {},
+    // Capture the streaming callback rather than dropping it: displayConfig
+    // (standby / defrost / filter) only ever arrives on this transport, so the
+    // carry-across tests below have no other way to put it in the cache.
+    subscribeToDevice(serial, cb) { streamCb = cb; },
     onDeviceProfileUpdate() {},
     sendCommand(serial, commands) { sendCommandCalls.push({ serial, commands }); return Promise.resolve(true); },
   };
-  const handler = new KumoThermostatAccessory(platform, makeAccessory(), kumoAPI, 30);
-  return { handler, sendCommandCalls, platform };
+  const accessory = makeAccessory();
+  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  return {
+    handler, sendCommandCalls, platform, accessory,
+    emitStreaming: (data) => streamCb(SERIAL, data),
+    heaterCooler: () => accessory.getService(Service.HeaterCooler),
+  };
 }
 
 const localStatus = (over = {}) => ({
@@ -171,6 +182,105 @@ test('cloud updates still apply when no local data exists', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(cloudZone({ roomTemp: 30 }));
   assert.strictEqual(await handler.getCurrentTemperature(), 30, 'pure-cloud path unaffected');
+});
+
+// ---- standby / defrost / filter survive a status rebuild ------------------
+//
+// processZoneUpdate rebuilds DeviceStatus from the zone payload on every update.
+// standby, defrost and filterDirty are NOT in /sites/{id}/zones — they arrive in
+// the streaming `displayConfig` and in the local status, both of which apply them
+// AFTER processZoneUpdate returns. Without carrying them across the rebuild the
+// poll (every 30s by default, alongside streaming) dropped them back to undefined,
+// and the characteristics that read them reported a working compressor for a unit
+// that was idling.
+
+const streamingUpdate = (over = {}) => ({
+  id: 'zone-1', deviceSerial: SERIAL, roomTemp: 24, spHeat: 20, spCool: 23,
+  spAuto: null, power: 1, operationMode: 'cool', fanSpeed: 'auto',
+  airDirection: 'auto', humidity: null, rssi: -50,
+  displayConfig: { filter: false, defrost: false, standby: true, hotAdjust: false },
+  ...over,
+});
+
+test('a cloud poll does not wipe the standby flag the streaming event delivered', async () => {
+  const { handler, emitStreaming } = makeHarness();
+  emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
+  assert.strictEqual(
+    await handler.getCurrentHeaterCoolerState(),
+    Characteristic.CurrentHeaterCoolerState.IDLE,
+    'streaming reported the compressor idle',
+  );
+
+  handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
+
+  assert.strictEqual(
+    await handler.getCurrentHeaterCoolerState(),
+    Characteristic.CurrentHeaterCoolerState.IDLE,
+    'the zones payload carries no standby — losing it reports a running compressor',
+  );
+});
+
+test('the state PUSHED to HomeKit by the poll is idle too, not just the cached read', async () => {
+  // The Home app shows the pushed value; a getter that disagrees with it is no
+  // help. mapToCurrentHeaterCoolerState runs inside processZoneUpdate, so it sees
+  // the rebuilt status, which is where the flag used to go missing.
+  const h = makeHarness();
+  h.emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
+
+  h.handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
+
+  const pushed = h.heaterCooler().chars.get(Characteristic.CurrentHeaterCoolerState).value;
+  assert.strictEqual(pushed, Characteristic.CurrentHeaterCoolerState.IDLE);
+});
+
+test('the fan reports idle rather than blowing air while the compressor is in standby', async () => {
+  const { handler, emitStreaming } = makeHarness();
+  emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
+
+  handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
+
+  assert.strictEqual(
+    await handler.getCurrentFanState(),
+    Characteristic.CurrentFanState.IDLE,
+    'the second consumer of the same flag',
+  );
+});
+
+test('a unit that is genuinely running still reports cooling after a poll', async () => {
+  // The carry-across must not pin a stale idle either: a streaming event saying
+  // standby is over has to survive the next poll the same way.
+  const { handler, emitStreaming } = makeHarness();
+  emitStreaming(streamingUpdate({ displayConfig: { standby: true, filter: false, defrost: false } }));
+  emitStreaming(streamingUpdate({ displayConfig: { standby: false, filter: false, defrost: false } }));
+
+  handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
+
+  assert.strictEqual(
+    await handler.getCurrentHeaterCoolerState(),
+    Characteristic.CurrentHeaterCoolerState.COOLING,
+  );
+});
+
+test('the filter indication survives a poll as well', async () => {
+  // updateFilterMaintenance re-reads the cached flag (`filterDirty ?? false`) on
+  // every streaming event. A poll in between that dropped the flag therefore
+  // cleared a genuine "change the filter" warning on the very next event.
+  const { handler, accessory, emitStreaming } = makeHarness();
+  emitStreaming(streamingUpdate({ displayConfig: { standby: false, filter: true, defrost: false } }));
+  const filterSvc = accessory.getService(Service.FilterMaintenance);
+  const dirty = filterSvc.chars.get(Characteristic.FilterChangeIndication).value;
+  assert.strictEqual(dirty, Characteristic.FilterChangeIndication.CHANGE_FILTER);
+
+  handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
+  // A later streaming event that carries no displayConfig at all — the adapter
+  // does not send one on every update.
+  emitStreaming(streamingUpdate({ displayConfig: undefined, roomTemp: 24.5 }));
+
+  assert.strictEqual(
+    filterSvc.chars.get(Characteristic.FilterChangeIndication).value,
+    Characteristic.FilterChangeIndication.CHANGE_FILTER,
+    'the warning must not clear itself just because a poll rebuilt the status',
+  );
 });
 
 // ---- sendDeviceCommand routing --------------------------------------------

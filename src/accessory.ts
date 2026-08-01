@@ -2,7 +2,7 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
-  POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
+  POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
@@ -66,6 +66,40 @@ export class KumoThermostatAccessory {
   // status source and cloud updates are dropped (the cloud lags ~7-10s and would
   // otherwise clobber fresher local data). Should exceed the local poll interval.
   private readonly LOCAL_AUTHORITATIVE_MS = 45000;
+
+  // ---- Paired wireless sensor (cloud `sensor_update`) ---------------------
+  // The unit quantizes its own roomTemp to 0.5°C before reporting it; the paired
+  // wireless sensor reports ~6 decimals (22.30543 against the unit's 22.5), and
+  // on three of the four units here the unit REGULATES from that sensor
+  // (tempSource 'sensor0'), so the sensor is the real thermostat. The finer value
+  // also removes a display ambiguity: 22.5°C is exactly 72.5°F, the one 0.5°C step
+  // where a rounding renderer shows 73°F and a truncating one shows 72°F.
+  //
+  // PRECEDENCE. A cloud poll or streaming event carries the coarse roomTemp and
+  // would otherwise clobber the fine value seconds after it arrives. This is
+  // resolved the same way as LOCAL_AUTHORITATIVE_MS above, and deliberately not by
+  // last-writer-wins: while a sensor reading is fresher than SENSOR_AUTHORITATIVE_MS,
+  // the sensor is the authoritative temperature/humidity source and every update
+  // path (streaming, cloud poll, local poll) has its coarse value SUBSTITUTED in
+  // processZoneUpdate before it reaches either the cache or HomeKit. The rest of
+  // the update applies untouched. That makes the outcome independent of arrival
+  // order rather than racing it, and it fails safe: once the sensor stops
+  // reporting the window lapses and the unit's own roomTemp takes over again.
+  private sensorTemp: number | null = null;
+  private sensorHumidity: number | null = null;
+  private sensorReadingTs: number = 0;
+  // Bounds how long a stale sensor value can hold the display. The cadence of
+  // `sensor_update` has not been measured, so this is chosen rather than derived:
+  // long enough to sit well clear of the 30s cloud poll it is protecting against,
+  // short enough that a sensor that has gone quiet cannot pin CurrentTemperature
+  // for long. If the sensor reports less often than this, the reading simply
+  // decays to the unit's coarse roomTemp between reports — coarser, never wrong.
+  private readonly SENSOR_AUTHORITATIVE_MS = 300000;
+  private batteryService: Service | null = null;
+  // Below this percent the sensor is reported as low. HAP has no threshold of its
+  // own; 20% is the convention Homebridge accessories use.
+  private readonly LOW_BATTERY_PCT = 20;
+
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
   private filterMaintenanceService: Service | null = null;
@@ -284,6 +318,139 @@ export class KumoThermostatAccessory {
       }
     });
 
+    // Register for paired-wireless-sensor readings. `sensor_update` is broadcast
+    // for every sensor on the account, so filter on deviceSerial exactly as the
+    // profile subscription above does. An event without a deviceSerial matches
+    // nothing and is therefore ignored rather than crashing the handler.
+    //
+    // Guarded on the method existing for the same reason linkSecondaryService is:
+    // this runs during construction, where a throw takes out the whole accessory,
+    // and a KumoAPI built before sensor_update existed does not carry it.
+    if (typeof this.kumoAPI.onSensorUpdate === 'function') {
+      this.kumoAPI.onSensorUpdate((reading: SensorReading) => {
+        if (reading && reading.deviceSerial === this.deviceSerial) {
+          this.handleSensorUpdate(reading);
+        }
+      });
+    }
+
+  }
+
+  /**
+   * Apply one paired-wireless-sensor reading.
+   *
+   * Telemetry ONLY. It never touches power, operationMode or the setpoints, and it
+   * deliberately does not fire the status listeners: the mirror is driven by
+   * *commanded* state (see mirror.ts's signature), and a room warming up by a
+   * tenth of a degree is not a command. Feeding it there would push the source
+   * unit's full state onto every mirror target every time the sensor breathed.
+   */
+  private handleSensorUpdate(reading: SensorReading): void {
+    const temperature = reading.temperature;
+    const humidity = reading.humidity;
+    const battery = reading.battery;
+
+    if (typeof temperature === 'number' && !isNaN(temperature)) {
+      this.sensorTemp = temperature;
+      this.sensorReadingTs = Date.now();
+      if (this.currentStatus) {
+        this.currentStatus.roomTemp = temperature;
+      }
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CurrentTemperature,
+        temperature,
+      );
+      this.platform.log.debug(
+        `[SENSOR] ${this.accessory.displayName}: ${temperature}°C ` +
+        `(${cToF(temperature).toFixed(2)}°F) from the paired wireless sensor`,
+      );
+    }
+
+    if (typeof humidity === 'number' && !isNaN(humidity)) {
+      this.sensorHumidity = humidity;
+      this.sensorReadingTs = Date.now();
+      if (this.currentStatus) {
+        this.currentStatus.humidity = humidity;
+      }
+      // Same latch and config gate the poll path uses: opting out of the humidity
+      // service must not be undone by the sensor arriving from a different event.
+      if (this.platform.kumoConfig.showHumiditySensor !== false) {
+        if (!this.hasHumiditySensor) {
+          this.hasHumiditySensor = true;
+          this.setupHumidityService();
+        }
+        this.humidityService?.updateCharacteristic(
+          this.platform.Characteristic.CurrentRelativeHumidity,
+          humidity,
+        );
+      }
+    }
+
+    if (typeof battery === 'number' && !isNaN(battery)) {
+      if (this.currentStatus) {
+        this.currentStatus.sensorBattery = battery;
+      }
+      this.updateSensorBattery(battery);
+    }
+  }
+
+  /** True while the paired sensor is the authoritative temperature/humidity source. */
+  private sensorReadingFresh(): boolean {
+    return this.sensorReadingTs > 0 &&
+      (Date.now() - this.sensorReadingTs) < this.SENSOR_AUTHORITATIVE_MS;
+  }
+
+  /**
+   * The paired sensor's battery, as its own Battery service.
+   *
+   * Created lazily on the first reading that actually carries a battery value, so
+   * a unit with no paired sensor (the Garage) never grows the service. Follows the
+   * lazy-create pattern of setupHumidityService: adopt a cached service if there
+   * is one, publish the structure change only when the service is genuinely new.
+   *
+   * WHY THIS IS WORTH A SERVICE: three of the four units regulate FROM the
+   * wireless sensor, so a dead sensor battery silently moves the control point
+   * from the wall back to the unit at the ceiling — the unit keeps working, just
+   * against a temperature several degrees off the one the room is at. Nothing else
+   * surfaces that.
+   *
+   * Note the accessory itself is mains powered; this battery belongs to the
+   * sensor, not the heat pump. HomeKit has no way to say that, so Apple Home will
+   * label the low-battery warning with the ACCESSORY's name ("Bedroom has a low
+   * battery"), which is why the service is named for the sensor.
+   */
+  private updateSensorBattery(percent: number): void {
+    const C = this.platform.Characteristic;
+    // BatteryLevel is a uint8 percentage. The value comes off the cloud, so clamp
+    // and round it here rather than handing HAP something it will reject.
+    const level = Math.max(0, Math.min(100, Math.round(percent)));
+
+    if (!this.batteryService) {
+      const existing = this.accessory.getService(this.platform.Service.Battery);
+      const name = `${this.accessory.context.device.displayName} Sensor Battery`;
+      this.batteryService =
+        existing || this.accessory.addService(this.platform.Service.Battery, name);
+      this.batteryService.setCharacteristic(C.Name, name);
+      // Verified against hap-nodejs ServiceDefinitions: Battery requires
+      // StatusLowBattery and optionally allows BatteryLevel, ChargingState and
+      // Name. Nothing else goes on it — an out-of-set characteristic makes
+      // Homebridge log a warning on every start, which is exactly what
+      // ConfiguredName on Fanv2 did.
+      this.batteryService.setCharacteristic(C.ChargingState, C.ChargingState.NOT_CHARGEABLE);
+      this.linkSecondaryService(this.batteryService);
+      if (!existing) {
+        this.publishStructureChange();
+      }
+      this.platform.log.debug(`Added sensor Battery service for ${this.accessory.displayName}`);
+    }
+
+    this.batteryService.updateCharacteristic(C.BatteryLevel, level);
+    this.batteryService.updateCharacteristic(
+      C.StatusLowBattery,
+      level < this.LOW_BATTERY_PCT
+        ? C.StatusLowBattery.BATTERY_LEVEL_LOW
+        : C.StatusLowBattery.BATTERY_LEVEL_NORMAL,
+    );
   }
 
   private applyDeviceProfile(profile: DeviceProfile): void {
@@ -881,10 +1048,25 @@ export class KumoThermostatAccessory {
         return;
       }
 
+      // A fresh paired-sensor reading outranks this update's temperature and
+      // humidity, whichever transport it arrived on. Substituted HERE, before the
+      // cache and every characteristic below are written, so the coarse value
+      // never lands anywhere: the sensor wins by precedence rather than by
+      // winning a race. See SENSOR_AUTHORITATIVE_MS. Everything else in the
+      // update — mode, power, setpoints, fan, vane — applies untouched, because a
+      // sensor knows nothing about any of it.
+      const sensorFresh = this.sensorReadingFresh();
+      const effectiveRoomTemp = sensorFresh && this.sensorTemp !== null
+        ? this.sensorTemp
+        : zone.adapter.roomTemp;
+      const effectiveHumidity = sensorFresh && this.sensorHumidity !== null
+        ? this.sensorHumidity
+        : zone.adapter.humidity;
+
       // Check if device has a humidity reading and add the sensor service if so.
       // CurrentRelativeHumidity is NOT a valid characteristic on HeaterCooler
       // (it was optional on Thermostat), so humidity needs its own service.
-      const hasHumidity = zone.adapter.humidity !== null && zone.adapter.humidity !== undefined;
+      const hasHumidity = effectiveHumidity !== null && effectiveHumidity !== undefined;
       const wantHumidity = this.platform.kumoConfig.showHumiditySensor !== false;
       if (hasHumidity && wantHumidity && !this.hasHumiditySensor) {
         this.hasHumiditySensor = true;
@@ -903,7 +1085,7 @@ export class KumoThermostatAccessory {
         rssi: zone.adapter.rssi || 0,
         power: zone.adapter.power,
         operationMode: zone.adapter.operationMode,
-        humidity: zone.adapter.humidity,
+        humidity: effectiveHumidity,
         // The zones payload carries neither fan speed nor vane (they live in the
         // streaming `device_update` and in GET /devices/{serial}); both are optional
         // on Adapter for that reason. Default them exactly as the two streaming
@@ -913,10 +1095,25 @@ export class KumoThermostatAccessory {
         // update sources fired a spurious mirror push.
         fanSpeed: zone.adapter.fanSpeed || 'auto',
         airDirection: zone.adapter.airDirection || 'auto',
-        roomTemp: zone.adapter.roomTemp,
+        roomTemp: effectiveRoomTemp,
         spCool: zone.adapter.spCool,
         spHeat: zone.adapter.spHeat,
         spAuto: zone.adapter.spAuto,
+        // The sensor battery is in no zone/streaming payload — it arrives only on
+        // sensor_update — so carry it across this rebuild of the status object.
+        sensorBattery: this.currentStatus?.sensorBattery ?? null,
+        // Same shape, three more fields. standby/defrost/filterDirty are in the
+        // streaming `displayConfig` and in the local status, but NOT in the
+        // /sites/{id}/zones payload, and both of those sources apply them *after*
+        // this call returns. Without carrying them the rebuild left them undefined,
+        // so mapToCurrentHeaterCoolerState below (which reads `standby === true`)
+        // and getCurrentFanState never once reported IDLE for a unit whose
+        // compressor was idling — the characteristic was pushed as COOLING/HEATING
+        // before the source had a chance to set the flag. Carrying the last known
+        // value makes the push at worst one update stale instead of always wrong.
+        standby: this.currentStatus?.standby,
+        defrost: this.currentStatus?.defrost,
+        filterDirty: this.currentStatus?.filterDirty,
       };
 
       this.currentStatus = status;
@@ -1855,6 +2052,11 @@ export class KumoThermostatAccessory {
   async getCurrentTemperature(): Promise<CharacteristicValue> {
     // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
+      // A sensor_update can land before the first device_update, and a real
+      // reading beats the placeholder.
+      if (this.sensorReadingFresh() && this.sensorTemp !== null) {
+        return this.sensorTemp;
+      }
       this.platform.log.debug('No status available yet for getCurrentTemperature, returning default');
       return 20; // Default fallback temperature
     }
