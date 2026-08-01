@@ -19,99 +19,10 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
 const OTHER_SERIAL = 'TESTSERIAL002';
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = {
-        _name: String(prop),
-        OFF: 0, HEAT: 1, COOL: 2, AUTO: 0,
-        INACTIVE: 0, ACTIVE: 1,
-        IDLE: 1, HEATING: 2, COOLING: 3, BLOWING_AIR: 2,
-        MANUAL: 0,
-        SWING_DISABLED: 0, SWING_ENABLED: 1,
-        FIXED: 0, SWINGING: 2, HORIZONTAL: 0, VERTICAL: 1,
-        CELSIUS: 0, FAHRENHEIT: 1,
-        // Battery. Values verified against hap-nodejs CharacteristicDefinitions:
-        // StatusLowBattery NORMAL=0 / LOW=1, ChargingState NOT_CHARGEABLE=2.
-        BATTERY_LEVEL_NORMAL: 0, BATTERY_LEVEL_LOW: 1,
-        NOT_CHARGING: 0, CHARGING: 1, NOT_CHARGEABLE: 2,
-      };
-    }
-    return charCache[prop];
-  },
-});
-charCache.TargetFanState = { _name: 'TargetFanState', MANUAL: 0, AUTO: 1 };
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler',
-  Fanv2: 'Fanv2',
-  Slats: 'Slats',
-  HumiditySensor: 'HumiditySensor',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-  Battery: 'Battery',
-};
-
-function makeCharacteristic() {
-  const ch = {
-    value: undefined,
-    onGet() { return ch; }, onSet() { return ch; }, setProps(p) { ch.props = p; return ch; },
-  };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype, chars,
-    getCharacteristic(id) {
-      if (!chars.has(id)) chars.set(id, makeCharacteristic());
-      return chars.get(id);
-    },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory(displayName = 'Bedroom') {
-  const entries = [
-    { type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) },
-  ];
-  return {
-    displayName,
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName } },
-    getService(type) {
-      const e = entries.find((x) => x.type === type && x.subtype === undefined);
-      return e ? e.svc : null;
-    },
-    getServiceById(type, subtype) {
-      const e = entries.find((x) => x.type === type && x.subtype === subtype);
-      return e ? e.svc : null;
-    },
-    addService(type, name, subtype) {
-      const svc = makeService(type, name, subtype);
-      entries.push({ type, subtype, svc });
-      return svc;
-    },
-    removeService(svc) {
-      const i = entries.findIndex((x) => x.svc === svc);
-      if (i >= 0) entries.splice(i, 1);
-    },
-  };
-}
 
 // The harness now has to supply onSensorUpdate as well as the streaming and
 // profile hooks — the accessory subscribes to all three in its constructor.

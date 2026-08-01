@@ -24,11 +24,7 @@ const {
   LocalKumoClient,
 } = require('../dist/local-api.js');
 const { normalizeFanSpeed, FAN_SPEEDS } = require('../dist/settings.js');
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
+const { makeLog } = require('./helpers.js');
 
 // ---- _api_error classification ------------------------------------------
 //

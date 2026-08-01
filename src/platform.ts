@@ -362,7 +362,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         if (streamingStarted) {
           this.log.info('✓ Streaming enabled - devices will update in real-time');
         } else {
+          // startStreaming resolves false when the socket did not connect (error or
+          // timeout). Nothing will fire a health change in that case - the socket was
+          // never healthy to begin with - so this branch has to start the fallback
+          // itself. Under `disablePolling: true` it is the only thing that starts any
+          // poller at all; the branch used to log this line and poll nothing.
           this.log.warn('Streaming failed to start - falling back to polling');
+          this.enterDegradedMode();
         }
 
         // Log startup configuration summary
@@ -767,6 +773,15 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       // Fetch all zones for this site
       const zones = await this.kumoAPI.getZones(siteId);
 
+      // A failed fetch returns no zones at all, already logged by getZones. Saying
+      // so once beats one "Zone not found" warning per device: degraded polling runs
+      // every 10s, and the outage that put us in degraded mode is exactly when every
+      // poll comes back empty.
+      if (zones.length === 0) {
+        this.log.debug(`No zones returned for site ${siteId}`);
+        return;
+      }
+
       // Distribute zone data to each accessory
       const accessories = this.siteAccessories.get(siteId) || [];
       for (const handler of accessories) {
@@ -793,9 +808,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     const wasHealthy = this.isStreamingHealthy;
     this.isStreamingHealthy = isHealthy;
 
-    // If streaming became unhealthy, switch to degraded mode IMMEDIATELY
+    // If streaming is unhealthy, switch to degraded mode IMMEDIATELY
     // (No hysteresis - we need polling fallback right away)
-    if (wasHealthy && !isHealthy) {
+    //
+    // Deliberately not gated on `wasHealthy`: a socket that never connected in the
+    // first place has never been healthy, so requiring a healthy->unhealthy edge
+    // meant the one case with no updates at all could not reach the fallback.
+    // enterDegradedMode is idempotent.
+    if (!isHealthy) {
       // Cancel any pending mode change (e.g., pending exit from degraded mode)
       if (this.pendingModeChange) {
         clearTimeout(this.pendingModeChange);
@@ -865,7 +885,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       this.log.warn('→ Overriding disablePolling setting for fallback');
     }
 
-    // Restart all site pollers with degraded interval
+    // Start (or speed up) a poller for every site. Under `disablePolling: true` none
+    // exist yet, so this is the only place they are ever created.
     this.restartAllPollers(this.degradedPollInterval);
   }
 
@@ -896,13 +917,34 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
   }
 
+  /** Every site that has at least one accessory. */
+  private siteIds(): string[] {
+    return [...new Set(this.accessoryHandlers.map(handler => handler.getSiteId()).filter(Boolean))];
+  }
+
   /**
-   * Restart all site pollers with new interval
+   * Bring every site's poller up at `intervalMs`, starting the ones that do not
+   * exist yet.
+   *
+   * Starting the missing ones is what makes the degraded-mode fallback real. Under
+   * the recommended `disablePolling: true`, discovery never calls startSitePoller,
+   * so this map is empty when streaming fails: a "restart all" restarted nothing
+   * while logging "0 site poller(s) active", and the fallback polled nothing at all.
    */
   private restartAllPollers(intervalMs: number): void {
     const intervalSec = intervalMs / 1000;
 
-    for (const [siteId, timer] of this.sitePollers) {
+    for (const siteId of this.siteIds()) {
+      const timer = this.sitePollers.get(siteId);
+
+      // startSitePoller derives its interval from isDegradedMode, which both callers
+      // set before calling us, so a site started here comes up at intervalMs too. It
+      // also does its own immediate poll and groups the site's accessories.
+      if (!timer) {
+        this.startSitePoller(siteId);
+        continue;
+      }
+
       clearInterval(timer);
 
       // Do immediate poll

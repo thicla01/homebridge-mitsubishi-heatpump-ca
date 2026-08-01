@@ -11,14 +11,10 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoV3Platform } = require('../dist/platform.js');
+const { makeLog } = require('./helpers.js');
 
 const A = 'SERIAL-A';
 const B = 'SERIAL-B';
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
 
 function makeApi() {
   return {

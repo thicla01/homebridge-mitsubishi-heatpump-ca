@@ -95,7 +95,7 @@
         "default": 60,
         "minimum": 30,
         "maximum": 600,
-        "description": "Consider streaming stale if no updates received for this long (default: 60 seconds)"
+        "description": "Deprecated and inert: nothing in the plugin reads this. Streaming health is decided by the Socket.IO connection state on the streamingHealthCheckInterval tick. Kept so an existing config.json that sets it stays valid."
       },
       "degradedPollInterval": {
         "title": "Degraded Mode Poll Interval (seconds)",
@@ -106,10 +106,10 @@
         "description": "Fast polling interval when streaming is unhealthy (default: 10 seconds)"
       },
       "localControl": {
-        "title": "Enable Local Control (experimental)",
+        "title": "Enable Local Control (currently blocked by the vendor)",
         "type": "boolean",
         "default": false,
-        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. The cloud is still used for discovery, credentials, and as a per-unit fallback. Your Homebridge host must share a network with the units."
+        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. Around 2026-07-31 Mitsubishi's cloud stopped serving the two per-device secrets a unit's adapter needs to authenticate a local request (pykumo issue #78), so this cannot work at present and everything runs over the cloud. Leaving it on costs one warning and nothing else: the plugin recovers by itself if the vendor reverts. Requires a full Homebridge restart to toggle (child bridges get their config from the parent process)."
       },
       "localPollInterval": {
         "title": "Local Poll Interval (seconds)",
@@ -156,8 +156,21 @@
       "title": "Kumo Cloud Credentials",
       "expandable": false,
       "items": [
+        "name",
         "username",
         "password"
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Display Options",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "showHumiditySensor",
+        "showDrySwitch",
+        "showFanOnlySwitch",
+        "exposeVaneSlat"
       ]
     },
     {
@@ -193,7 +206,11 @@
       "expanded": false,
       "items": [
         "localControl",
-        "localPollInterval"
+        "localPollInterval",
+        {
+          "type": "help",
+          "helpvalue": "<div class=\"help-block\"><b>Local IP overrides</b> (<code>localControlIps</code>) are a free-form <code>{ \"&lt;deviceSerial&gt;\": \"&lt;ip&gt;\" }</code> map, which this form cannot render as fields. Set it in the JSON config editor if you want to skip the LAN sweep for specific units. Any value already there is preserved.</div>"
+        }
       ]
     },
     {

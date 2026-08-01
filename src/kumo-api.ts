@@ -55,7 +55,6 @@ export function toCloudCommands(commands: Commands): CloudCommands {
 // Event callback types
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
-export type DeviceConnectionCallback = (deviceSerial: string, connected: boolean) => void;
 export type SensorUpdateCallback = (reading: SensorReading) => void;
 
 /**
@@ -84,17 +83,13 @@ export class KumoAPI {
   private streamingEnabled: boolean = true;
   private deviceUpdateCallbacks: Map<string, DeviceUpdateCallback> = new Map();
 
-  // Device profile and connection status
-  private deviceProfiles: Map<string, DeviceProfile> = new Map();
-  private deviceConnectionStatus: Map<string, boolean> = new Map();
+  // Device profiles, delivered to the accessories via `profile_update`.
   private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
-  private deviceConnectionCallbacks: Set<DeviceConnectionCallback> = new Set();
 
   // Local-control credentials: the per-device local password arrives only in the
   // `adapter_update` Socket.IO event (never via REST). We capture it here for the
   // local LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
   private adapterPasswords: Map<string, string> = new Map();
-  private adapterPasswordCallbacks: Set<(serial: string, password: string) => void> = new Set();
 
   // Paired wireless sensor readings, via the `sensor_update` event.
   private sensorUpdateCallbacks: Set<SensorUpdateCallback> = new Set();
@@ -124,6 +119,12 @@ export class KumoAPI {
   private readonly maxRetryAttempts: number = 5;
   private readonly baseRetryDelay: number = 5000; // 5 seconds
   private readonly minLoginInterval: number = 10000; // Minimum 10 seconds between login attempts
+  // Re-arm delay after a refresh that failed outright. Short on purpose: by then the
+  // token is already inside its 5 minute expiry buffer.
+  private readonly refreshRetryDelay: number = 60000; // 60 seconds
+  // Ceiling on how long startStreaming waits for the socket to come up before
+  // reporting failure. Matches the socket.io connection timeout below.
+  private readonly socketConnectTimeout: number = 20000; // 20 seconds
 
   constructor(
     private readonly username: string,
@@ -260,7 +261,11 @@ export class KumoAPI {
     }
   }
 
-  private scheduleTokenRefresh(): void {
+  /**
+   * Arm the next token refresh. `delayMs` overrides the normal 15 minute schedule
+   * and is used to retry after a refresh that failed outright.
+   */
+  private scheduleTokenRefresh(delayMs?: number): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
     }
@@ -269,13 +274,22 @@ export class KumoAPI {
     // Add random jitter (0-60 seconds) to avoid predictable timing that triggers rate limits
     const baseRefreshIn = TOKEN_REFRESH_INTERVAL - (5 * 60 * 1000);
     const jitter = Math.floor(Math.random() * 60000); // 0-60 seconds random jitter
-    const refreshIn = baseRefreshIn + jitter;
+    const refreshIn = delayMs ?? baseRefreshIn + jitter;
 
-    this.log.debug(`Token refresh scheduled in ${Math.round(refreshIn / 1000)}s (includes ${Math.round(jitter / 1000)}s jitter)`);
+    this.log.debug(`Token refresh scheduled in ${Math.round(refreshIn / 1000)}s`);
 
     this.refreshTimer = setTimeout(async () => {
-      this.log.debug('Refreshing access token');
-      await this.refreshAccessToken();
+      const refreshed = await this.refreshAccessToken();
+      if (!refreshed) {
+        // The other two scheduleTokenRefresh call sites are both on success paths
+        // (login, and refreshAccessToken's own), so without this re-arm one failed
+        // refresh ends the chain for the life of the process. With
+        // `disablePolling: true` there is no REST traffic left to drive
+        // ensureAuthenticated either, so a partition outlasting the 20 minute token
+        // lifetime left the plugin unauthenticated until Homebridge was restarted.
+        this.log.warn(`Token refresh failed - retrying in ${Math.round(this.refreshRetryDelay / 1000)}s`);
+        this.scheduleTokenRefresh(this.refreshRetryDelay);
+      }
     }, refreshIn);
   }
 
@@ -596,19 +610,6 @@ export class KumoAPI {
     }
   }
 
-  async getDeviceStatus(deviceSerial: string): Promise<DeviceStatus | null> {
-    this.log.debug(`Fetching status for device: ${deviceSerial}`);
-    const status = await this.makeAuthenticatedRequest<DeviceStatus>(`/devices/${deviceSerial}/status`);
-
-    // Log raw JSON to see all available fields
-    if (this.debugMode && status) {
-      this.log.info(`  RAW Device Status JSON for ${deviceSerial}:`);
-      this.log.info(JSON.stringify(status, null, 2));
-    }
-
-    return status;
-  }
-
   async sendCommand(deviceSerial: string, commands: Commands): Promise<boolean> {
     const wire = toCloudCommands(commands);
     this.log.debug(`Sending command to device ${deviceSerial}:`, JSON.stringify(wire));
@@ -673,12 +674,36 @@ export class KumoAPI {
 
       this.socket = io(SOCKET_BASE_URL, {
         transports: ['polling', 'websocket'],
-        timeout: 20000, // 20 second connection timeout
+        timeout: this.socketConnectTimeout,
         extraHeaders: {
           'Authorization': `Bearer ${this.accessToken}`,
           'Accept': '*/*',
           'User-Agent': 'kumocloud/1122',
         },
+      });
+
+      // Resolve on the first of connect / connect_error / timeout. Returning true as
+      // soon as the socket object existed reported a socket that never connected as a
+      // working stream: the platform logged "Streaming enabled" and, under
+      // `disablePolling: true`, then started no poller at all. Socket.IO keeps
+      // retrying underneath either way, so a false here means "not up yet", not
+      // "gone": the connect handler below reports recovery.
+      const connected = new Promise<boolean>((resolve) => {
+        let settled = false;
+        const settle = (isConnected: boolean): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(connectTimer);
+          resolve(isConnected);
+        };
+        const connectTimer = setTimeout(() => {
+          this.log.warn(`Streaming did not connect within ${this.socketConnectTimeout / 1000}s`);
+          settle(false);
+        }, this.socketConnectTimeout);
+        this.socket?.once('connect', () => settle(true));
+        this.socket?.once('connect_error', () => settle(false));
       });
 
       this.socket.on('connect', () => {
@@ -751,10 +776,18 @@ export class KumoAPI {
           this.log.debug(`Stream update detail: ${JSON.stringify(data)}`);
         }
 
-        // Trigger callbacks for this device
+        // Trigger callbacks for this device. Guarded like sensor_update below: this
+        // is the highest-traffic event and its consumer dereferences
+        // `getService(...)!` on a payload nobody schema-checks, so an unguarded throw
+        // would escape into socket.io's emit loop and could take down the listener
+        // for every other event on this socket.
         const callback = this.deviceUpdateCallbacks.get(deviceSerial);
         if (callback) {
-          callback(deviceSerial, data);
+          try {
+            callback(deviceSerial, data);
+          } catch (e) {
+            this.log.error(`Device update callback error for ${deviceSerial}: ${(e as Error).message}`);
+          }
         }
       });
 
@@ -768,13 +801,6 @@ export class KumoAPI {
         if (data.deviceSerial && password) {
           this.adapterUpdatesWithoutPassword = 0;
           this.adapterPasswords.set(data.deviceSerial, password);
-          for (const cb of this.adapterPasswordCallbacks) {
-            try {
-              cb(data.deviceSerial, password);
-            } catch (e) {
-              this.log.debug('Adapter password callback error');
-            }
-          }
         } else if (data.deviceSerial) {
           // An adapter_update for a real device that carried no password at all.
           // Three in a row is the cloud having stopped sending it, not a one-off.
@@ -795,26 +821,17 @@ export class KumoAPI {
         }
       });
 
+      // Logging only. The connection status this used to cache, and the callbacks it
+      // used to fan out to, had no consumer anywhere in the plugin.
       this.socket.on('device_status_v2', (data: any) => {
         const serial = data.deviceSerial;
         if (!serial) {
           return;
         }
-        const isConnected = data.status !== 'disconnected';
-        const wasConnected = this.deviceConnectionStatus.get(serial);
-        this.deviceConnectionStatus.set(serial, isConnected);
-
-        if (!isConnected) {
+        if (data.status === 'disconnected') {
           this.log.warn(`Device ${serial} reported offline (reason: ${data.lastDisconnectedReason || 'unknown'})`);
         } else {
           this.log.debug(`Device status for ${serial}: ${data.status}`);
-        }
-
-        // Notify callbacks on status change
-        if (wasConnected !== isConnected) {
-          for (const callback of this.deviceConnectionCallbacks) {
-            callback(serial, isConnected);
-          }
         }
       });
 
@@ -839,11 +856,17 @@ export class KumoAPI {
           maximumSetPoints: data.maximumSetPoints ?? { cool: 31, heat: 31, auto: 31 },
         };
 
-        this.deviceProfiles.set(serial, profile);
         this.log.debug(`Profile for ${serial}: temp range ${JSON.stringify(profile.minimumSetPoints)}-${JSON.stringify(profile.maximumSetPoints)}, fans=${profile.numberOfFanSpeeds}`);
 
+        // Guarded per callback: one accessory throwing while applying a profile must
+        // not skip the remaining accessories, and must not escape into socket.io's
+        // emit loop.
         for (const callback of this.deviceProfileCallbacks) {
-          callback(serial, profile);
+          try {
+            callback(serial, profile);
+          } catch (e) {
+            this.log.error(`Profile update callback error for ${serial}: ${(e as Error).message}`);
+          }
         }
       });
 
@@ -887,7 +910,7 @@ export class KumoAPI {
             try {
               callback(reading);
             } catch (e) {
-              this.log.debug('Sensor update callback error');
+              this.log.error(`Sensor update callback error for ${serial}: ${(e as Error).message}`);
             }
           }
         } catch (e) {
@@ -917,7 +940,13 @@ export class KumoAPI {
         this.log.error(`Streaming connection error: ${error.message}`);
       });
 
-      return true;
+      // Health checks used to start only inside the `connect` handler, so a socket
+      // that never connected was never monitored either. startHealthChecks clears any
+      // existing timer, so the call in `connect` (which restores checks after a
+      // disconnect stopped them) stays correct.
+      this.startHealthChecks();
+
+      return await connected;
     } catch (error) {
       if (error instanceof Error) {
         this.log.error('Failed to start streaming:', error.message);
@@ -956,11 +985,6 @@ export class KumoAPI {
 
   // ---- Local-control credential accessors ---------------------------------
 
-  /** Notified whenever a device's local password arrives via `adapter_update`. */
-  onAdapterPassword(callback: (serial: string, password: string) => void): void {
-    this.adapterPasswordCallbacks.add(callback);
-  }
-
   /** The captured local password (base64) for a device, if seen yet. */
   getAdapterPassword(serial: string): string | undefined {
     return this.adapterPasswords.get(serial);
@@ -993,18 +1017,6 @@ export class KumoAPI {
   /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
   requestAdapterStatus(serial: string): void {
     this.socket?.emit('force_adapter_request', serial, 'adapterStatus');
-  }
-
-  onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {
-    this.deviceConnectionCallbacks.add(callback);
-  }
-
-  getDeviceProfile(deviceSerial: string): DeviceProfile | undefined {
-    return this.deviceProfiles.get(deviceSerial);
-  }
-
-  isDeviceConnected(deviceSerial: string): boolean {
-    return this.deviceConnectionStatus.get(deviceSerial) ?? true; // Assume connected if unknown
   }
 
   /**
@@ -1040,13 +1052,6 @@ export class KumoAPI {
    */
   onStreamingHealthChange(callback: (isHealthy: boolean) => void): void {
     this.streamingHealthCallbacks.add(callback);
-  }
-
-  /**
-   * Get current streaming health status
-   */
-  getStreamingHealth(): boolean {
-    return this.isStreamingHealthy;
   }
 
   /**
@@ -1090,8 +1095,23 @@ export class KumoAPI {
         this.log.info(`Streaming health changed: ${wasHealthy ? 'healthy' : 'unhealthy'} → ${isHealthy ? 'healthy' : 'unhealthy'}`);
       }
 
-      for (const callback of this.streamingHealthCallbacks) {
+      this.reportHealth(isHealthy);
+    }
+  }
+
+  /**
+   * Fan a health state out to the platform.
+   *
+   * Guarded like the other fan-outs: the connect and disconnect handlers both
+   * reach here, so this runs inside socket.io's emit loop, and the consumer
+   * (the platform's degraded-mode switch) starts and stops timers.
+   */
+  private reportHealth(isHealthy: boolean): void {
+    for (const callback of this.streamingHealthCallbacks) {
+      try {
         callback(isHealthy);
+      } catch (e) {
+        this.log.error(`Streaming health callback error: ${(e as Error).message}`);
       }
     }
   }
@@ -1172,8 +1192,30 @@ export class KumoAPI {
       this.socket = null;
     }
 
-    // Start streaming with new token (it will use this.accessToken)
-    // This will restart health checks once connected and clear isReconnecting flag
-    await this.startStreaming(deviceSerials);
+    // Start streaming with new token (it will use this.accessToken).
+    // Deliberately not awaited: startStreaming now waits for the socket to actually
+    // come up (up to socketConnectTimeout), and this runs inside the token refresh
+    // that every REST call and every HomeKit write blocks on via ensureAuthenticated.
+    // The connect handler reports success asynchronously.
+    this.startStreaming(deviceSerials)
+      .then(connected => {
+        if (connected) {
+          return;
+        }
+        // The planned reconnect never came up, so report the outage here rather
+        // than leaving it to the health checks. isReconnecting is otherwise cleared
+        // only by becoming healthy, and while it is set notifyHealthChange DROPS
+        // every unhealthy report — including the edge, which it does not replay. A
+        // socket that fails this reconnect therefore latched the flag for the life
+        // of the process: the platform was never told streaming had died, and under
+        // `disablePolling: true` it never started the fallback poller either.
+        // reportHealth bypasses the edge gate; handleStreamingHealthChange is
+        // idempotent for repeated unhealthy reports.
+        this.isReconnecting = false;
+        this.isStreamingHealthy = false;
+        this.log.warn('Streaming did not come back up after the token refresh');
+        this.reportHealth(false);
+      })
+      .catch(error => this.log.debug(`Streaming reconnect failed: ${(error as Error).message}`));
   }
 }

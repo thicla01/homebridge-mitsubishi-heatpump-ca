@@ -2,7 +2,7 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
-  POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
+  DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
@@ -52,12 +52,10 @@ const TILT_STEP = 45;
 
 export class KumoThermostatAccessory {
   private service: Service;
-  private pollTimer: NodeJS.Timeout | null = null;
 
   private deviceSerial: string;
   private siteId: string;
   private currentStatus: DeviceStatus | null = null;
-  private pollIntervalMs: number;
   private hasHumiditySensor: boolean = false;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
@@ -165,11 +163,14 @@ export class KumoThermostatAccessory {
     private readonly platform: KumoV3Platform,
     private readonly accessory: PlatformAccessory,
     private readonly kumoAPI: KumoAPI,
-    pollIntervalSeconds?: number,
+    // Unused: polling is site-level on the platform (platform.ts:startSitePoller),
+    // and nothing per-accessory has a timer of its own. Kept because platform.ts
+    // still passes it at both construction sites; removing it is a signature
+    // change across that file and every test harness.
+    _pollIntervalSeconds?: number,
   ) {
     this.deviceSerial = this.accessory.context.device.deviceSerial;
     this.siteId = this.accessory.context.device.siteId;
-    this.pollIntervalMs = (pollIntervalSeconds || POLL_INTERVAL / 1000) * 1000;
 
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Mitsubishi')
@@ -455,18 +456,6 @@ export class KumoThermostatAccessory {
 
   private applyDeviceProfile(profile: DeviceProfile): void {
     this.deviceProfile = profile;
-
-    // Calculate broadest valid temperature range across all modes
-    const minTemp = Math.min(
-      profile.minimumSetPoints.cool,
-      profile.minimumSetPoints.heat,
-      profile.minimumSetPoints.auto,
-    );
-    const maxTemp = Math.max(
-      profile.maximumSetPoints.cool,
-      profile.maximumSetPoints.heat,
-      profile.maximumSetPoints.auto,
-    );
 
     // Each threshold gets the range of the mode it actually drives, rather than
     // the union across all three modes. Upstream applied one min/max collapsed
@@ -1118,23 +1107,13 @@ export class KumoThermostatAccessory {
 
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
-      this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (target: ${this.getTargetTempFromStatus(status)}°C, mode: ${status.operationMode})`);
+      // Both setpoints, not one "target": on HeaterCooler each threshold is the
+      // setpoint for its own mode and the band is live in AUTO, so there is no
+      // single target temperature to name.
+      this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (heat ${status.spHeat}°C / cool ${status.spCool}°C, mode: ${status.operationMode})`);
 
       // Update all characteristics
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.Active,
-        this.mapToActive(status),
-      );
-
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentHeaterCoolerState,
-        this.mapToCurrentHeaterCoolerState(status),
-      );
-
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetHeaterCoolerState,
-        this.mapToTargetHeaterCoolerState(status),
-      );
+      this.refreshClimateCharacteristics();
 
       // Fan and vane ride along with every status update. Both live on the
       // Fanv2 service now, so they go through their own sync helpers.
@@ -1281,31 +1260,6 @@ export class KumoThermostatAccessory {
     return C.COOL;
   }
 
-  private getTargetTempFromStatus(status: DeviceStatus): number {
-    // Return the appropriate setpoint based on current mode
-    if (status.operationMode === 'heat' && status.spHeat !== undefined && status.spHeat !== null) {
-      return status.spHeat;
-    } else if (status.operationMode === 'cool' && status.spCool !== undefined && status.spCool !== null) {
-      return status.spCool;
-    } else if (this.isAutoMode(status.operationMode) && status.spAuto !== null && status.spAuto !== undefined) {
-      return status.spAuto;
-    } else if (
-      status.operationMode === 'dry' &&
-      this.dryUsesSetpoint() &&
-      status.spCool !== undefined &&
-      status.spCool !== null
-    ) {
-      // Dry holds its setpoint in spCool, not spHeat (Kumo v3, verified live).
-      return status.spCool;
-    }
-    // Default to heat setpoint if available, otherwise return a default value
-    if (status.spHeat !== undefined && status.spHeat !== null) {
-      return status.spHeat;
-    }
-    // Final fallback
-    return 20;
-  }
-
   private isAutoMode(operationMode: string): boolean {
     return operationMode.startsWith('auto');
   }
@@ -1334,12 +1288,6 @@ export class KumoThermostatAccessory {
     this.offRequestedAt = operationMode === 'off' ? Date.now() : 0;
   }
 
-  /**
-   * Whether a setpoint write should be suppressed (cached + echoed, not sent).
-   * True when the unit is already off, or when a HomeKit off was requested within
-   * OFF_SUPPRESS_WINDOW_MS — the window covers the concurrent "AC off" scene
-   * burst, where the off command's optimistic state update hasn't landed yet.
-   */
   /**
    * Hold a setpoint write for SETPOINT_HOLD_MS before sending it, so a
    * concurrent "AC off" can cancel it whichever order HomeKit dispatched them in.
@@ -1374,6 +1322,12 @@ export class KumoThermostatAccessory {
     return Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS;
   }
 
+  /**
+   * Whether a setpoint write should be suppressed (cached + echoed, not sent).
+   * True when the unit is already off, or when a HomeKit off was requested within
+   * OFF_SUPPRESS_WINDOW_MS — the window covers the concurrent "AC off" scene
+   * burst, where the off command's optimistic state update hasn't landed yet.
+   */
   private shouldSuppressSetpoint(): boolean {
     if (!this.currentStatus) {
       return false;
@@ -1500,6 +1454,29 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${operationMode.toUpperCase()}`);
 
+    // Guarded on offInFlight(), NOT shouldSuppressSetpoint(): picking a mode on a
+    // unit that is merely off is how a user turns it back on, and that must keep
+    // working. What must not go through is a mode trailing an off inside the same
+    // scene burst — every mode here is an active one, so it revives the unit the
+    // way a trailing setpoint does, and it does worse than the other writers: the
+    // noteModeIntent below would clear the window for everything dispatched behind
+    // it. Checked BEFORE that call for exactly that reason. Turning the unit on
+    // clears the window through setActive, so an on+mode pair is unaffected.
+    if (this.offInFlight()) {
+      this.platform.log.debug(
+        `[MODE CHANGE] ${this.accessory.displayName}: an off is in flight — not sending ${operationMode}`,
+      );
+      setTimeout(() => {
+        if (this.currentStatus) {
+          this.service.updateCharacteristic(
+            this.platform.Characteristic.TargetHeaterCoolerState,
+            this.mapToTargetHeaterCoolerState(this.currentStatus),
+          );
+        }
+      }, 100);
+      return;
+    }
+
     // A mode is always an active mode here — HeaterCooler expresses off through
     // Active — so this clears any pending off-suppression window.
     this.noteModeIntent(operationMode);
@@ -1600,13 +1577,6 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Remove a characteristic an earlier version of this plugin left on a service.
-   *
-   * Guarded on the methods existing: hap-nodejs Services have testCharacteristic
-   * and removeCharacteristic, but a stub may not, and this runs during
-   * construction where a throw would take out the whole accessory.
-   */
-  /**
    * Declare the HeaterCooler as this accessory's primary service and hang the
    * secondary ones off it.
    *
@@ -1635,6 +1605,13 @@ export class KumoThermostatAccessory {
     }
   }
 
+  /**
+   * Remove a characteristic an earlier version of this plugin left on a service.
+   *
+   * Guarded on the methods existing: hap-nodejs Services have testCharacteristic
+   * and removeCharacteristic, but a stub may not, and this runs during
+   * construction where a throw would take out the whole accessory.
+   */
   private removeStaleCharacteristic(service: Service, char: unknown): void {
     const svc = service as unknown as {
       testCharacteristic?: (c: unknown) => boolean;
@@ -2116,18 +2093,6 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Snap an inbound setpoint onto the Fahrenheit grid, inside this unit's range.
-   *
-   * This is the single place quantization happens, and it has to be here rather
-   * than in the transport: HAP applies a characteristic's `minStep` only on the
-   * OUTBOUND path (validateUserInput). The inbound controller write goes through
-   * validateClientSuppliedValue, which range-checks and hands back the float
-   * verbatim — so the 0.1 step upstream relied on never constrained what HomeKit
-   * actually sent. Upstream then rounded on the LAN transport only, never on the
-   * cloud path, so the very same tap stored a different value depending on which
-   * transport won the race.
-   */
-  /**
    * After a setpoint write lands, read the unit back and publish what it ACTUALLY
    * stored rather than what we asked for.
    *
@@ -2183,6 +2148,18 @@ export class KumoThermostatAccessory {
     }, this.SETPOINT_RECONCILE_MS);
   }
 
+  /**
+   * Snap an inbound setpoint onto the Fahrenheit grid, inside this unit's range.
+   *
+   * This is the single place quantization happens, and it has to be here rather
+   * than in the transport: HAP applies a characteristic's `minStep` only on the
+   * OUTBOUND path (validateUserInput). The inbound controller write goes through
+   * validateClientSuppliedValue, which range-checks and hands back the float
+   * verbatim — so the 0.1 step upstream relied on never constrained what HomeKit
+   * actually sent. Upstream then rounded on the LAN transport only, never on the
+   * cloud path, so the very same tap stored a different value depending on which
+   * transport won the race.
+   */
   private quantize(field: 'spHeat' | 'spCool', temp: number): number {
     const p = this.deviceProfile;
     const min = p ? Math.min(p.minimumSetPoints[field === 'spHeat' ? 'heat' : 'cool'], p.minimumSetPoints.auto) : 10;
@@ -2435,14 +2412,26 @@ export class KumoThermostatAccessory {
     }
   }
 
+  /**
+   * Cached only, like every other getter here.
+   *
+   * This used to fetch GET /devices/{serial}/status on a cold cache and assign the
+   * result into this.currentStatus. That payload is the CONNECTION status — the
+   * same one getDeviceCryptoSerial reads — and it carries no `operationMode`, so
+   * the assignment left a half-populated cache behind. mapToTargetHeaterCoolerState
+   * calls isAutoMode(status.operationMode), which is `operationMode.startsWith`, so
+   * the very next getTargetHeaterCoolerState threw a TypeError and HomeKit showed
+   * the accessory as No Response. Verified by assigning that payload shape and
+   * calling the three getters: Active and CurrentHeaterCoolerState survive,
+   * TargetHeaterCoolerState throws.
+   *
+   * Streaming, the cloud poll and the local poll all populate humidity, and the
+   * HumiditySensor service is normally created by the first reading that carries
+   * one. The cold-cache read is reachable only for a service restored from the
+   * accessory cache before the first update lands, where 0 is what the old code
+   * returned anyway whenever the fetch came back empty.
+   */
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
-    if (!this.currentStatus) {
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      }
-    }
-
     const humidity = this.currentStatus?.humidity || 0;
     this.platform.log.debug('Get CurrentRelativeHumidity:', humidity);
     return humidity;

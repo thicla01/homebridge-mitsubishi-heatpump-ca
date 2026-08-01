@@ -24,103 +24,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-// Stable characteristic identifiers (same object returned per name), with the
-// nested state constants the accessory reads (e.g. Active.INACTIVE).
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = {
-        _name: String(prop),
-        OFF: 0, HEAT: 1, COOL: 2, AUTO: 3,
-        INACTIVE: 0, ACTIVE: 1,
-        IDLE: 1, HEATING: 2, COOLING: 3,
-        SWING_DISABLED: 0, SWING_ENABLED: 1,
-        FIXED: 0, JAMMED: 1, SWINGING: 2,
-        HORIZONTAL: 0, VERTICAL: 1,
-        CELSIUS: 0, FAHRENHEIT: 1,
-      };
-    }
-    return charCache[prop];
-  },
-});
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler',
-  Fanv2: 'Fanv2',
-  Slats: 'Slats',
-  HumiditySensor: 'HumiditySensor',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
-
-function makeCharacteristic() {
-  const ch = {
-    value: undefined,
-    onGet() { return ch; },
-    onSet() { return ch; },
-    setProps() { return ch; },
-  };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype,
-    // Exposed so a test can ask whether a characteristic was ever *added* to this
-    // service without adding it by asking. This mirrors real HAP: hap-nodejs's
-    // Service.getCharacteristic() ADDS an optional characteristic to the service
-    // as a side effect of the lookup (Service.js:186-230), which is precisely how
-    // a post-publish characteristic sneaks in unpublished.
-    chars,
-    getCharacteristic(id) {
-      if (!chars.has(id)) chars.set(id, makeCharacteristic());
-      return chars.get(id);
-    },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory() {
-  // Pre-seed AccessoryInformation; the constructor uses getService(...)! on it.
-  const entries = [
-    { type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) },
-  ];
-  return {
-    displayName: 'Living room',
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName: 'Living room' } },
-    getService(type) {
-      const e = entries.find((x) => x.type === type && x.subtype === undefined);
-      return e ? e.svc : null;
-    },
-    getServiceById(type, subtype) {
-      const e = entries.find((x) => x.type === type && x.subtype === subtype);
-      return e ? e.svc : null;
-    },
-    addService(type, name, subtype) {
-      const svc = makeService(type, name, subtype);
-      entries.push({ type, subtype, svc });
-      return svc;
-    },
-    removeService(svc) {
-      const i = entries.findIndex((x) => x.svc === svc);
-      if (i >= 0) entries.splice(i, 1);
-    },
-  };
-}
 
 // The switches are opt-in and the vane slats opt-out, so every harness states its
 // config explicitly — the gate under test is as much the config as the capability.
@@ -141,7 +47,7 @@ function makeHarness(kumoConfig = ALL_ON) {
     subscribeToDevice() {},
     onDeviceProfileUpdate(cb) { profileCb = cb; },
   };
-  const accessory = makeAccessory();
+  const accessory = makeAccessory('Living room');
   const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
   const heaterCooler = accessory.getService(Service.HeaterCooler);
   const fan = accessory.getServiceById(Service.Fanv2, 'airflow');

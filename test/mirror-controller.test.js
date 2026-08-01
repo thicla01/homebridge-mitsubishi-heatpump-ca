@@ -7,11 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { MirrorController, signature, toMirrorState } = require('../dist/mirror.js');
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
+const { makeLog } = require('./helpers.js');
 
 function makeHandler(serial) {
   let listener = null;

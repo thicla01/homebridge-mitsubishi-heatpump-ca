@@ -33,104 +33,13 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
-
-// Real HAP values, per characteristic. Worth being exact rather than reusing one
-// bag of constants: TargetHeaterCoolerState genuinely has no OFF member, and its
-// 0 is AUTO — so a mapping bug that "returns OFF" would show up in the Home app
-// as AUTO, not as off. Only Active can express off at all.
-const HAP_ENUMS = {
-  Active: { INACTIVE: 0, ACTIVE: 1 },
-  CurrentHeaterCoolerState: { INACTIVE: 0, IDLE: 1, HEATING: 2, COOLING: 3 },
-  TargetHeaterCoolerState: { AUTO: 0, HEAT: 1, COOL: 2 },
-  SwingMode: { SWING_DISABLED: 0, SWING_ENABLED: 1 },
-  CurrentSlatState: { FIXED: 0, JAMMED: 1, SWINGING: 2 },
-  SlatType: { HORIZONTAL: 0, VERTICAL: 1 },
-  TemperatureDisplayUnits: { CELSIUS: 0, FAHRENHEIT: 1 },
-  FilterChangeIndication: { FILTER_OK: 0, CHANGE_FILTER: 1 },
-};
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = { _name: String(prop), ...(HAP_ENUMS[prop] || {}) };
-    }
-    return charCache[prop];
-  },
-});
 
 const Active = Characteristic.Active;
 const CurrentState = Characteristic.CurrentHeaterCoolerState;
 const TargetState = Characteristic.TargetHeaterCoolerState;
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler',
-  Fanv2: 'Fanv2',
-  Slats: 'Slats',
-  HumiditySensor: 'HumiditySensor',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
-
-function makeCharacteristic() {
-  const ch = {
-    value: undefined,
-    onGet() { return ch; },
-    onSet() { return ch; },
-    setProps() { return ch; },
-  };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype,
-    getCharacteristic(id) {
-      if (!chars.has(id)) chars.set(id, makeCharacteristic());
-      return chars.get(id);
-    },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory() {
-  const entries = [
-    { type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) },
-  ];
-  return {
-    displayName: 'Kitchen',
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName: 'Kitchen' } },
-    getService(type) {
-      const e = entries.find((x) => x.type === type && x.subtype === undefined);
-      return e ? e.svc : null;
-    },
-    getServiceById(type, subtype) {
-      const e = entries.find((x) => x.type === type && x.subtype === subtype);
-      return e ? e.svc : null;
-    },
-    addService(type, name, subtype) {
-      const svc = makeService(type, name, subtype);
-      entries.push({ type, subtype, svc });
-      return svc;
-    },
-    removeService(svc) {
-      const i = entries.findIndex((x) => x.svc === svc);
-      if (i >= 0) entries.splice(i, 1);
-    },
-  };
-}
 
 function makeHarness() {
   const sendCommandCalls = [];

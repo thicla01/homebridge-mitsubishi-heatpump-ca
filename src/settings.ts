@@ -7,7 +7,6 @@ export const PLUGIN_NAME = 'homebridge-mitsubishi-heatpump';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';
 export const SOCKET_BASE_URL = 'https://socket-prod.kumocloud.com';
 export const TOKEN_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes (actual token lifetime)
-export const POLL_INTERVAL = 30 * 1000; // 30 seconds
 export const APP_VERSION = '3.2.4';
 
 export interface KumoConfig {

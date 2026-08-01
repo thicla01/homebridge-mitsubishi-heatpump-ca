@@ -38,13 +38,18 @@ Files in this distribution have been modified from the upstream work. The
 principal changes are:
 
   - The primary HomeKit service was changed from Thermostat to HeaterCooler.
-  - Fan speed control was added (HAP RotationSpeed).
+  - Fan speed and fan-auto control were added, on a linked HAP Fanv2 service.
   - Vane control was added (HAP SwingMode and Slat), including the device
     write path, which did not exist upstream.
   - Setpoint handling was changed to a Fahrenheit-anchored quantization grid.
-  - Dry and Fan-only switches were made opt-in via configuration.
-  - A single TargetTemperature write in AUTO no longer collapses the setpoint
-    band (originally submitted upstream as PR #23).
+  - The TargetTemperature characteristic was removed; the two threshold
+    characteristics are the setpoint controls in every mode. This supersedes
+    the AUTO band-collapse fix originally submitted upstream as PR #23.
+  - Dry and Fan-only switches were made opt-in via configuration, alongside new
+    options for the humidity sensor and the vane Slat service.
+  - Wireless-sensor temperature, humidity and battery were surfaced from the
+    cloud sensor_update event, including a HAP Battery service.
+  - TemperatureDisplayUnits was made settable (upstream hardwired Celsius).
 
 See CHANGELOG.md for the full list.
 

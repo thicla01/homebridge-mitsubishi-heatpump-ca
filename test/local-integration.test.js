@@ -16,73 +16,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = {
-        _name: String(prop),
-        OFF: 0, HEAT: 1, COOL: 2, AUTO: 3,
-        INACTIVE: 0, ACTIVE: 1,
-        IDLE: 1, HEATING: 2, COOLING: 3, BLOWING_AIR: 2,
-        // hap-nodejs values: FilterChangeIndication FILTER_OK=0 / CHANGE_FILTER=1.
-        FILTER_OK: 0, CHANGE_FILTER: 1,
-        SWING_DISABLED: 0, SWING_ENABLED: 1,
-        FIXED: 0, JAMMED: 1, SWINGING: 2,
-        HORIZONTAL: 0, VERTICAL: 1,
-        CELSIUS: 0, FAHRENHEIT: 1,
-      };
-    }
-    return charCache[prop];
-  },
-});
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler',
-  Fanv2: 'Fanv2',
-  Slats: 'Slats',
-  HumiditySensor: 'HumiditySensor',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
-
-function makeCharacteristic() {
-  const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype, chars,
-    getCharacteristic(id) { if (!chars.has(id)) chars.set(id, makeCharacteristic()); return chars.get(id); },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory() {
-  const entries = [{ type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) }];
-  return {
-    displayName: 'Kitchen',
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName: 'Kitchen' } },
-    getService(type) { const e = entries.find((x) => x.type === type && x.subtype === undefined); return e ? e.svc : null; },
-    getServiceById(type, subtype) { const e = entries.find((x) => x.type === type && x.subtype === subtype); return e ? e.svc : null; },
-    addService(type, name, subtype) { const svc = makeService(type, name, subtype); entries.push({ type, subtype, svc }); return svc; },
-    removeService(svc) { const i = entries.findIndex((x) => x.svc === svc); if (i >= 0) entries.splice(i, 1); },
-  };
-}
 
 function makeLocalClient(over = {}) {
   const calls = [];

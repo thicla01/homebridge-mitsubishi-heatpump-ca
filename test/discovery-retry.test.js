@@ -9,15 +9,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoV3Platform } = require('../dist/platform.js');
+const { makeLog } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
 const SITE = { id: 'site-1', name: 'Home' };
 const ZONE = { isActive: true, name: 'Living room', adapter: { deviceSerial: SERIAL } };
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
 
 function makeApi(spies) {
   return {

@@ -6,6 +6,23 @@ Entries at 1.8.2 and below are inherited from
 [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort),
 the upstream project this was forked from.
 
+- **2.0.0** - Fork: HeaterCooler, fan speed, vane, Fahrenheit-anchored setpoints (August 2026)
+  - **Breaking — the primary service is now `HeaterCooler`, not `Thermostat`.** HomeKit binds an automation to a service and characteristic instance rather than to the accessory, so **every automation, scene, trigger and Shortcut that referenced the old thermostat stops working and must be rebuilt**. There is no way to migrate them. Everything else survives: the config `platform` key is still `KumoV3` and accessory UUIDs still derive from the device serial, so `config.json`, room assignment, custom names, Favorites and the child-bridge pairing are untouched. A Thermostat service left in the accessory cache by an earlier version is removed on first start, with a log line saying so — leaving it would give each unit two competing climate tiles
+  - **Package renamed** to `homebridge-mitsubishi-heatpump`. Never have both this and `homebridge-mitsubishi-comfort` installed: two plugins registering the `KumoV3` platform makes Homebridge throw an ambiguous-platform error that it swallows into a misleading "Could not find the associated plugin"
+  - **There is no `TargetTemperature` any more.** On HeaterCooler the two threshold characteristics *are* the setpoint controls in every mode — the Home app shows the heating threshold in HEAT, the cooling threshold in COOL, both as a band in AUTO. That structurally removes the AUTO band-collapse bug upstream patched around in PR #23: the second writer for the same device field simply does not exist. `test/auto-setpoint.test.js` asserts the handler is absent so it cannot come back
+  - **Current state is reported honestly.** HeaterCooler has a real IDLE, so fan-only and a compressor in standby report idle instead of being dressed up as COOL. That retires the 1.7.1 dry/vent → COOL workaround entirely: it existed only because Thermostat's OFF meant both "not running" and "powered down", so an off-scene write was suppressed as redundant. On/off is `Active`, a separate characteristic, so a scene off always registers a real transition. Dry still reports COOL, where its setpoint genuinely lives
+  - **Fan speed and fan-auto** on a linked `Fanv2` service: five speeds at 0 / 25 / 50 / 75 / 100 on `RotationSpeed`, one detent each with nothing dead, and `TargetFanState` registered only on units whose profile reports an auto fan. `minValue` stays 0 because hap-nodejs **rejects** a client write below `minValue` with -70410 rather than clamping it, and the Home app sends 0 when a fan slider is dragged to the bottom. The profile's `numberOfFanSpeeds` is treated as advisory — units reporting 3 accepted all five named speeds on real hardware
+  - **Vane control**, whose device write path did not exist upstream at all. Swing lives on the HeaterCooler, **not** on the fan service: Apple Home collapses an accessory's services into one tile and in that state renders the fan's speed but not its Oscillate toggle, so swing on the fan would be unreachable on a default install. Discrete tilt angles are an opt-in `Slats` service
+  - **Fahrenheit-anchored setpoints** (new `src/temperature.ts`). Every setpoint write is snapped to the Celsius the units store for the nearest whole °F, taking the **ceiling** of the exact conversion at the 0.1°C resolution the hardware accepts. Ceiling, not rounding, because the Mitsubishi Comfort app truncates C→F while the Home app rounds: confirmed live 2026-07-27 with `spCool` at 22.200001°C (71.96°F), which Home showed as 72 and Comfort as 71 at the same moment. Ceiling lands 0–0.18°F above the target degree, which reads correctly under both. This replaces the 1.7.0 belief that `minStep: 0.1` would do it — hap-nodejs applies `minStep` only on the OUTBOUND path, and its grid is anchored at `minValue`, so a 72°F write landed on `10 + 122 * 0.1 = 22.200000000000003` and leaked that into commands, logs and mirror signatures. Quantizing above both transports also ends the split where the same tap stored a different value depending on whether the LAN or the cloud carried it
+  - **Display options are config flags now.** `showDrySwitch` and `showFanOnlySwitch` default **off** (fan control lives on the accessory itself, so the extra tiles are only for one-tap dehumidify and fan-only mode); `showHumiditySensor` defaults **on**; `exposeVaneSlat` defaults **off** because Apple Home categorises `Slats` as a **window covering** — on a house with real blinds the louvres join their room grouping and a room-level "close the blinds" can reach them (observed 2026-07-27 with Matter blinds paired directly to HomeKit)
+  - **Wireless sensor support.** A `sensor_update` Socket.IO event carries each paired sensor's temperature, humidity and battery. It matters for more than humidity: the unit quantizes `roomTemp` to 0.5°C before reporting while the sensor reports ~6 decimals (22.30543 against 22.5), and three of the four units tested regulate FROM the sensor (`tempSource: 'sensor0'`), so the sensor is the real thermostat. Battery is exposed as a HomeKit `Battery` service with a low-battery warning below 20%
+  - **Local LAN control is blocked by a vendor change, not by this plugin.** Around 2026-07-31 Mitsubishi's v3 cloud stopped serving both halves of the local key: `password` vanished from `adapter_update` and `cryptoSerial` from `GET /devices/{serial}/status`. Reproduced on unrelated accounts and on a second client stack (pykumo issue #78, by its maintainer), so it is cloud-side. The credential retry is now **bounded** — it gives up after about an hour with one warning instead of nudging forever, and drops the local client so writes stop evaluating a path that cannot work. Nothing is persisted, so `localControl` stays true and the whole gather runs again at the next restart; if the fields come back, local control returns with no user action
+  - **Typed fan-speed and vane vocabularies** in `settings.ts`, replacing the coarse `auto/low/medium/high` enum. That enum had no producer anywhere in the plugin — every call site set `fanSpeedRaw` instead, precisely because its `low` meant the adapter's `quiet` — so it is gone along with the lossy `mapFanSpeedToLocal`. Every write is validated first: the adapter returns HTTP 200 for `vaneDir: "notARealVane"` and silently ignores it, so a typo would otherwise be an invisible no-op. Reads are matched case-insensitively, because pykumo returns the capitalised `Low` on units reporting `numberOfFanSpeeds: 4` and an exact match would render that speed as "auto" and make it unselectable
+  - Fixed: `fanSpeed` and `airDirection` were typed as required on `Adapter`, but the `GET /sites/{siteId}/zones` payload carries neither — they only arrive in `device_update`. That is why the debug poll log printed "Fan: undefined" for every unit and why vane looked unavailable from the cloud
+  - `TemperatureDisplayUnits` is settable, which upstream left hardwired to Celsius. The Home app ignores it and follows the phone's locale, but Eve and other controllers honour it
+  - **Licensing.** Ships under Apache-2.0 with a real `LICENSE` file. The upstream repository had none and declared MIT in `package.json` while reproducing Apache-2.0 boilerplate in its README; Apache-2.0 is the only choice valid under either reading. `NOTICE` carries the fork attribution, the section 4(b) statement of changes, and the pykumo attribution upstream omitted
+  - **`engines.node` corrected to `^20.19.0 || ^22.12.0 || >=24.0.0`** (was `>=18.0.0`, which never worked). `node-fetch` v3 is ESM-only and the plugin compiles to CommonJS, so `require()` of it throws `ERR_REQUIRE_ESM` on every release before `require(esm)` shipped — 20.19.0, backported, and 22.12.0
+  - **CI exists.** `.github/workflows/test.yml` builds and runs the full `node:test` suite on Node 20.19 / 22 / 24 for every push and pull request, and `prepublishOnly` now runs the tests as well as the build
 - **1.8.2** - Keep retrying for local credentials; stop a scene setpoint from rewriting a mirror target (July 2026)
   - Fixed: **units silently stranded on the cloud for the life of the process.** The local password arrives only via the `adapter_update` socket event, and `initLocalControl` waited a fixed 25s for it before giving up for good. Measured on real hardware 2026-07-26: of five units, two answered the nudge in 6s, one took **65s** (well past the window), and two never answered at all — so a healthy unit could miss the window by timing alone and never get local control, losing the fast LAN path and its per-unit cloud fallback
   - Fix: the 25s startup gather is unchanged, but any device still missing credentials is now **re-nudged every 60s in the background** and admitted to local control the moment its credentials arrive (starting local polling if it isn't already running). A nudge is a single socket emit, so retrying costs nothing; the expensive LAN sweep runs only when a device actually hands over its credentials. The retry stops once every device is local, and is torn down on shutdown. This also means a unit whose adapter is wedged rejoins local control **automatically** when it recovers, instead of needing a Homebridge restart
@@ -150,114 +167,7 @@ the upstream project this was forked from.
 
 ---
 
-## Historical implementation notes
-
-Design narrative for the streaming and adaptive-polling work, moved out of `CLAUDE.md`.
-
-### v1.3.0 - Intelligent Streaming Health Monitoring and Adaptive Polling
-
-**🎯 Goal:** Reduce API calls by 95% while maintaining reliability through smart fallback.
-
-#### Key Achievement
-- **Before:** ~257 API calls/hour (polling every 30s + streaming)
-- **After:** ~12 API calls/hour (token refresh only when streaming healthy)
-- **Reduction:** 95% fewer API calls and DNS queries
-
-#### What Changed
-
-**1. Streaming Health Monitoring (`kumo-api.ts`)**
-- Added health tracking system that monitors Socket.IO connection status
-- Health check every 30s (configurable)
-- Callback system notifies platform of health changes
-- Relies on Socket.IO's built-in heartbeat mechanism
-- Code: `kumo-api.ts:36-42, 566-647`
-
-**2. Adaptive Polling (`platform.ts`)**
-- **Normal Mode:** Streaming healthy → polling disabled (if `disablePolling: true`)
-- **Degraded Mode:** Streaming fails → fast polling activates (10s intervals)
-- Automatic mode switching based on streaming health
-- Comprehensive logging for all state transitions
-- Code: `platform.ts:25-27, 343-458`
-
-**3. Race Condition Prevention (`accessory.ts`)**
-- Timestamp-based update filtering
-- Prevents old polling data from overwriting newer streaming data
-- Tracks update source (streaming vs polling)
-- Code: `accessory.ts:15-16, 122-145`
-
-**4. New Configuration Options**
-- `disablePolling` - Now recommended! Enables optimal streaming-only mode
-- `degradedPollInterval` - Fast polling when streaming unhealthy (default: 10s)
-- `streamingHealthCheckInterval` - Health check frequency (default: 30s)
-- `streamingStaleThreshold` - No longer used (deprecated, kept for compatibility)
-
-#### How It Works
-
-**Startup:**
-```
-1. Streaming connects → marked healthy
-2. If disablePolling=true → no polling starts
-3. Only token refresh queries (every 15 min)
-```
-
-**When Streaming Disconnects:**
-```
-1. Health check detects disconnect
-2. Platform switches to DEGRADED MODE
-3. Fast polling activates (10s intervals)
-4. Devices remain responsive via polling
-```
-
-**When Streaming Reconnects:**
-```
-1. Socket reconnects → marked healthy
-2. Platform switches to NORMAL MODE
-3. Polling halts (if disablePolling=true)
-4. Back to streaming-only updates
-```
-
-**Logging Examples:**
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Mitsubishi Comfort Plugin Configuration
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Streaming: ENABLED
-Polling mode: On-demand only
-Strategy: Streaming primary, polling fallback only
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✓ Streaming connection established
-Monitoring 3 device(s) for real-time updates
-
-[When streaming fails]
-✗ Streaming disconnected: transport close
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠ STREAMING INTERRUPTED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-→ Switching to DEGRADED MODE
-→ Polling activated: 10s intervals
-```
-
-### v1.2.0 - Real-time Streaming Support
-
-We added Socket.IO streaming to receive real-time device updates instead of relying solely on polling.
-
-#### Implementation Details
-
-**Streaming Connection:**
-- Server: `socket-prod.kumocloud.com`
-- Protocol: Socket.IO v4
-- Transport: Polling initially, upgrades to WebSocket
-- Authentication: Bearer token in extraHeaders
-
-**Flow:**
-1. Platform starts streaming after device discovery
-2. Socket connects and emits 'subscribe' event for each device serial
-3. Server sends 'device_update' events with full device state
-4. Callbacks in accessory.ts process updates immediately
-5. HomeKit characteristics update in real-time
-
-**Key Code Locations:**
-- Streaming initialization: `platform.ts:219-227`
-- Socket.IO setup: `kumo-api.ts:418-497`
-- Device subscription: `kumo-api.ts:499-507`
-- Update handling: `accessory.ts:67-103`
+Design narrative for the pre-fork streaming and adaptive-polling work carried
+stale line references into every release. It lives with the code it describes,
+in the [upstream repository](https://github.com/burtherman/homebridge-mitsubishi-comfort),
+along with the full history for 1.8.2 and earlier.

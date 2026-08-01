@@ -19,95 +19,9 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
 const { FAN_SPEEDS } = require('../dist/settings.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
 
 const SERIAL = 'TESTSERIAL001';
-
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = {
-        _name: String(prop),
-        OFF: 0, HEAT: 1, COOL: 2, AUTO: 0,
-        INACTIVE: 0, ACTIVE: 1,
-        IDLE: 1, HEATING: 2, COOLING: 3, BLOWING_AIR: 2,
-        MANUAL: 0,
-        SWING_DISABLED: 0, SWING_ENABLED: 1,
-        FIXED: 0, SWINGING: 2, HORIZONTAL: 0, VERTICAL: 1,
-        CELSIUS: 0, FAHRENHEIT: 1,
-      };
-    }
-    return charCache[prop];
-  },
-});
-// TargetFanState is MANUAL=0 / AUTO=1 — the opposite polarity to
-// TargetHeaterCoolerState's AUTO=0, so it needs its own values.
-charCache.TargetFanState = { _name: 'TargetFanState', MANUAL: 0, AUTO: 1 };
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  HeaterCooler: 'HeaterCooler',
-  Fanv2: 'Fanv2',
-  Slats: 'Slats',
-  HumiditySensor: 'HumiditySensor',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
-
-function makeCharacteristic() {
-  const ch = {
-    value: undefined,
-    onGet() { return ch; }, onSet() { return ch; }, setProps(p) { ch.props = p; return ch; },
-  };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype, chars,
-    getCharacteristic(id) {
-      if (!chars.has(id)) chars.set(id, makeCharacteristic());
-      return chars.get(id);
-    },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory() {
-  const entries = [
-    { type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) },
-  ];
-  return {
-    displayName: 'Bedroom',
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName: 'Bedroom' } },
-    getService(type) {
-      const e = entries.find((x) => x.type === type && x.subtype === undefined);
-      return e ? e.svc : null;
-    },
-    getServiceById(type, subtype) {
-      const e = entries.find((x) => x.type === type && x.subtype === subtype);
-      return e ? e.svc : null;
-    },
-    addService(type, name, subtype) {
-      const svc = makeService(type, name, subtype);
-      entries.push({ type, subtype, svc });
-      return svc;
-    },
-    removeService(svc) {
-      const i = entries.findIndex((x) => x.svc === svc);
-      if (i >= 0) entries.splice(i, 1);
-    },
-  };
-}
 
 function makeHarness() {
   const sendCommandCalls = [];
@@ -125,7 +39,7 @@ function makeHarness() {
       return Promise.resolve(true);
     },
   };
-  const accessory = makeAccessory();
+  const accessory = makeAccessory('Bedroom');
   const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
   // TargetFanState and SwingMode are capability-gated, so a realistic harness has
   // to deliver a profile before either exists.
@@ -384,7 +298,7 @@ test('turning the fan tile ON does turn the unit on', async () => {
 function makeLinkAwareHarness() {
   const linked = [];
   let primary = false;
-  const accessory = makeAccessory();
+  const accessory = makeAccessory('Bedroom');
   const origAdd = accessory.addService;
   accessory.addService = (type, name, subtype) => {
     const svc = origAdd(type, name, subtype);

@@ -20,27 +20,24 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 
 ## Features
 
-- **Local LAN control (opt-in)** — control and read each unit directly over your network, with automatic per-unit cloud fallback ([details](#local-lan-control))
+- **HeaterCooler tile per unit** — on/off, Heat / Cool / Auto, and the setpoint for the active mode, all on the main tile. Auto shows a two-handle heat/cool band
+- **Fan speed on the tile** — five real speeds plus fan-auto, on a linked Fan service
+- **Vane control** — swing on/off on the main tile; discrete tilt angles through an opt-in `Slats` service
+- **Fahrenheit-anchored setpoints** — every setpoint is stored as the exact Celsius of a whole °F, so the Home app and the Mitsubishi Comfort app show the same number
 - **Device mirroring (opt-in)** — make one unit follow another; the target copies the source's mode, setpoints, on/off and fan whenever the source changes ([details](#device-mirroring))
-- **Intelligent streaming-first architecture** with automatic fallback
-- **95% reduction in API calls** when streaming is healthy (optimal mode)
-- **Real-time streaming updates** via Socket.IO for instant status changes
-- **Adaptive polling** that activates only when streaming fails
-- Full HomeKit thermostat integration — Heat, Cool, Auto, and Off
-- **Auto-mode temperature range** — a two-handle heat/cool band in HomeKit's Auto mode
-- **Fan-only and Dry (dehumidify) modes** — exposed as per-unit switches (HomeKit's thermostat has no state for them)
-- **0.1°C setpoint resolution** for faithful °F round-tripping between Home and the Kumo app
-- Current temperature and humidity display, plus a filter-change indicator
-- Automatic token refresh
-- Multi-site and multi-zone support
-- Device exclusion/hiding support
+- **Wireless sensor support** — units with a paired sensor report its finer temperature and humidity, plus a battery level with a low-battery warning
+- **Real-time streaming updates** via Socket.IO, with adaptive polling that activates only when streaming fails (~95% fewer API calls when streaming is healthy)
+- **Local LAN control (opt-in)** — currently blocked by a vendor change; see [Local LAN Control](#local-lan-control)
+- Filter-change indicator, indoor humidity sensor (both optional), automatic token refresh
+- Multi-site and multi-zone support, device exclusion/hiding
 - Comprehensive logging for streaming/polling/local state transitions
 
 ## Installation
 
 ### Prerequisites
 
-- Node.js (v18.0.0 or higher)
+- Node.js 20.19 or newer (20.19+, 22.12+, or 24+). The plugin's HTTP client is
+  ESM-only, and `require()` of it fails on older releases
 - Homebridge (v1.6.0 or higher, including v2.x)
 
 ### Install from NPM
@@ -109,16 +106,20 @@ new. There is no way to migrate these automatically.
 
 ### New in this fork
 
-- **Fan speed** on the tile (`RotationSpeed`), all five speeds. Your units report
-  `numberOfFanSpeeds: 3` but accept all five — verified on real hardware — so the
-  profile count is treated as advisory.
+- **Fan speed and fan-auto** on a linked `Fanv2` service, all five speeds. Your units
+  report `numberOfFanSpeeds: 3` but accept all five — verified on real hardware — so
+  the profile count is treated as advisory.
 - **Vane control** via `SwingMode` on the main tile. The write path for this did not
   exist upstream at all. Discrete tilt positions are available through an optional
   `Slats` service (`exposeVaneSlat`), **off by default** — see the warning below.
 - **Fahrenheit-anchored setpoints.** Setpoints snap to the exact Celsius of a whole
   °F, so the Home app and the Mitsubishi Comfort app agree by construction.
 - **Dry and Fan-only switches are now opt-in** (`showDrySwitch` / `showFanOnlySwitch`),
-  off by default, since fan speed now lives on the main tile.
+  off by default, since fan control now lives on the accessory itself.
+- **Wireless sensor readings** — a paired sensor's finer temperature and humidity, and
+  its battery level as a HomeKit `Battery` service.
+- **Display units are settable** (`TemperatureDisplayUnits`), which upstream hardwired
+  to Celsius. The Home app ignores it, but Eve and other controllers honour it.
 
 ### ⚠️ A note on `exposeVaneSlat`
 
@@ -161,10 +162,14 @@ Add the following to your Homebridge `config.json`:
 | `disablePolling` | boolean | No | **Recommended:** Disable polling when streaming is healthy (auto-enables if streaming fails, default: false) |
 | `degradedPollInterval` | number | No | Fast polling interval when streaming is unhealthy in seconds (default: 10, minimum: 5, maximum: 60) |
 | `streamingHealthCheckInterval` | number | No | How often to check if streaming is healthy in seconds (default: 30, minimum: 10, maximum: 300) |
-| `streamingStaleThreshold` | number | No | Consider streaming stale if no updates received for this long in seconds (default: 60, minimum: 30, maximum: 600) |
+| `streamingStaleThreshold` | number | No | **Deprecated and inert.** Nothing reads it; streaming health is decided by the Socket.IO connection state. Accepted so an existing config stays valid |
 | `excludeDevices` | string[] | No | Array of device serial numbers to hide from HomeKit |
 | `debug` | boolean | No | Enable debug logging (default: false) |
-| `localControl` | boolean | No | **Opt-in (default: false).** Control units directly over the LAN; cloud stays for discovery/credentials and as a per-unit fallback. See [Local LAN Control](#local-lan-control) |
+| `showHumiditySensor` | boolean | No | Expose indoor humidity as a HumiditySensor service (default: **true**). Turn off if humidity dominates the accessory tile in the Home app |
+| `showDrySwitch` | boolean | No | Add a per-unit Dry (dehumidify) switch (default: false). Only on units whose profile reports dry support |
+| `showFanOnlySwitch` | boolean | No | Add a per-unit Fan-only switch (default: false). This is fan-*only* mode; fan speed while heating or cooling is on the main tile and needs no switch |
+| `exposeVaneSlat` | boolean | No | Expose vane angles as a `Slats` service (default: false). Apple Home files Slats under window coverings — see the warning in "New in this fork" above |
+| `localControl` | boolean | No | **Opt-in (default: false).** Control units directly over the LAN. Currently non-functional through no fault of the plugin — see [Local LAN Control](#local-lan-control) |
 | `localPollInterval` | number | No | Seconds between local status polls when `localControl` is on (default: 15, minimum: 5, maximum: 120) |
 | `localControlIps` | object | No | Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units |
 | `mirror` | array | No | **Opt-in (default: absent).** `{ source, target }` device-serial pairs; the target follows the source. See [Device Mirroring](#device-mirroring) |
@@ -209,39 +214,17 @@ When `debug: true` is enabled, the plugin will log detailed information includin
 
 - **Outdoor Temperature**: The Kumo Cloud API does not expose outdoor temperature data from the outdoor units. While outdoor units have temperature sensors (used for defrost cycles), this data is only available through direct CN105 serial connections, not through the cloud API.
 
-- **Temperature Display Differences (°F)**: HomeKit stores temperatures in Celsius and converts to °F for display, while the units operate in 0.5°C steps. This can make the same value show as e.g. 72°F in one app and 73°F in the other.
+- **Temperature Display Differences (°F)**: HomeKit stores temperatures in Celsius and converts to °F for display, and the Home app *rounds* that conversion while the Mitsubishi Comfort app *truncates* it. The same stored value can therefore read 72°F in one and 71°F in the other.
 
-  **Setpoints:** the plugin uses a **0.1°C step** so a value you set in the Home app stores a Celsius value that round-trips back to the same °F — largely eliminating the setpoint mismatch. (The units accept finer-than-0.5°C setpoints; this was verified against real hardware.) Note this only refines *new* changes you make in HomeKit; existing setpoints keep whatever value they were last set to.
+  **Setpoints:** solved. The units accept 0.1°C granularity (verified against real hardware), so every setpoint you write is snapped to the Celsius that displays as the whole °F you asked for under **both** renderers — the ceiling of the exact conversion, not the nearest 0.1. The two apps agree by construction. This applies to new changes only; a setpoint you have not touched keeps whatever value it was last set to.
 
-  **Current temperature:** the indoor units report their measured room temperature only in **0.5°C steps** (a hardware limit), so the displayed current temperature can still differ by ~1°F between apps. There's no setting that changes this — it's the resolution the unit reports.
+  **Current temperature:** the indoor units report their measured room temperature only in **0.5°C steps** (a hardware limit), so the displayed current temperature can still differ by ~1°F between apps. A unit with a paired wireless sensor reports a much finer value and does not have this problem.
 
 ## Local LAN Control
 
-By default the plugin controls your units through the Kumo Cloud. With `localControl: true`, it instead talks **directly to each indoor unit's WiFi adapter over your LAN** — lower latency, no cloud rate limits, and it keeps working during a cloud outage. This mirrors Home Assistant's official `mitsubishi_comfort` integration.
+**`localControl` cannot work at present, and not because of anything in this plugin.** Authenticating to a unit's WiFi adapter needs two per-device secrets that only the vendor cloud hands out: the adapter `password` (from the `adapter_update` socket event) and `cryptoSerial` (from `GET /devices/{serial}/status`). Around **2026-07-31 Mitsubishi's cloud stopped serving both**, on unrelated accounts and on a second client stack ([pykumo issue #78](https://github.com/dlarrick/pykumo/issues/78), reproduced by its maintainer), so no client can compute a local token.
 
-```json
-{
-  "platform": "KumoV3",
-  "username": "your-email@example.com",
-  "password": "your-password",
-  "disablePolling": true,
-  "localControl": true
-}
-```
-
-**How it works:**
-
-- The cloud is still used once at startup for **discovery and credentials** (each unit's local password and key). The plugin then **discovers each unit's IP** by sweeping your local subnet — no manual setup required.
-- Commands go **local-first with automatic cloud fallback**: if a unit isn't reachable locally, that unit transparently uses the cloud.
-- Status is read by **local polling** (`localPollInterval`, default 15s). Cloud streaming stays connected as the fallback.
-- It's **per-unit and self-healing** — a unit on a different VLAN, or one that's temporarily unreachable, just uses the cloud.
-
-**Requirements & notes:**
-
-- Your Homebridge host must be on the **same network** as the units (a routable subnet). VLAN-segmented IoT networks will fall back to cloud.
-- Optional: set `localControlIps` to a `{ "<serial>": "<ip>" }` map to skip discovery (e.g. if you've assigned static IPs).
-- **Toggling `localControl` requires a full Homebridge restart**, not just a child-bridge restart — child bridges receive their config from the main process.
-- Local control is currently marked experimental; if anything misbehaves, set `localControl: false` to return to pure cloud.
+You do not need to do anything. The plugin retries for about an hour, logs one warning, and runs everything over the cloud. Nothing is written to your config, so if Mitsubishi restores the fields, local control comes back on its own at the next Homebridge restart. Leaving `localControl: true` costs nothing; set it to `false` to silence the warning.
 
 ## Device Mirroring
 
@@ -276,11 +259,16 @@ Notes:
 
 ## HomeKit Modes & Switches
 
-HomeKit's thermostat service only models Off / Heat / Cool / Auto, so some unit features are surfaced differently:
+Each unit is a **HeaterCooler**, whose target mode is only Heat / Cool / Auto — on/off is a separate `Active` characteristic, and there is no state for dehumidify or fan-only. So:
 
-- **Auto mode shows a temperature range.** In Auto, the Home app presents a two-handle band — the lower handle is the heat setpoint, the upper is the cool setpoint (via `HeatingThresholdTemperature` / `CoolingThresholdTemperature`).
-- **Fan-only** is a separate **"Fan" switch** per unit (added only on units that support vent mode). On = fan only; off = the unit powers down.
-- **Dry (dehumidify)** is a separate **"Dry" switch** per unit (added only on units that support dry mode). On units that support a dry setpoint, the thermostat's target temperature controls it. Fan and Dry are mutually exclusive.
+- **On/off is independent of mode.** Turning a unit off does not change which mode it returns to.
+- **Setpoints are the two thresholds.** The Home app shows the heating threshold in Heat, the cooling threshold in Cool, and both as a two-handle band in Auto. Modes the unit's profile says it cannot do are removed from the picker.
+- **What the unit is doing** is reported honestly: heating, cooling, or **idle** when the compressor is in standby or the unit is in fan-only.
+- **Fan speed and fan-auto** are on a linked **Fan** service — five speeds at 0 / 25 / 50 / 75 / 100 on the slider, plus Auto on units whose profile has it.
+- **Vane:** swing on/off lives on the main tile. Discrete tilt angles need `exposeVaneSlat` (off by default — see the warning above). Apple Home does not render an Oscillate toggle for a collapsed accessory's fan service, which is why swing is on the climate service and not the fan.
+- **Dry (dehumidify)** is an opt-in **"Dry" switch** per unit (`showDrySwitch`, added only on units that support dry). Dry reports as Cool on the tile, and on units that support a dry setpoint the cooling threshold controls it.
+- **Fan-only** is an opt-in **"Fan-only" switch** per unit (`showFanOnlySwitch`, added only on units that support vent). This is fan-*only* mode; changing fan speed while heating or cooling needs no switch. Dry and Fan-only are mutually exclusive.
+- **Indoor humidity** is a HumiditySensor service, on by default (`showHumiditySensor`). Turn it off if the Home app's collapsed tile shows humidity where you wanted temperature.
 - **Filter indicator.** A filter-change indication appears when the unit reports its filter needs cleaning.
 
 > **Note:** HomeKit caches an accessory's services. If a newly-supported switch or the Auto range doesn't appear after an update, reboot your Home hub (Apple TV/HomePod) or the iOS device to refresh its cache.
@@ -305,14 +293,14 @@ This will compile TypeScript, link the plugin, and restart on changes.
 
 1. **Authentication**: The plugin logs in to the Kumo Cloud v3 API using your credentials
 2. **Token Management**: Access tokens are automatically refreshed every 15 minutes
-3. **Discovery**: All sites and zones are discovered and registered as HomeKit thermostats
+3. **Discovery**: All sites and zones are discovered and registered as HomeKit HeaterCooler accessories
 4. **Real-time Streaming**: Establishes Socket.IO connection for instant device updates
 5. **Intelligent Fallback**:
    - **Normal Mode** (streaming healthy): Updates via streaming only, minimal API calls
    - **Degraded Mode** (streaming failed): Automatic fallback to fast polling (10s intervals)
    - **Health Monitoring**: Continuous checking of streaming connection status
    - **Automatic Recovery**: Returns to streaming-only mode when connection restored
-6. **Control**: Changes made in HomeKit are sent to the unit — directly over the LAN when `localControl` is enabled and the unit is reachable, otherwise via the Kumo Cloud API
+6. **Control**: Changes made in HomeKit are sent to the unit via the Kumo Cloud API, or directly over the LAN when `localControl` is enabled and the unit is reachable (see [Local LAN Control](#local-lan-control) for why that is currently unavailable)
 
 ### Update Strategy
 
@@ -325,29 +313,36 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 ## Supported Characteristics
 
-- Current Temperature
-- Target Temperature (0.1°C step)
-- Heating / Cooling Threshold Temperature (the two-handle Auto range)
-- Current Heating/Cooling State
-- Target Heating/Cooling State (Off, Heat, Cool, Auto)
-- Current Relative Humidity (when the unit has a sensor)
-- Filter Change Indication (when reported)
-- "Fan" and "Dry" switches (per unit, capability-gated)
+**HeaterCooler** (primary service, one per unit):
+
+- `Active` (on/off)
+- `CurrentHeaterCoolerState` (inactive / idle / heating / cooling)
+- `TargetHeaterCoolerState` (heat / cool / auto, narrowed to what the unit supports)
+- `CurrentTemperature`
+- `HeatingThresholdTemperature` and `CoolingThresholdTemperature` — these *are* the setpoint controls in every mode. There is deliberately no `TargetTemperature`
+- `SwingMode` (vane swing, when the unit has one)
+- `TemperatureDisplayUnits`
+
+**Fan** (`Fanv2`, linked): `Active`, `CurrentFanState`, `RotationSpeed` (five speeds), `TargetFanState` (fan-auto, when the unit has it).
+
+**Optional, per unit:** `HumiditySensor` (on by default), `Battery` (units with a paired wireless sensor, with low-battery warning), `FilterMaintenance` (when reported), `Slats` (opt-in), Dry and Fan-only `Switch` services (opt-in, capability-gated).
 
 ## API Endpoints Used
 
 ### REST API
-- `POST /v3/login` - Authentication
+- `POST /v3/login`, `POST /v3/refresh` - Authentication and token refresh
 - `GET /v3/sites` - Get all sites
-- `GET /v3/sites/{siteId}/zones` - Get zones for a site
-- `GET /v3/devices/{deviceSerial}/status` - Get device status
+- `GET /v3/sites/{siteId}/zones` - Get zones for a site (the polling endpoint)
+- `GET /v3/devices/{deviceSerial}/status` - Connection status and `cryptoSerial`
 - `POST /v3/devices/send-command` - Send commands to device
 
 ### Socket.IO Streaming
 - `wss://socket-prod.kumocloud.com` - Real-time device updates via Socket.IO
-- Emits `subscribe` event with device serial to receive updates
-- Receives `device_update` events with full device state
-- Receives `adapter_update` events (used to obtain each unit's local credentials for local control)
+- Emits `subscribe` per device serial, plus an account-level `subscribe`
+- Receives `device_update` (full device state), `profile_update` (capabilities),
+  `device_status_v2` (connected / disconnected), `sensor_update` (wireless sensor
+  temperature, humidity, battery) and `adapter_update` (adapter firmware and RSSI;
+  formerly also the local-control password — see [Local LAN Control](#local-lan-control))
 
 ### Local LAN (when `localControl` is enabled)
 - `PUT http://<unit-ip>/api?m=<token>` - direct status reads and commands to each indoor unit's WiFi adapter (no cloud)
@@ -393,7 +388,7 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 Apache License 2.0 — see [LICENSE](LICENSE).
 
-This is a fork of [burtherman/homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump)
+This is a fork of [burtherman/homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort)
 (forked at v1.8.2). The upstream repository shipped no license file and declared
 MIT in `package.json` while reproducing Apache-2.0 boilerplate in its README;
 Apache-2.0 is the only choice valid under either reading. Attribution, the

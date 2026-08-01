@@ -1,0 +1,31 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Every version reports, so one broken runtime does not hide the others.
+      fail-fast: false
+      matrix:
+        # 20.19 is the floor declared in package.json engines: node-fetch v3 is
+        # ESM-only and the compiled output is CommonJS, so `require()` of it
+        # throws ERR_REQUIRE_ESM on anything older.
+        node-version: ['20.19', '22', '24']
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - run: npm ci
+
+      # `npm test` also builds via the pretest hook. Building explicitly first
+      # keeps a compile error reported as a build failure, not a test failure.
+      - run: npm run build
+
+      - run: npm test
