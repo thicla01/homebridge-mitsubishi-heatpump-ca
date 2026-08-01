@@ -1365,6 +1365,9 @@ export class KumoThermostatAccessory {
     // ("Adding anyway"). The same is true of Switch, so the Dry/Fan-only switches
     // inherited from upstream will warn too if they are enabled.
     this.fanService.setCharacteristic(C.Name, name);
+    // Simply not setting it does not remove one a previous version already
+    // persisted into the accessory cache, so strip it explicitly.
+    this.removeStaleCharacteristic(this.fanService, C.ConfiguredName);
 
     this.fanService.getCharacteristic(C.Active)
       .onGet(this.getFanActive.bind(this))
