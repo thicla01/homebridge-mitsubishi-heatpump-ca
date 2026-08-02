@@ -6,6 +6,11 @@ Entries at 1.8.2 and below are inherited from
 [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort),
 the upstream project this was forked from.
 
+- **2.0.1** - Published through the release workflow, with provenance (August 2026)
+  - **No functional change.** The code shipped in 2.0.1 is byte-identical to 2.0.0 — the CI build of the 2.0.0 commit produced shasum `d691d0da`, exactly matching the tarball already on npm.
+  - What changes is *how* it got there. 2.0.0 was published by hand, before a trusted publisher could be configured on npmjs.com — a package has to exist before it can be claimed. Manual publishes carry no provenance, so 2.0.0 has `attestations: none` and nothing ties that tarball to the source commit that built it.
+  - 2.0.1 is published by `.github/workflows/publish.yml` on release, authenticating through npm Trusted Publishing over OIDC and passing `--provenance`. There is no `NPM_TOKEN` secret in the repository and there does not need to be one, so there is no long-lived publish credential to leak or rotate.
+
 - **2.0.0** - Fork: HeaterCooler, fan speed, vane, Fahrenheit-anchored setpoints (August 2026)
   - **Breaking — the primary service is now `HeaterCooler`, not `Thermostat`.** HomeKit binds an automation to a service and characteristic instance rather than to the accessory, so **every automation, scene, trigger and Shortcut that referenced the old thermostat stops working and must be rebuilt**. There is no way to migrate them. Everything else survives: the config `platform` key is still `KumoV3` and accessory UUIDs still derive from the device serial, so `config.json`, room assignment, custom names, Favorites and the child-bridge pairing are untouched. A Thermostat service left in the accessory cache by an earlier version is removed on first start, with a log line saying so — leaving it would give each unit two competing climate tiles
   - **Package renamed** to `homebridge-mitsubishi-heatpump`. Never have both this and `homebridge-mitsubishi-comfort` installed: two plugins registering the `KumoV3` platform makes Homebridge throw an ambiguous-platform error that it swallows into a misleading "Could not find the associated plugin"
