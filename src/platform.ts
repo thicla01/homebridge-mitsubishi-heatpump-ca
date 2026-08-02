@@ -31,6 +31,39 @@ const LOCAL_CRED_MAX_FAILED_PASSES = 6;
 /** How long each retry pass waits for a nudged device to answer. */
 const LOCAL_CRED_RETRY_WAIT_MS = 10000;
 
+/**
+ * Check the platform block. Returns the reason it is unusable, or null if it is fine.
+ *
+ * Separate from the constructor because of what the constructor may NOT do: throw.
+ * Homebridge constructs platforms unguarded — `new constructor(...)` in `loadPlatforms()`
+ * has no try/catch around it, unlike the plugin lookup either side of it — and an error
+ * escaping there rejects `Server.start()`, which the CLI's handler answers by SIGTERMing
+ * the process. Every other plugin in the install goes down with it, before the bridge is
+ * even published, and hb-service restarts straight back into the same throw. Under a child
+ * bridge it is `process.exit(1)` and a restart loop that gives up after five attempts.
+ *
+ * So there is no such thing as "refuse to start" for one platform here. The choice is
+ * between staying idle and taking the whole install down, and a missing password is not
+ * grounds for the second. Verified against homebridge 2.2.1 on 2026-08-01, including that
+ * a second, unrelated platform plugin never had its constructor called.
+ */
+export function validatePlatformConfig(config: KumoConfig): string | null {
+  if (!config.username || !config.password) {
+    return 'Username and password are required in config.';
+  }
+  if (typeof config.username !== 'string' || !config.username.includes('@')) {
+    return 'Username must be a valid email address.';
+  }
+  if (typeof config.password !== 'string' || config.password.trim().length === 0) {
+    return 'Password must be a non-empty string.';
+  }
+  if (config.pollInterval !== undefined
+    && (typeof config.pollInterval !== 'number' || config.pollInterval < 5)) {
+    return 'Poll interval must be a number >= 5 seconds.';
+  }
+  return null;
+}
+
 export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
@@ -85,43 +118,31 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.log.debug('Initializing platform:', this.config.name);
 
     const kumoConfig = this.kumoConfig;
-
-    // Validate required configuration
-    if (!kumoConfig.username || !kumoConfig.password) {
-      this.log.error('Username and password are required in config');
-      throw new Error('Missing required configuration');
-    }
-
-    // Validate username format (should be an email)
-    if (typeof kumoConfig.username !== 'string' || !kumoConfig.username.includes('@')) {
-      this.log.error('Username must be a valid email address');
-      throw new Error('Invalid username format');
-    }
-
-    // Validate password is a non-empty string
-    if (typeof kumoConfig.password !== 'string' || kumoConfig.password.trim().length === 0) {
-      this.log.error('Password must be a non-empty string');
-      throw new Error('Invalid password format');
-    }
-
-    // Validate pollInterval if provided
-    if (kumoConfig.pollInterval !== undefined) {
-      if (typeof kumoConfig.pollInterval !== 'number' || kumoConfig.pollInterval < 5) {
-        this.log.error('Poll interval must be a number >= 5 seconds');
-        throw new Error('Invalid poll interval');
-      }
-    }
+    const configError = validatePlatformConfig(kumoConfig);
 
     // Configure degraded mode polling interval
     this.degradedPollInterval = (kumoConfig.degradedPollInterval || 10) * 1000;
     this.log.debug(`Degraded polling interval: ${this.degradedPollInterval / 1000}s`);
 
+    // Assigned before the bail-out below because `strict` requires every readonly field to
+    // be set on every path out of the constructor. Constructing KumoAPI is inert — it sets
+    // two flags and logs — so building one that will never be used costs nothing. Streaming
+    // is passed as disabled on the error path purely so it does not announce itself.
     this.kumoAPI = new KumoAPI(
       kumoConfig.username,
       kumoConfig.password,
       this.log,
       kumoConfig.debug || false,
+      !configError,
     );
+
+    if (configError) {
+      this.log.error(
+        `${configError} This platform will stay idle until that is fixed in the Homebridge UI. `
+        + 'Homebridge and your other plugins are unaffected.',
+      );
+      return;
+    }
 
     // Configure streaming health monitoring
     const healthCheckInterval = kumoConfig.streamingHealthCheckInterval || 30;

@@ -86,9 +86,16 @@ export class KumoAPI {
   // Device profiles, delivered to the accessories via `profile_update`.
   private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
 
-  // Local-control credentials: the per-device local password arrives only in the
-  // `adapter_update` Socket.IO event (never via REST). We capture it here for the
-  // local LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
+  // Local-control credentials: on v3 the per-device local password arrives only in the
+  // `adapter_update` Socket.IO event, never via REST. We capture it here for the local
+  // LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
+  //
+  // "Never via REST" is true of v3 and only of v3. The legacy v2 login (`geo-c`, what
+  // pykumo and Home Assistant read) reportedly still returns every adapter's password and
+  // cryptoSerial over plain REST — upstream homebridge-mitsubishi-comfort v1.8.3 verified
+  // that on 2026-07-28, before the v3 fields disappeared, and treats the result as a
+  // candidate rather than truth because the v2 store can be stale enough that the adapter
+  // answers device_authentication_error. This plugin does not read v2.
   private adapterPasswords: Map<string, string> = new Map();
 
   // Paired wireless sensor readings, via the `sensor_update` event.

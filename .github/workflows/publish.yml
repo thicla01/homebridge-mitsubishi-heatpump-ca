@@ -32,7 +32,24 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Makes the job idempotent. npm rejects a duplicate version with a hard error, so
+      # without this any release event for a version already on the registry goes red —
+      # including backfilling a GitHub release for an older tag, which the "a release for
+      # every version" convention asks for. Skipping is the honest outcome there: the
+      # version is published, nothing is left to do.
+      - name: Skip if this version is already published
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "homebridge-mitsubishi-heatpump@$VERSION" version >/dev/null 2>&1; then
+            echo "$VERSION is already on npm; nothing to publish."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Auth is handled automatically via OIDC because a trusted publisher is
       # configured for this package on npmjs.com (no NPM_TOKEN secret needed).
       - name: Publish to npm
+        if: steps.check.outputs.published == 'false'
         run: npm publish --provenance --access public

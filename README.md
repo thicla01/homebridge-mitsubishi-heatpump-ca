@@ -127,19 +127,26 @@ HomeKit to collide with.
 
 ## Local LAN control
 
-**`localControl` cannot work at present, and not because of anything in this plugin.**
+**`localControl` does not work at present, and not because of anything in this plugin.**
 
 Authenticating to a unit's WiFi adapter needs two per-device secrets that only the vendor
 cloud hands out: the adapter `password` (from the `adapter_update` socket event) and
-`cryptoSerial` (from `GET /devices/{serial}/status`). Around **2026-07-31 Mitsubishi's
-cloud stopped serving both**, on unrelated accounts and on a second client stack
+`cryptoSerial` (from `GET /devices/{serial}/status`). Around **2026-07-31 the Comfort v3
+API stopped serving both**, on unrelated accounts and on a second client stack
 ([pykumo #78](https://github.com/dlarrick/pykumo/issues/78), reproduced by its
-maintainer), so no client can compute a local token.
+maintainer). This plugin talks to v3, so it has no way to compute a local token.
+
+There is reportedly one other source. The **legacy v2 login** — the older `geo-c` endpoint
+that pykumo and Home Assistant use — still returned both fields over plain REST when
+[upstream tested it on 2026-07-28](https://github.com/burtherman/homebridge-mitsubishi-comfort),
+three days before the v3 change. Whether it still does is untested here, and upstream notes
+its copy of the credentials can be stale enough that the adapter rejects them. This plugin
+does not use it today.
 
 You do not need to do anything. The plugin retries for about an hour, logs one warning,
-and runs everything over the cloud. Nothing is written to your config, so if Mitsubishi
-restores the fields local control comes back on its own at the next restart. Leaving
-`localControl: true` costs nothing; set it to `false` to silence the warning.
+and runs everything over the cloud. Nothing is written to your config, so if the fields
+come back local control resumes on its own at the next restart. Leaving `localControl:
+true` costs nothing; set it to `false` to silence the warning.
 
 ## Temperature display
 

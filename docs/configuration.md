@@ -46,7 +46,7 @@ and stops again on reconnect.
 | `name` | string | Yes | Platform name. Defaults to `Kumo`, and the Homebridge UI pre-fills it |
 | `username` | string | Yes | Your Mitsubishi Comfort / Kumo Cloud email address |
 | `password` | string | Yes | Your Mitsubishi Comfort / Kumo Cloud password |
-| `pollInterval` | number | No | Cloud poll interval in seconds while streaming is healthy (default 30). **Below 5 the plugin refuses to start** — see [Validation](#validation) |
+| `pollInterval` | number | No | Cloud poll interval in seconds while streaming is healthy (default 30). Below 5 the platform stays idle — see [Validation](#validation) |
 | `disablePolling` | boolean | No | Recommended. Skip polling entirely while streaming is healthy; polling re-enables itself if streaming fails (default false) |
 | `degradedPollInterval` | number | No | Poll interval in seconds while streaming is unhealthy (default 10) |
 | `streamingHealthCheckInterval` | number | No | How often to check the Socket.IO connection state, in seconds (default 30) |
@@ -64,10 +64,15 @@ and stops again on reconnect.
 
 ### Validation
 
-Only `pollInterval` is checked at runtime, and it **throws rather than clamps**: a value
-that is not a number, or is below 5, aborts platform startup with
-`Invalid poll interval` (`src/platform.ts:107-113`). Username and password get the same
-treatment when empty.
+Credentials and `pollInterval` are checked at startup, in `validatePlatformConfig`
+(`src/platform.ts`). A bad value is **rejected, not clamped**: `pollInterval` must be a
+number and at least 5, the username must contain `@`, and the password must be a non-empty
+string.
+
+When one of those fails, the platform logs a single error naming the problem and then
+**stays idle** — it registers no accessories and starts no timers. Homebridge itself keeps
+running and your other plugins are untouched. Fix the value in the Homebridge UI and
+restart; nothing else needs cleaning up.
 
 The minimum and maximum values on `degradedPollInterval`, `streamingHealthCheckInterval`
 and `localPollInterval` live in `config.schema.json` only. The Homebridge UI form enforces

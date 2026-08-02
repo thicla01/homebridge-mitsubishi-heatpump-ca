@@ -26,16 +26,40 @@ One Homebridge dynamic platform (`src/platform.ts`) owns the cloud client
 
 ## Read this before touching local control
 
-**Local control cannot work right now, and it is not a bug in this repo.** Authenticating
+**Local control does not work right now, and it is not a bug in this repo.** Authenticating
 to a unit's WiFi adapter needs two per-device secrets the vendor cloud used to hand out.
-Around 2026-07-31 the cloud stopped serving both: `password` vanished from `adapter_update`
-and `cryptoSerial` from `GET /devices/{serial}/status`. Reproduced on unrelated accounts
-and on a second client stack (pykumo #78, by its maintainer).
+Around 2026-07-31 **the v3 API** stopped serving both: `password` vanished from
+`adapter_update` and `cryptoSerial` from `GET /devices/{serial}/status`. Reproduced on
+unrelated accounts and on a second client stack (pykumo #78, by its maintainer).
+
+Scope that claim to v3, which is the only API this plugin speaks. Upstream
+`homebridge-mitsubishi-comfort` v1.8.3 added a fallback that reads both fields from the
+**legacy v2 login** (`geo-c`, pykumo and Home Assistant's source) over plain REST, and says
+it verified that live on 2026-07-28 — three days before the v3 change, so it is not
+evidence about today. Its own commit message adds that the v2 store can be stale enough
+that the adapter answers `device_authentication_error`, which is why it treats v2
+credentials as candidates gated behind a signed probe. If local control ever gets picked
+back up, that is the thread to pull, and it needs re-verification first.
 
 The credential gather is deliberately **bounded** — it retries with backoff, gives up after
 about an hour with one clear warning, and drops the local client so writes stop evaluating
 a path that cannot succeed. That is the intended behaviour, not a timeout to "fix". Nothing
 is persisted, so if the fields return, local control resumes at the next restart.
+
+## Never throw from the platform constructor
+
+Homebridge constructs platforms unguarded: `new constructor(...)` in `loadPlatforms()` has
+no try/catch, though the plugin lookup on either side of it does. An error escaping there
+rejects `Server.start()`, and the CLI's handler answers by SIGTERMing the process — so a
+missing password in *this* plugin's config takes down every other plugin in the install,
+before the bridge publishes, and the supervisor restarts into the same throw. Under a child
+bridge it is `process.exit(1)` and a restart loop that stops after five attempts.
+
+There is therefore no way for one platform to "refuse to start". The only options are idle
+or fatal. `validatePlatformConfig` returns a reason string, the constructor logs it and
+returns, and `test/config-validation.test.ts` pins that a rejected config subscribes to no
+lifecycle events. The same rule applies to anything reachable from a Socket.IO handler or a
+bare `setTimeout` — nothing above them catches.
 
 ## Tests
 
