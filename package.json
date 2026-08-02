@@ -11,12 +11,11 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "rimraf ./dist && tsc",
-    "watch": "npm run build && npm link && nodemon",
+    "build": "node --eval \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc",
     "pretest": "npm run build && npm run build:test",
     "test": "node --test dist-test/*.test.js",
     "prepublishOnly": "npm run build && npm test",
-    "build:test": "rimraf ./dist-test && tsc -p tsconfig.test.json"
+    "build:test": "node --eval \"fs.rmSync('dist-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json"
   },
   "license": "Apache-2.0",
   "keywords": [
@@ -49,8 +48,6 @@
   "devDependencies": {
     "@types/node": "^24.13.3",
     "homebridge": "^2.2.1",
-    "nodemon": "^2.0.7",
-    "rimraf": "^3.0.2",
     "typescript": "^5.9.3"
   }
 }
