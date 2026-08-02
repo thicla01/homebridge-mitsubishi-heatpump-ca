@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test: a scene/automation "turn off" must actually turn off a unit
 // that is running in DRY (or fan-only VENT).
 //
@@ -30,10 +28,12 @@
 // compressor and the coil cold (COOLING), vent moves air without heating or
 // cooling (IDLE) — and IDLE, unlike the old OFF, still means "on".
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
@@ -42,7 +42,7 @@ const CurrentState = Characteristic.CurrentHeaterCoolerState;
 const TargetState = Characteristic.TargetHeaterCoolerState;
 
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
   const platform = {
     Service,
     Characteristic,
@@ -53,18 +53,23 @@ function makeHarness() {
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) {
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  const heaterCooler = accessory.getService(Service.HeaterCooler);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  const heaterCooler = accessory.getService(Service.HeaterCooler)!;
   return { handler, accessory, heaterCooler, sendCommandCalls };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'dry',
@@ -72,7 +77,7 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 25, spHeat: 23, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
 // ---- Active: dry/vent must NOT read "off" while running ---------------------
 // This is the direct successor of "dry must not read a non-OFF target". Active is
@@ -158,14 +163,12 @@ test('dry and vent both report TargetHeaterCoolerState COOL (there is no OFF to 
   handler.updateFromZone(zone({ operationMode: 'dry', power: 1 }));
   // Dry genuinely belongs on COOL: its setpoint lives in spCool, so the Home app
   // showing the cooling threshold is showing the dry setpoint (see
-  // dry-setpoint.test.js). Vent has no setpoint of its own and rides along.
+  // dry-setpoint.test.ts). Vent has no setpoint of its own and rides along.
   assert.strictEqual(await handler.getTargetHeaterCoolerState(), TargetState.COOL);
 
   handler.updateFromZone(zone({ operationMode: 'vent', power: 1 }));
   assert.strictEqual(await handler.getTargetHeaterCoolerState(), TargetState.COOL);
 });
-
-// ---- The off write still routes to operationMode:'off' ----------------------
 
 test('turning a dry unit off via Active sends operationMode off', async () => {
   const { handler, sendCommandCalls } = makeHarness();
@@ -173,7 +176,8 @@ test('turning a dry unit off via Active sends operationMode off', async () => {
 
   await handler.setActive(Active.INACTIVE);
 
-  assert.deepStrictEqual(sendCommandCalls.at(-1).commands, { operationMode: 'off' },
+  assert.deepStrictEqual(sendCommandCalls[sendCommandCalls.length - 1].commands,
+    { operationMode: 'off' },
     'off from a dry unit turns it off');
 });
 

@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test for the off-unit setpoint bug.
 //
 // HomeKit sends a setpoint independently of the unit's on/off state. When an
@@ -27,17 +25,27 @@
 //     are snapped onto the whole-°F grid (src/temperature.ts) before anything
 //     else happens. That is still "the slider holds": 21°C and 21.2°C are the
 //     same 70°F, which is what the user actually asked for and what the Home app
-//     displays. Arithmetic is spelled out at each assertion.
+//     displays. Arithmetic is spelled out at each assertion; its last step is a
+//     CEILING to the device's 0.1°C, not a round, so that the value reads back as
+//     the intended degree in the Comfort app (which truncates) as well as in the
+//     Home app (which rounds). See storedC in src/temperature.ts.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory, type FakeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+interface SentCommand {
+  serial: string;
+  commands: Commands;
+}
+
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sendCommandCalls: SentCommand[] = [];
   const platform = {
     Service,
     Characteristic,
@@ -48,17 +56,34 @@ function makeHarness() {
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) {
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler, accessory, sendCommandCalls };
 }
 
-const zone = (over = {}) => ({
+/**
+ * The characteristic the Home app's slider is bound to, off the primary climate
+ * service. Asserting the service exists rather than optional-chaining: a missing
+ * HeaterCooler is itself the regression, and `undefined === 21.2` would report it
+ * as a wrong value instead of a missing tile.
+ */
+function climateChar(accessory: FakeAccessory, id: unknown) {
+  const svc = accessory.getService(Service.HeaterCooler);
+  assert.ok(svc, 'the HeaterCooler service was published');
+  return svc.getCharacteristic(id);
+}
+
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -66,7 +91,7 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
 test('setting a target temperature while the unit is OFF sends no command', async () => {
   const { handler, sendCommandCalls } = makeHarness();
@@ -95,8 +120,7 @@ test('the cooling threshold is guarded the same way while the unit is OFF', asyn
   assert.strictEqual(sendCommandCalls.length, 0,
     'a bare { spCool } to an off unit is the same doomed 400');
   // 25°C is exactly 77°F, so the echo is the request unchanged.
-  const cool = accessory.getService(Service.HeaterCooler)
-    .getCharacteristic(Characteristic.CoolingThresholdTemperature);
+  const cool = climateChar(accessory, Characteristic.CoolingThresholdTemperature);
   assert.strictEqual(cool.value, 25, 'the cooling handle holds the requested value');
 });
 
@@ -106,11 +130,11 @@ test('setting a target temperature while OFF still echoes the value to HomeKit',
 
   await handler.setHeatingThresholdTemperature(21);
 
-  // 21°C = 69.8°F -> nearest whole °F is 70 -> (70-32)*5/9 = 21.111… -> 21.2.
-  // 21.2°C reads back as 69.98°F, i.e. the same 70°F the user asked for, so the
+  // 21°C = 69.8°F -> nearest whole °F is 70 -> (70-32)*5/9 = 21.111… -> ceiling
+  // at 0.1°C = 21.2. 21.2°C reads back as 70.16°F, which is the same 70°F the
+  // user asked for under a rounding renderer AND under a truncating one, so the
   // handle holds where they put it rather than snapping back to the device's 20.
-  const target = accessory.getService(Service.HeaterCooler)
-    .getCharacteristic(Characteristic.HeatingThresholdTemperature);
+  const target = climateChar(accessory, Characteristic.HeatingThresholdTemperature);
   assert.strictEqual(target.value, 21.2,
     'HomeKit still reflects the requested value, on the °F grid (slider holds)');
 });
@@ -122,7 +146,7 @@ test('setting a target temperature while HEATING still sends the setpoint (contr
   await handler.setHeatingThresholdTemperature(22);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'heat-mode setpoint is sent to the API');
-  // 22°C = 71.6°F -> 72°F -> (72-32)*5/9 = 22.222… -> 22.2.
+  // 22°C = 71.6°F -> 72°F -> (72-32)*5/9 = 22.222… -> ceiling 22.3.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
     'sends the quantized heat setpoint with no spurious fields');
 });
@@ -139,7 +163,7 @@ test('setting a target temperature while HEATING still sends the setpoint (contr
 // them on an idle unit made a perfectly ordinary request — "set every fan to
 // quiet" — silently skip whichever units happened to be off. What must still be
 // blocked is a command trailing an off inside a concurrent scene burst; that is
-// covered in off-scene-setpoint-race.test.js and guarded by offInFlight().
+// covered in off-scene-setpoint-race.test.ts and guarded by offInFlight().
 
 test('a fan-speed change reaches a unit that is merely OFF', async () => {
   const { handler, sendCommandCalls } = makeHarness();

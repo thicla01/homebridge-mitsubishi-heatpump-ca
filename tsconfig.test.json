@@ -1,15 +1,17 @@
 {
   // Tests compile separately from the shipped build: the package's tsconfig.json
   // emits only src/ into dist/, and test code must never reach a published
-  // tarball. allowJs is on so .ts and .js tests can coexist during the
-  // conversion; compiled tests land in dist-test/ as siblings of dist/, which is
-  // what keeps their `require('../dist/accessory.js')` resolving.
+  // tarball. Compiled tests land in dist-test/ as siblings of dist/, which is what
+  // keeps their `require('../dist/accessory.js')` resolving.
+  //
+  // The whole suite is TypeScript, so allowJs/checkJs are gone. Do not add them
+  // back: they existed only to let .js and .ts tests coexist during the
+  // conversion, and with allowJs on, a stray .js test would compile and run
+  // unchecked.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "outDir": "./dist-test",
     "rootDir": "./test",
-    "allowJs": true,
-    "checkJs": false,
     "declaration": false,
     "declarationMap": false,
     "sourceMap": true

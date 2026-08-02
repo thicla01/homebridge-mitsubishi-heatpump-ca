@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test: an "AC off" scene must not leave a unit running.
 //
 // A HomeKit "turn off AC" scene captures each unit's full state and, when it
@@ -14,7 +12,7 @@
 // Fix: a HomeKit off request opens a short suppression window; setpoint writes
 // during it are cached/echoed but not sent, so the off is the last thing the
 // adapter sees. The setpoints dispatched *before* the off are handled by the
-// separate hold (off-scene-pre-setpoint.test.js).
+// separate hold (off-scene-pre-setpoint.test.ts).
 //
 // ---- What the HeaterCooler migration changed about this test ----------------
 // Nothing about the physical failure. Only the surfaces moved:
@@ -35,15 +33,22 @@
 //     setpoint. It shares the setpoint guard (accessory.ts:setRotationSpeed) and
 //     the burst below now covers it.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+interface SentCommand {
+  serial: string;
+  commands: Commands;
+}
+
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sendCommandCalls: SentCommand[] = [];
   const platform = {
     Service,
     Characteristic,
@@ -54,17 +59,22 @@ function makeHarness() {
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) {
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler, accessory, sendCommandCalls };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -72,14 +82,14 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const isOff = (c) => c.commands.operationMode === 'off';
-const isSetpoint = (c) =>
+const isOff = (c: SentCommand) => c.commands.operationMode === 'off';
+const isSetpoint = (c: SentCommand) =>
   c.commands.spHeat !== undefined || c.commands.spCool !== undefined;
 // A fan-speed write is mode-less on the LAN path too, so it revives an off unit
 // the same way a bare setpoint does. New writer on the HeaterCooler tile.
-const isFanSpeed = (c) => c.commands.fanSpeed !== undefined;
+const isFanSpeed = (c: SentCommand) => c.commands.fanSpeed !== undefined;
 
 test('AC-off scene: no setpoint reaches the device after the off (unit stays off)', async () => {
   const { handler, sendCommandCalls } = makeHarness();

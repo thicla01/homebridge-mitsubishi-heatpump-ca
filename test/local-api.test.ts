@@ -1,5 +1,3 @@
-'use strict';
-
 // Unit tests for the local LAN transport core (src/local-api.ts).
 //
 // The token algorithm is a port of pykumo's `_token()`, already live-verified
@@ -7,15 +5,22 @@
 // These tests guard the PORT against regressions — determinism, shape, and
 // sensitivity to inputs — plus the pure command/status mapping logic.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const {
+import test from 'node:test';
+import assert from 'node:assert';
+
+import {
   computeLocalToken,
   buildLocalCommandBody,
   mapLocalStatus,
   enumerateSubnet,
   STATUS_READ_BODY,
-} = require('../dist/local-api.js');
+} from '../dist/local-api.js';
+import type { Commands } from '../dist/settings.js';
+
+/** The LAN write envelope; the leaf's keys are what these tests are about. */
+interface LocalBody {
+  c: { indoorUnit: { status: Record<string, unknown> } };
+}
 
 // 10-byte hex cryptoSerial (>= 9 bytes) + base64 password.
 const CS = '0123456789abcdef0123';
@@ -50,8 +55,9 @@ test('token rejects a too-short cryptoSerial (< 9 bytes)', () => {
 
 // ---- buildLocalCommandBody ------------------------------------------------
 
-const parseBody = (buf) => JSON.parse(buf.toString('utf8'));
-const innerStatus = (cmds) => parseBody(buildLocalCommandBody(cmds)).c.indoorUnit.status;
+const parseBody = (buf: Buffer): LocalBody => JSON.parse(buf.toString('utf8')) as LocalBody;
+const innerStatus = (cmds: Commands): Record<string, unknown> =>
+  parseBody(buildLocalCommandBody(cmds)).c.indoorUnit.status;
 
 test('operationMode maps to the local `mode` field', () => {
   assert.deepStrictEqual(innerStatus({ operationMode: 'cool' }), { mode: 'cool' });

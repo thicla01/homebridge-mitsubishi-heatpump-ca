@@ -1,5 +1,3 @@
-'use strict';
-
 // Fan-speed writes on the local path, and the raw passthrough the mirror needs.
 //
 // History: through 1.8.2 `Commands.fanSpeed` was a coarse auto/low/medium/high
@@ -22,14 +20,21 @@
 // buildLocalCommandBody is the only validation layer there is, and it throws
 // before any I/O so nothing is half-written.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { buildLocalCommandBody } = require('../dist/local-api.js');
-const { toCloudCommands } = require('../dist/kumo-api.js');
-const { FAN_SPEEDS } = require('../dist/settings.js');
+import test from 'node:test';
+import assert from 'node:assert';
 
-const parseLocal = (commands) =>
-  JSON.parse(buildLocalCommandBody(commands).toString('utf8')).c.indoorUnit.status;
+import { buildLocalCommandBody } from '../dist/local-api.js';
+import { toCloudCommands } from '../dist/kumo-api.js';
+import { FAN_SPEEDS } from '../dist/settings.js';
+import type { Commands, FanSpeed } from '../dist/settings.js';
+
+/** The LAN write envelope; the leaf's keys are what these tests are about. */
+interface LocalBody {
+  c: { indoorUnit: { status: Record<string, unknown> } };
+}
+
+const parseLocal = (commands: Commands): Record<string, unknown> =>
+  (JSON.parse(buildLocalCommandBody(commands).toString('utf8')) as LocalBody).c.indoorUnit.status;
 
 test('local: fanSpeedRaw is written verbatim to status.fanSpeed', () => {
   const status = parseLocal({ operationMode: 'heat', spHeat: 21, fanSpeedRaw: 'powerful' });
@@ -55,9 +60,15 @@ test('local: an out-of-vocabulary fanSpeed throws instead of silently no-opping'
   // 'high' and 'medium' are the retired coarse enum's values, and the most
   // likely thing for a stale caller to still be sending. The adapter would
   // answer 200 and ignore them, so this throw is the only signal that exists.
+  //
+  // `Commands.fanSpeed` is the FanSpeed union, so no type-checked caller can
+  // write these — but the values still arrive at runtime from a stale build, a
+  // mirror push carrying another unit's vocabulary, or hand-edited config. The
+  // cast is this test standing in for that untyped caller; the runtime guard is
+  // the thing under test precisely because the type is not enforceable there.
   for (const bogus of ['high', 'medium', 'Low', 'super powerful', '']) {
     assert.throws(
-      () => parseLocal({ fanSpeed: bogus }),
+      () => parseLocal({ fanSpeed: bogus as FanSpeed }),
       /Invalid fan speed/,
       `expected "${bogus}" to be rejected`,
     );
@@ -86,6 +97,6 @@ test('cloud: toCloudCommands folds fanSpeedRaw into fanSpeed and drops fanSpeedR
 });
 
 test('cloud: toCloudCommands returns the input unchanged when there is no fanSpeedRaw', () => {
-  const input = { operationMode: 'cool', spCool: 24 };
+  const input: Commands = { operationMode: 'cool', spCool: 24 };
   assert.strictEqual(toCloudCommands(input), input);
 });

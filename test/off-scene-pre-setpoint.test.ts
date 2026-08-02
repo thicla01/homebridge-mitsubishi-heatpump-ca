@@ -1,8 +1,6 @@
-'use strict';
-
 // Regression test: a scene setpoint dispatched *before* the off must not stick.
 //
-// The 1.7.2 fix (off-scene-setpoint-race.test.js) stops a setpoint that lands
+// The 1.7.2 fix (off-scene-setpoint-race.test.ts) stops a setpoint that lands
 // AFTER an off from reviving the unit. But HomeKit dispatches a scene's captured
 // setpoints and its off concurrently in arbitrary order, and a setpoint that
 // lands just BEFORE the off arrives while the unit is still on — so it passes
@@ -32,17 +30,28 @@
 //
 // Setpoint values are quantized onto the whole-°F grid before sending
 // (src/temperature.ts), so the expected command values below are the quantized
-// ones, not the raw request. Each is derived in-line where it matters.
+// ones, not the raw request. Each is derived in-line where it matters. The last
+// step of that derivation is a CEILING to the 0.1°C the device stores, not a
+// round: the Mitsubishi Comfort app truncates °C→°F where the Home app rounds,
+// and only the ceiling reads back as the intended degree under both (measured
+// live 2026-07-27, see storedC in src/temperature.ts).
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+interface SentCommand {
+  serial: string;
+  commands: Commands;
+}
+
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sendCommandCalls: SentCommand[] = [];
   const platform = {
     Service,
     Characteristic,
@@ -53,17 +62,22 @@ function makeHarness() {
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) {
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler, accessory, sendCommandCalls };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -71,9 +85,9 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 22.5, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const isSetpoint = (c) =>
+const isSetpoint = (c: SentCommand) =>
   c.commands.spHeat !== undefined || c.commands.spCool !== undefined;
 
 test('a scene setpoint dispatched just BEFORE the off never reaches the device', async () => {
@@ -133,8 +147,9 @@ test('control: a setpoint with no off in the burst still sends', async () => {
   await handler.setCoolingThresholdTemperature(23.5);
 
   assert.strictEqual(sendCommandCalls.length, 1);
-  // 23.5°C = 74.3°F -> nearest whole °F is 74 -> (74-32)*5/9 = 23.333… -> 23.3.
-  // The value on the wire is the quantized one; the hold must not change that.
+  // 23.5°C = 74.3°F -> nearest whole °F is 74 -> (74-32)*5/9 = 23.333…°C -> the
+  // ceiling of that at 0.1°C resolution is 23.4. The value on the wire is the
+  // quantized one; the hold must not change that.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.4 });
 });
 
@@ -150,7 +165,7 @@ test('a drag sends only its final value', async () => {
 
   assert.strictEqual(sendCommandCalls.length, 1, 'intermediate drag values are superseded');
   // 24°C = 75.2°F -> 75°F -> (75-32)*5/9 = 23.888… -> 23.9. The three raw values
-  // quantize to three distinct grid points (22.8 / 23.3 / 23.9), so this really is
+  // quantize to three distinct grid points (22.8 / 23.4 / 23.9), so this really is
   // a drag and not one value repeated: only the last generation may survive.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 });
 });

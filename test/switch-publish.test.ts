@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test for the runtime-structure-publish fix.
 //
 // Every service this accessory grows *after* discovery — the fan-only switch
@@ -21,43 +19,65 @@
 // each add/remove branch is now driven by capability AND config. Both gates route
 // through the same setup*/remove* pair, so both must publish.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, DeviceProfile, KumoConfig, Zone } from '../dist/settings.js';
+import {
+  Characteristic, Service, makeLog, makeAccessory,
+  type FakeAccessory, type FakeService,
+} from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+type ProfilePayload = Partial<DeviceProfile>;
+
 // The switches are opt-in and the vane slats opt-out, so every harness states its
 // config explicitly — the gate under test is as much the config as the capability.
-const ALL_ON = { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true };
+const ALL_ON: Partial<KumoConfig> =
+  { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true };
 
-function makeHarness(kumoConfig = ALL_ON) {
-  const updates = [];
-  let profileCb = null;
-  const config = { ...kumoConfig };
+function makeHarness(kumoConfig: Partial<KumoConfig> = ALL_ON) {
+  // Each element is the array handed to updatePlatformAccessories, so the length
+  // of `updates` is the publish count — which is what every assertion below reads.
+  const updates: FakeAccessory[][] = [];
+  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
+  const config: Partial<KumoConfig> = { ...kumoConfig };
   const platform = {
     Service,
     Characteristic,
     log: makeLog(),
-    api: { updatePlatformAccessories: (a) => updates.push(a) },
+    api: { updatePlatformAccessories: (a: FakeAccessory[]) => updates.push(a) },
     kumoConfig: config,
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
+    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
   };
   const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  // Both are created by the constructor, before any profile arrives. Asserted
+  // rather than optional-chained: if either stops being built the tests below
+  // should fail on the missing tile, not silently pass an `undefined` comparison.
   const heaterCooler = accessory.getService(Service.HeaterCooler);
+  assert.ok(heaterCooler, 'the constructor publishes the HeaterCooler service');
   const fan = accessory.getServiceById(Service.Fanv2, 'airflow');
+  assert.ok(fan, 'the constructor publishes the linked Fanv2 service');
   return {
     handler, accessory, updates, config, heaterCooler, fan,
-    applyProfile: (p) => profileCb(SERIAL, p),
+    // A profile listener is registered in the constructor; if it ever stops being
+    // registered this blows up loudly instead of quietly testing nothing.
+    applyProfile: (p: ProfilePayload) => profileCb!(SERIAL, p),
   };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -65,15 +85,19 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const profile = (over = {}) => ({
+const profile = (over: ProfilePayload = {}): ProfilePayload => ({
   minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
   maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
   hasModeVent: true,
   hasModeDry: true,
   ...over,
 });
+
+/** Names of every characteristic a service was actually asked for. */
+const registeredOn = (svc: FakeService): string[] =>
+  [...svc.chars.keys()].map((c) => (c as { _name: string })._name);
 
 // ---- switches: capability gate -------------------------------------------
 
@@ -128,8 +152,16 @@ test('a capable device publishes no switches when the config has not opted in', 
 // The opt-in is checked with === true, so only a literal true opts in. This pins
 // that: a truthy-but-not-true config value (a string from a hand-edited config.json)
 // must not silently publish a switch.
+//
+// KumoConfig types both flags as `boolean | undefined`, so no type-checked caller
+// can produce these values — which is the point. Homebridge parses config.json at
+// runtime and hands whatever is in the file straight through, so the `=== true`
+// check in src is the only thing standing between a stray `"showDrySwitch": "yes"`
+// and a switch the user never asked for. The cast records that this input arrives
+// from outside the type system, not that the assertion is being loosened.
 test('the config gate is strict — only true opts a switch in', () => {
-  const { accessory, applyProfile } = makeHarness({ showDrySwitch: 'yes', showFanOnlySwitch: 1 });
+  const handEdited = { showDrySwitch: 'yes', showFanOnlySwitch: 1 } as unknown as Partial<KumoConfig>;
+  const { accessory, applyProfile } = makeHarness(handEdited);
 
   applyProfile(profile());
 
@@ -195,8 +227,10 @@ test('first humidity reading adds a HumiditySensor service and publishes it', ()
 
   const hum = accessory.getService(Service.HumiditySensor);
   assert.ok(hum, 'HumiditySensor service added');
+  // `chars.get` rather than `getCharacteristic`: the latter CREATES on lookup, the
+  // way real HAP does, and would manufacture the very characteristic under test.
   assert.strictEqual(
-    hum.chars.get(Characteristic.CurrentRelativeHumidity).value, 51,
+    hum.chars.get(Characteristic.CurrentRelativeHumidity)?.value, 51,
     'reading landed on the sensor service',
   );
   // The characteristic must not be hung off the main tile: HeaterCooler does not
@@ -216,8 +250,10 @@ test('the humidity service is published only once, not on every reading', () => 
   handler.updateFromZone(zone({ humidity: 52 }));
 
   assert.strictEqual(updates.length, after, 'no redundant publish once humidity is registered');
+  const hum = accessory.getService(Service.HumiditySensor);
+  assert.ok(hum, 'the humidity service is still there');
   assert.strictEqual(
-    accessory.getService(Service.HumiditySensor).chars.get(Characteristic.CurrentRelativeHumidity).value,
+    hum.chars.get(Characteristic.CurrentRelativeHumidity)?.value,
     52,
     'later readings still update the existing service',
   );
@@ -225,26 +261,26 @@ test('the humidity service is published only once, not on every reading', () => 
 
 // ---- swing ----------------------------------------------------------------
 
-// FAILING ON PURPOSE — this is a real bug in src/accessory.ts, not a stale
-// expectation. See the note in the agent report.
+// This was a real bug in src/accessory.ts and this test was checked in FAILING to
+// pin it. It is fixed — applyDeviceProfile now calls publishStructureChange()
+// inside the `if (profile.hasVaneSwing && !this.swingModeRegistered)` block — and
+// the test is kept as the regression guard for it. The mechanism, so nobody
+// "simplifies" the publish back out:
 //
 // applyDeviceProfile registers SwingMode with
-// `this.service.getCharacteristic(C.SwingMode)` (accessory.ts:305-311) and never
-// calls publishStructureChange(). In hap-nodejs, getCharacteristic() on a
-// characteristic the service does not yet carry ADDS it (Service.js:186-230;
+// `this.service.getCharacteristic(C.SwingMode)`. In hap-nodejs, getCharacteristic()
+// on a characteristic the service does not yet carry ADDS it (Service.js:186-230;
 // SwingMode is in HeaterCooler's optionalCharacteristics list,
 // ServiceDefinitions.js:701) — so this is a structural change to an
 // already-published accessory, exactly like the humidity characteristic was.
 // Without the publish, the swing toggle never reaches the Home app and is never
 // persisted to cachedAccessories.
 //
-// It is masked whenever the same applyDeviceProfile pass also adds or removes a
-// service, because those publishes flush the pending SwingMode too. This profile
-// is the unmasked case, and it is the DEFAULT configuration: swing-capable, no
-// discrete vane positions, both switches at their opt-out default.
-//
-// Fix: call this.publishStructureChange() inside the
-// `if (profile.hasVaneSwing && !this.swingModeRegistered)` block.
+// The bug was masked whenever the same applyDeviceProfile pass also added or
+// removed a service, because those publishes flush the pending SwingMode too.
+// This profile is the unmasked case, and it is the DEFAULT configuration:
+// swing-capable, no discrete vane positions, both switches at their opt-out
+// default. Keep it that way — widening this profile re-masks the regression.
 test('registering SwingMode publishes it to HomeKit', () => {
   const { updates, applyProfile, fan, heaterCooler } = makeHarness({});
 
@@ -316,7 +352,7 @@ test('swing stays available with Slats off', () => {
 
   // `chars` is the mock's record of every characteristic the code actually
   // reached for — inspecting it does not create one, unlike getCharacteristic.
-  const registered = [...heaterCooler.chars.keys()].map((c) => c._name);
+  const registered = registeredOn(heaterCooler);
   assert.ok(registered.includes('SwingMode'),
     `SwingMode must be on the climate tile when Slats is off; got ${registered}`);
 });

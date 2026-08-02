@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test for the dry-mode setpoint field bug.
 //
 // On the Kumo v3 cloud, Dry mode holds its temperature setpoint in `spCool`
@@ -31,20 +29,27 @@
 // of the nearest whole °F on the way out (src/temperature.ts,
 // quantizeSetpointInRange), because HAP's minStep only constrains the outbound
 // path and a controller can write any float inbound. So the value asserted below
-// is the quantized one, not the one HomeKit sent; the arithmetic is spelled out
-// at each site. The mirror path is deliberately exempt — it copies a value the
-// source already quantized.
+// is the quantized one, not the one HomeKit sent. The first write test spells the
+// arithmetic out; the rest call `quantizeSetpointC` for the expectation, because
+// hand-copied arithmetic rots — two of the comments here had drifted a whole
+// 0.1°C step behind the quantizer (they described rounding, and it takes the
+// CEILING so a truncating renderer shows the same degree). The mirror path is
+// deliberately exempt — it copies a value the source already quantized.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import { quantizeSetpointC } from '../dist/temperature.js';
+import type { Adapter, Commands, DeviceProfile, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
 function makeHarness() {
-  const sendCommandCalls = [];
-  let profileCb = null;
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
+  type ProfileListener = (serial: string, profile: Partial<DeviceProfile>) => void;
+  let profileCb: ProfileListener | null = null;
   const platform = {
     Service,
     Characteristic,
@@ -54,18 +59,30 @@ function makeHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
-    sendCommand(serial, commands) {
+    onDeviceProfileUpdate(cb: ProfileListener) {
+      profileCb = cb;
+    },
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  return { handler, accessory, sendCommandCalls, applyProfile: (p) => profileCb(SERIAL, p) };
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  return {
+    handler,
+    accessory,
+    sendCommandCalls,
+    applyProfile: (p: Partial<DeviceProfile>) => profileCb!(SERIAL, p),
+  };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'dry',
@@ -73,9 +90,9 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 25, spHeat: 23, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const profile = (over = {}) => ({
+const profile = (over: Partial<DeviceProfile> = {}): Partial<DeviceProfile> => ({
   minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
   maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
   hasModeVent: true,
@@ -96,7 +113,8 @@ test('setting the dry-mode setpoint sends spCool, not spHeat', async () => {
 
   assert.strictEqual(sendCommandCalls.length, 1, 'a command is sent in dry mode');
   // Before the fix this was { spHeat: ... }, which the unit ignored / 400'd.
-  // 24°C = 75.2°F -> nearest whole 75°F -> 23.888…°C -> stored 23.9.
+  // The one worked example: 24°C = 75.2°F -> nearest whole 75°F -> 23.888…°C ->
+  // ceiled to the 0.1°C the device stores = 23.9.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 },
     'dry-mode setpoint is written to spCool (no spHeat, no operationMode)');
 });
@@ -109,8 +127,7 @@ test('the dry setpoint routes to spCool even before the device profile arrives',
 
   await handler.setCoolingThresholdTemperature(26);
 
-  // 26°C = 78.8°F -> 79°F -> 26.111…°C -> stored 26.1.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 26.2 },
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: quantizeSetpointC(26) },
     'the dry setpoint works from the first tap, not only once the profile lands');
 });
 
@@ -135,8 +152,7 @@ test('the heating threshold still writes spHeat (control)', async () => {
 
   await handler.setHeatingThresholdTemperature(22);
 
-  // 22°C = 71.6°F -> 72°F -> 22.222…°C -> stored 22.2.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: quantizeSetpointC(22) });
 });
 
 // ---- Read path -----------------------------------------------------------
@@ -179,7 +195,7 @@ test('mirroring a dry source carries its spCool to the target', async () => {
   // One atomic command; spCool (25 is inside the target's 16–31 clamp) and no
   // spHeat, same field choice as the HomeKit path. Not re-quantized: the source
   // already snapped this value to the °F grid when it was set.
-  assert.deepStrictEqual(sendCommandCalls.at(-1).commands, {
+  assert.deepStrictEqual(sendCommandCalls[sendCommandCalls.length - 1].commands, {
     operationMode: 'dry', power: 1, spCool: 25, fanSpeedRaw: 'quiet',
   });
 });
@@ -195,7 +211,7 @@ test('mirroring a dry source omits spCool when the profile reports usesSetPointI
 
   // Such a unit dehumidifies at a fixed setpoint and ignores the value; sending
   // one anyway would silently rewrite the setpoint it uses back in COOL.
-  assert.deepStrictEqual(sendCommandCalls.at(-1).commands, {
+  assert.deepStrictEqual(sendCommandCalls[sendCommandCalls.length - 1].commands, {
     operationMode: 'dry', power: 1, fanSpeedRaw: 'quiet',
   }, 'fixed-setpoint dry units do not get a spCool write');
 });

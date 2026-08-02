@@ -1,16 +1,16 @@
-'use strict';
-
 // applyMirror (target side): reconstructs one atomic command from a source's
 // desired state, normalized, clamped to this unit's range, and capability-guarded.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, DeviceProfile, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTTARGET01';
 
-const profile = (over = {}) => ({
+const profile = (over: Partial<DeviceProfile> = {}): DeviceProfile => ({
   numberOfFanSpeeds: 5, hasFanSpeedAuto: true,
   hasModeDry: true, usesSetPointInDryMode: true,
   hasModeHeat: true, hasModeVent: true, hasVaneDir: true, hasVaneSwing: true,
@@ -21,8 +21,8 @@ const profile = (over = {}) => ({
 });
 
 function makeHarness() {
-  const sendCommandCalls = [];
-  let profileCb = null;
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
+  let profileCb: ((serial: string, deviceProfile: DeviceProfile) => void) | null = null;
   const platform = {
     Service, Characteristic, log: makeLog(),
     api: { updatePlatformAccessories() {} },
@@ -31,22 +31,31 @@ function makeHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
-    sendCommand(serial, commands) { sendCommandCalls.push({ serial, commands }); return Promise.resolve(true); },
+    onDeviceProfileUpdate(cb: (serial: string, deviceProfile: DeviceProfile) => void) {
+      profileCb = cb;
+    },
+    sendCommand(serial: string, commands: Commands) {
+      sendCommandCalls.push({ serial, commands }); return Promise.resolve(true);
+    },
   };
-  const handler = new KumoThermostatAccessory(platform, makeAccessory('Target', SERIAL), kumoAPI, 30);
-  const setProfile = (p) => profileCb(SERIAL, p);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    makeAccessory('Target', SERIAL) as never,
+    kumoAPI as never,
+    30,
+  );
+  const setProfile = (p: DeviceProfile) => profileCb!(SERIAL, p);
   return { handler, sendCommandCalls, setProfile };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
     fanSpeed: 'auto', airDirection: 'auto',
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null, ...over,
   },
-});
+}) as unknown as Zone;
 
 // NOTE: mirrored setpoints are snapped to the Fahrenheit grid by clampSetpoint,
 // so the expected values below are the grid points, not the source's raw value:

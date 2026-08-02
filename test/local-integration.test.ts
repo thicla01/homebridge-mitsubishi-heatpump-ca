@@ -1,5 +1,3 @@
-'use strict';
-
 // Integration tests for local control wiring in the accessory:
 //  - updateFromLocal() feeds a locally-read status into the characteristics
 //  - local is authoritative: a cloud (polling/streaming) update is dropped while a
@@ -13,29 +11,66 @@
 // is the separate `Active` characteristic. The wiring being tested — which
 // transport a read/write travels over — is unchanged.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { DeviceUpdateCallback } from '../dist/kumo-api.js';
+import type { Adapter, Commands, DeviceStatus, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
+import type { FakeService } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
-function makeLocalClient(over = {}) {
-  const calls = [];
+interface CommandCall {
+  serial: string;
+  commands: Commands;
+}
+
+/** The slice of LocalKumoClient the accessory actually reaches for. */
+interface FakeLocalClient {
+  calls: CommandCall[];
+  hasLocalResult: boolean;
+  sendCommandResult: boolean;
+  hasLocal(): boolean;
+  sendCommand(serial: string, commands: Commands): Promise<boolean>;
+  getStatus(): Promise<Partial<DeviceStatus> | null>;
+}
+
+function makeLocalClient(over: Partial<FakeLocalClient> = {}): FakeLocalClient {
+  const calls: CommandCall[] = [];
   return {
     calls,
     hasLocalResult: true,
     sendCommandResult: true,
-    hasLocal() { return this.hasLocalResult; },
-    sendCommand(serial, commands) { calls.push({ serial, commands }); return Promise.resolve(this.sendCommandResult); },
-    getStatus() { return Promise.resolve(null); },
+    hasLocal() {
+      return this.hasLocalResult;
+    },
+    sendCommand(serial: string, commands: Commands) {
+      calls.push({ serial, commands }); return Promise.resolve(this.sendCommandResult);
+    },
+    getStatus() {
+      return Promise.resolve(null);
+    },
     ...over,
   };
 }
 
-function makeHarness({ localClient = null } = {}) {
-  const sendCommandCalls = [];
-  let streamCb = null;
+/**
+ * `displayConfig` is not part of DeviceStatus: standby / defrost / filter arrive
+ * only on the streaming transport, alongside the fields that are.
+ */
+interface StreamingDisplayConfig {
+  filter: boolean;
+  defrost: boolean;
+  standby: boolean;
+  hotAdjust?: boolean;
+}
+type StreamingUpdate = Partial<DeviceStatus> & { displayConfig?: StreamingDisplayConfig };
+
+function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | null } = {}) {
+  const sendCommandCalls: CommandCall[] = [];
+  let streamCb: DeviceUpdateCallback | null = null;
   const platform = {
     Service,
     Characteristic,
@@ -48,35 +83,49 @@ function makeHarness({ localClient = null } = {}) {
     // Capture the streaming callback rather than dropping it: displayConfig
     // (standby / defrost / filter) only ever arrives on this transport, so the
     // carry-across tests below have no other way to put it in the cache.
-    subscribeToDevice(serial, cb) { streamCb = cb; },
+    subscribeToDevice(serial: string, cb: DeviceUpdateCallback) {
+      streamCb = cb;
+    },
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) { sendCommandCalls.push({ serial, commands }); return Promise.resolve(true); },
+    sendCommand(serial: string, commands: Commands) {
+      sendCommandCalls.push({ serial, commands }); return Promise.resolve(true);
+    },
   };
   const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   return {
-    handler, sendCommandCalls, platform, accessory,
-    emitStreaming: (data) => streamCb(SERIAL, data),
-    heaterCooler: () => accessory.getService(Service.HeaterCooler),
+    handler, sendCommandCalls, accessory,
+    emitStreaming: (data: StreamingUpdate) => {
+      assert.ok(streamCb, 'the accessory subscribed to the streaming transport');
+      streamCb(SERIAL, data);
+    },
+    heaterCooler: (): FakeService => {
+      const svc = accessory.getService(Service.HeaterCooler);
+      assert.ok(svc, 'the HeaterCooler service was published');
+      return svc;
+    },
   };
 }
 
-const localStatus = (over = {}) => ({
+const localStatus = (over: Partial<DeviceStatus> = {}): Partial<DeviceStatus> => ({
   roomTemp: 24, operationMode: 'cool', power: 1, spCool: 23, spHeat: 20,
   spAuto: null, fanSpeed: 'auto', airDirection: 'auto', filterDirty: false,
   defrost: false, standby: false, ...over,
 });
 
-const cloudZone = (over = {}) => ({
+const cloudZone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
     fanSpeed: 'auto', airDirection: 'auto',
     roomTemp: 30, spCool: 28, spHeat: 20, spAuto: null, humidity: null, ...over,
   },
-});
-
-// ---- updateFromLocal ------------------------------------------------------
+}) as unknown as Zone;
 
 test('updateFromLocal feeds a locally-read status into the characteristics', async () => {
   const { handler } = makeHarness();
@@ -100,8 +149,6 @@ test('updateFromLocal feeds a locally-read status into the characteristics', asy
     Characteristic.TargetHeaterCoolerState.COOL,
   );
 });
-
-// ---- local authoritative --------------------------------------------------
 
 test('a cloud update is dropped while a recent local poll exists', async () => {
   const { handler } = makeHarness();
@@ -130,7 +177,7 @@ test('cloud updates still apply when no local data exists', async () => {
 // and the characteristics that read them reported a working compressor for a unit
 // that was idling.
 
-const streamingUpdate = (over = {}) => ({
+const streamingUpdate = (over: Partial<StreamingUpdate> = {}): StreamingUpdate => ({
   id: 'zone-1', deviceSerial: SERIAL, roomTemp: 24, spHeat: 20, spCool: 23,
   spAuto: null, power: 1, operationMode: 'cool', fanSpeed: 'auto',
   airDirection: 'auto', humidity: null, rssi: -50,
@@ -165,7 +212,7 @@ test('the state PUSHED to HomeKit by the poll is idle too, not just the cached r
 
   h.handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
 
-  const pushed = h.heaterCooler().chars.get(Characteristic.CurrentHeaterCoolerState).value;
+  const pushed = h.heaterCooler().chars.get(Characteristic.CurrentHeaterCoolerState)?.value;
   assert.strictEqual(pushed, Characteristic.CurrentHeaterCoolerState.IDLE);
 });
 
@@ -204,7 +251,8 @@ test('the filter indication survives a poll as well', async () => {
   const { handler, accessory, emitStreaming } = makeHarness();
   emitStreaming(streamingUpdate({ displayConfig: { standby: false, filter: true, defrost: false } }));
   const filterSvc = accessory.getService(Service.FilterMaintenance);
-  const dirty = filterSvc.chars.get(Characteristic.FilterChangeIndication).value;
+  assert.ok(filterSvc, 'the FilterMaintenance service was published');
+  const dirty = filterSvc.chars.get(Characteristic.FilterChangeIndication)?.value;
   assert.strictEqual(dirty, Characteristic.FilterChangeIndication.CHANGE_FILTER);
 
   handler.updateFromZone(cloudZone({ roomTemp: 24, operationMode: 'cool' }));
@@ -213,7 +261,7 @@ test('the filter indication survives a poll as well', async () => {
   emitStreaming(streamingUpdate({ displayConfig: undefined, roomTemp: 24.5 }));
 
   assert.strictEqual(
-    filterSvc.chars.get(Characteristic.FilterChangeIndication).value,
+    filterSvc.chars.get(Characteristic.FilterChangeIndication)?.value,
     Characteristic.FilterChangeIndication.CHANGE_FILTER,
     'the warning must not clear itself just because a poll rebuilt the status',
   );

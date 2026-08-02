@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test for Fahrenheit-anchored setpoint quantization.
 //
 // The Home app is Celsius-native and converts to °F only for display, so a "72°F"
@@ -16,36 +14,33 @@
 // which transport won. quantizeSetpointC sits above both transports and snaps every
 // write to the exact 0.1°C that displays back as a whole °F.
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const {
+import test from 'node:test';
+import assert from 'node:assert';
+
+import {
   cToF,
   fToC,
   quantizeSetpointC,
   quantizeSetpointInRange,
   sameSetpoint,
-} = require('../dist/temperature.js');
+} from '../dist/temperature.js';
 
 /** What the Home app would show for a stored Celsius value. */
-function displayedF(c) {
+function displayedF(c: number): number {
   return Math.round(cToF(c));
 }
 
-// ---- Conversions ---------------------------------------------------------
-
 test('cToF / fToC are exact at the anchors', () => {
-  assert.equal(cToF(0), 32);
-  assert.equal(cToF(100), 212);
-  assert.equal(fToC(32), 0);
-  assert.equal(fToC(212), 100);
+  assert.strictEqual(cToF(0), 32);
+  assert.strictEqual(cToF(100), 212);
+  assert.strictEqual(fToC(32), 0);
+  assert.strictEqual(fToC(212), 100);
 });
-
-// ---- Exhaustive °F round-trip -------------------------------------------
 
 test('every whole °F from 50 to 90 round-trips through 0.1°C storage', () => {
   for (let f = 50; f <= 90; f++) {
     const stored = quantizeSetpointC(fToC(f));
-    assert.equal(displayedF(stored), f,
+    assert.strictEqual(displayedF(stored), f,
       `${f}°F stored as ${stored}°C displays back as ${displayedF(stored)}°F`);
   }
 });
@@ -54,7 +49,7 @@ test('the whole-°F round-trip survives ±0.2°C of controller jitter', () => {
   for (let f = 50; f <= 90; f++) {
     for (const jitter of [-0.2, -0.05, 0, 0.05, 0.2]) {
       const stored = quantizeSetpointC(fToC(f) + jitter);
-      assert.equal(displayedF(stored), f,
+      assert.strictEqual(displayedF(stored), f,
         `${f}°F + ${jitter}°C should still land on ${f}°F, got ${displayedF(stored)}°F`);
     }
   }
@@ -66,9 +61,9 @@ test('72°F lands on 22.3°C, ABOVE the degree, not 22.2 below it', () => {
   // (= 72.14°F). The difference decides whether a truncating renderer shows 72
   // or 71 — see the truncation test below and src/temperature.ts.
   const stored = quantizeSetpointC(fToC(72));
-  assert.equal(stored, 22.3);
+  assert.strictEqual(stored, 22.3);
   assert.ok(cToF(stored) >= 72, `${cToF(stored)}°F must not fall below the degree`);
-  assert.equal(displayedF(stored), 72);
+  assert.strictEqual(displayedF(stored), 72);
 });
 
 // ---- The reason the grid ceilings instead of rounding --------------------
@@ -84,9 +79,9 @@ test('every whole °F survives a TRUNCATING renderer, not just a rounding one', 
   for (let f = 50; f <= 90; f++) {
     const stored = quantizeSetpointC(fToC(f));
     const back = cToF(stored);
-    assert.equal(Math.floor(back + 1e-9), f,
+    assert.strictEqual(Math.floor(back + 1e-9), f,
       `${f}°F stored as ${stored}°C is ${back}°F, which truncates to ${Math.floor(back)}°F`);
-    assert.equal(Math.round(back), f,
+    assert.strictEqual(Math.round(back), f,
       `${f}°F stored as ${stored}°C is ${back}°F, which rounds to ${Math.round(back)}°F`);
   }
 });
@@ -100,19 +95,17 @@ test('the stored value never sits below its target degree', () => {
 });
 
 test('distinct whole °F map to distinct stored values (no two-°F collapse)', () => {
-  const seen = new Set();
+  const seen = new Set<number>();
   for (let f = 50; f <= 90; f++) {
     seen.add(quantizeSetpointC(fToC(f)));
   }
-  assert.equal(seen.size, 41, 'each of the 41 °F degrees gets its own 0.1°C slot');
+  assert.strictEqual(seen.size, 41, 'each of the 41 °F degrees gets its own 0.1°C slot');
 });
-
-// ---- Float noise ---------------------------------------------------------
 
 test('results never carry IEEE-754 dirt', () => {
   for (let f = 50; f <= 90; f++) {
     const stored = quantizeSetpointC(fToC(f));
-    assert.equal(stored, Number(stored.toFixed(1)),
+    assert.strictEqual(stored, Number(stored.toFixed(1)),
       `${stored} is not a clean one-decimal value`);
   }
 });
@@ -120,53 +113,49 @@ test('results never carry IEEE-754 dirt', () => {
 test('the upstream minStep grid value is cleaned up, not passed through', () => {
   // What hap-nodejs' minValue-anchored 0.1 grid actually produces for 72°F.
   const dirty = 10 + Math.round((fToC(72) - 10) / 0.1) * 0.1;
-  assert.notEqual(dirty, 22.2, 'sanity: the upstream grid really is dirty');
+  assert.notStrictEqual(dirty, 22.2, 'sanity: the upstream grid really is dirty');
 
   const stored = quantizeSetpointC(dirty);
-  assert.equal(stored, 22.3, 'the dirty 72°F value is re-snapped onto the ceiling grid');
-  assert.equal(stored, Number(stored.toFixed(1)));
+  assert.strictEqual(stored, 22.3, 'the dirty 72°F value is re-snapped onto the ceiling grid');
+  assert.strictEqual(stored, Number(stored.toFixed(1)));
 });
-
-// ---- Idempotence ---------------------------------------------------------
 
 test('quantizeSetpointC is idempotent across the usable range', () => {
   for (let c = 5; c <= 40; c += 0.05) {
     const once = quantizeSetpointC(c);
-    assert.equal(quantizeSetpointC(once), once, `not idempotent at ${c}`);
+    assert.strictEqual(quantizeSetpointC(once), once, `not idempotent at ${c}`);
   }
 });
 
 test('quantizeSetpointInRange is idempotent, including outside the range', () => {
   for (let c = 5; c <= 40; c += 0.05) {
     const once = quantizeSetpointInRange(c, 10, 31);
-    assert.equal(quantizeSetpointInRange(once, 10, 31), once, `not idempotent at ${c}`);
+    assert.strictEqual(quantizeSetpointInRange(once, 10, 31), once, `not idempotent at ${c}`);
   }
 });
-
-// ---- Range clamping stays on the °F grid --------------------------------
 
 test('an in-range value is still snapped to the grid, not passed through raw', () => {
   // "In range" does not mean "leave alone": a source setpoint sitting off the
   // grid (e.g. mirrored from a unit set in Celsius) must still be snapped, or it
   // propagates the display drift this module exists to remove.
-  assert.equal(quantizeSetpointInRange(fToC(68), 10, 31), quantizeSetpointC(fToC(68)));
-  assert.equal(quantizeSetpointInRange(fToC(72), 10, 31), 22.3);
-  assert.equal(quantizeSetpointInRange(22.15, 10, 31), 22.3, 'an off-grid in-range value is snapped');
+  assert.strictEqual(quantizeSetpointInRange(fToC(68), 10, 31), quantizeSetpointC(fToC(68)));
+  assert.strictEqual(quantizeSetpointInRange(fToC(72), 10, 31), 22.3);
+  assert.strictEqual(quantizeSetpointInRange(22.15, 10, 31), 22.3, 'an off-grid in-range value is snapped');
 });
 
 test('the real 10–31°C device range: below the floor snaps up to 50°F', () => {
   // 10°C is exactly 50°F, so the bottom bound is itself on the grid.
-  assert.equal(quantizeSetpointInRange(9.4, 10, 31), 10);
-  assert.equal(quantizeSetpointInRange(0, 10, 31), 10);
-  assert.equal(displayedF(quantizeSetpointInRange(0, 10, 31)), 50);
+  assert.strictEqual(quantizeSetpointInRange(9.4, 10, 31), 10);
+  assert.strictEqual(quantizeSetpointInRange(0, 10, 31), 10);
+  assert.strictEqual(displayedF(quantizeSetpointInRange(0, 10, 31)), 50);
 });
 
 test('the real 10–31°C device range: a 88°F request lands inside, on the grid', () => {
   // 31°C is 87.8°F — not a whole °F. 88°F would quantize to 31.1°C, outside the
   // range, so the value floors to the highest whole °F that fits: 87°F = 30.6°C.
   const out = quantizeSetpointInRange(fToC(88), 10, 31);
-  assert.equal(out, 30.6);
-  assert.equal(displayedF(out), 87);
+  assert.strictEqual(out, 30.6);
+  assert.strictEqual(displayedF(out), 87);
   assert.ok(out <= 31, 'never above the device max');
 });
 
@@ -176,9 +165,9 @@ test('clamped values stay inside the range and on the °F grid', () => {
   for (let f = 40; f <= 100; f++) {
     const out = quantizeSetpointInRange(fToC(f), min, max);
     assert.ok(out >= min && out <= max, `${f}°F produced ${out}°C, outside [${min},${max}]`);
-    assert.equal(out, Number(out.toFixed(1)), `${out} is not a clean one-decimal value`);
+    assert.strictEqual(out, Number(out.toFixed(1)), `${out} is not a clean one-decimal value`);
     // On the grid: the stored value is the storage form of its own displayed °F.
-    assert.equal(out, quantizeSetpointC(out), `${out}°C is off the °F grid`);
+    assert.strictEqual(out, quantizeSetpointC(out), `${out}°C is off the °F grid`);
   }
 });
 
@@ -189,10 +178,10 @@ test('a range whose bounds are whole °F keeps both endpoints reachable', () => 
   // judged to within half the 0.1°C device resolution.
   const min = fToC(60); // 15.5555…
   const max = fToC(80); // 26.6666…
-  assert.equal(quantizeSetpointInRange(fToC(55), min, max), 15.6);
-  assert.equal(displayedF(quantizeSetpointInRange(fToC(55), min, max)), 60);
-  assert.equal(quantizeSetpointInRange(fToC(85), min, max), 26.7);
-  assert.equal(displayedF(quantizeSetpointInRange(fToC(85), min, max)), 80);
+  assert.strictEqual(quantizeSetpointInRange(fToC(55), min, max), 15.6);
+  assert.strictEqual(displayedF(quantizeSetpointInRange(fToC(55), min, max)), 60);
+  assert.strictEqual(quantizeSetpointInRange(fToC(85), min, max), 26.7);
+  assert.strictEqual(displayedF(quantizeSetpointInRange(fToC(85), min, max)), 80);
 });
 
 test('the resolution allowance never loosens a bound that is on the 0.1°C grid', () => {
@@ -217,10 +206,8 @@ test('a float-dirty bound does not push the result out of range', () => {
   const max = 22.300000000000004; // a float-dirty form of the 72°F grid point
   const out = quantizeSetpointInRange(fToC(75), 10, max);
   assert.ok(out <= max + 0.05, `${out} exceeded the dirty max ${max}`);
-  assert.equal(out, 22.3, 'the bound itself is reachable despite the trailing dirt');
+  assert.strictEqual(out, 22.3, 'the bound itself is reachable despite the trailing dirt');
 });
-
-// ---- sameSetpoint tolerance ---------------------------------------------
 
 test('sameSetpoint is true within half a 0.1°C step', () => {
   assert.ok(sameSetpoint(22.2, 22.2));

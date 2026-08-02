@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression test for the AUTO setpoint band.
 //
 // These units report spAuto: null and keep the auto band in spHeat (low/heat
@@ -32,6 +30,12 @@
 //      snap the unit stores 22.2000000000003 or 22.5 and the Mitsubishi app shows
 //      73°F for a 72°F tap.
 //
+// The snap takes the CEILING of the 0.1°C step, not the nearest one, because the
+// Mitsubishi Comfort app truncates when it renders °C as °F while the Home app
+// rounds (measured live 2026-07-27, see storedC in src/temperature.ts). So
+// 71.6°F → 72°F → 22.222…°C stores as 22.3, not 22.2. Every worked arithmetic
+// comment below ends at the ceiling for that reason.
+//
 // Still asserted, unchanged in spirit:
 //   - getHeatingThresholdTemperature -> spHeat,  getCoolingThresholdTemperature -> spCool
 //   - setHeatingThresholdTemperature -> { spHeat }, setCoolingThresholdTemperature -> { spCool }
@@ -39,16 +43,22 @@
 //   - zone updates sync both threshold characteristics
 //   - the 1.5.2 powered-off guard applies (no bare setpoint to an off unit)
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory, type FakeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+interface SentCommand {
+  serial: string;
+  commands: Commands;
+}
+
 function makeHarness() {
-  const sendCommandCalls = [];
-  let profileCb = null;
+  const sendCommandCalls: SentCommand[] = [];
   const platform = {
     Service,
     Characteristic,
@@ -58,26 +68,33 @@ function makeHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
-    sendCommand(serial, commands) {
+    onDeviceProfileUpdate() {},
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory();
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  return { handler, accessory, sendCommandCalls, applyProfile: (p) => profileCb(SERIAL, p) };
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  return { handler, accessory, sendCommandCalls };
 }
 
 // Read a characteristic value off the primary climate service. That service is
 // HeaterCooler now — a ductless mini-split has an on/off state separate from its
 // mode, which Thermostat cannot express. A cached Thermostat is removed in the
 // constructor, so getService(Service.Thermostat) is null here.
-function heaterCoolerChar(accessory, charKey) {
-  return accessory.getService(Service.HeaterCooler).getCharacteristic(Characteristic[charKey]).value;
+function heaterCoolerChar(accessory: FakeAccessory, charKey: string): unknown {
+  const svc = accessory.getService(Service.HeaterCooler);
+  assert.ok(svc, 'the HeaterCooler service is the primary climate service');
+  return svc.getCharacteristic(Characteristic[charKey]).value;
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'autoCool',
@@ -85,7 +102,7 @@ const zone = (over = {}) => ({
     roomTemp: 23, spCool: 26, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
 // ---- Read path -----------------------------------------------------------
 // The read path is NOT quantized: whatever the device reports is what the handle
@@ -109,8 +126,6 @@ test('zone updates sync both AUTO threshold characteristics', async () => {
   assert.strictEqual(heaterCoolerChar(accessory, 'CoolingThresholdTemperature'), 27,
     'spCool is pushed to the cooling handle, verbatim');
 });
-
-// ---- Write path ----------------------------------------------------------
 
 test('setting the heating threshold in AUTO sends spHeat only', async () => {
   const { handler, sendCommandCalls } = makeHarness();
@@ -148,12 +163,24 @@ test('the AUTO band cannot collapse: no single control writes both edges', async
   // this is the regression that reaches the user as "my AUTO range snapped shut".
   // Read `chars` directly rather than through getCharacteristic, which creates on
   // lookup (as real HAP does) and would add the very characteristic being denied.
-  const ids = [...accessory.getService(Service.HeaterCooler).chars.keys()].map((c) => c._name);
+  const svc = accessory.getService(Service.HeaterCooler);
+  assert.ok(svc, 'the HeaterCooler service exists to be inspected');
+  const ids = [...svc.chars.keys()].map((c) => (c as { _name: string })._name);
   assert.ok(!ids.includes('TargetTemperature'),
     'HeaterCooler must not carry a combined TargetTemperature — it is the collapse vector');
-  assert.strictEqual(typeof handler.setTargetTemperature, 'undefined',
+  // Denied twice, at compile time and at run time. The `?: never` members are the
+  // compile-time half: this annotation is an ordinary assignment, not a cast, so
+  // the day someone declares `setTargetTemperature` on KumoThermostatAccessory the
+  // intersection reduces to `never` and this line stops type-checking. Reading the
+  // value through it keeps the run-time half, which is what catches an accessor
+  // bolted on outside the class declaration (a mixin, a prototype patch).
+  const surface: KumoThermostatAccessory & {
+    setTargetTemperature?: never;
+    getTargetTemperature?: never;
+  } = handler;
+  assert.strictEqual(typeof surface.setTargetTemperature, 'undefined',
     'no combined setpoint writer may exist');
-  assert.strictEqual(typeof handler.getTargetTemperature, 'undefined',
+  assert.strictEqual(typeof surface.getTargetTemperature, 'undefined',
     'no combined setpoint reader may exist');
 
   // --- behavioural half ---

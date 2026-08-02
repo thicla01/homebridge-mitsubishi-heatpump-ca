@@ -1,28 +1,57 @@
-'use strict';
-
 // MirrorController: edge-triggered, mode-aware, debounced dispatch to targets.
 // Tested with fake handler doubles so the controller's logic is exercised in
 // isolation from the accessory.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { MirrorController, signature, toMirrorState } = require('../dist/mirror.js');
-const { makeLog } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
 
-function makeHandler(serial) {
-  let listener = null;
-  const applyCalls = [];
+import { MirrorController, signature, toMirrorState } from '../dist/mirror.js';
+import type { DeviceStatus, MirrorState } from '../dist/settings.js';
+import { makeLog } from './helpers';
+
+/**
+ * A stand-in for a KumoThermostatAccessory, from the controller's point of view.
+ * The real listener carries a full DeviceStatus which the controller immediately
+ * projects with toMirrorState, so the double fires the mirrored subset — that
+ * projection is pinned by the toMirrorState test at the bottom of this file.
+ */
+interface FakeHandler {
+  getDeviceSerial(): string;
+  onStatusUpdate(l: (status: MirrorState) => void): void;
+  applyMirror(desired: MirrorState): Promise<void>;
+  _fire(status: MirrorState): void;
+  applyCalls: MirrorState[];
+}
+
+function makeHandler(serial: string): FakeHandler {
+  let listener: ((status: MirrorState) => void) | null = null;
+  const applyCalls: MirrorState[] = [];
   return {
     getDeviceSerial: () => serial,
-    onStatusUpdate: (l) => { listener = l; },
-    applyMirror: async (desired) => { applyCalls.push(desired); },
-    _fire: (status) => { if (listener) listener(status); },
+    onStatusUpdate: (l) => {
+      listener = l;
+    },
+    applyMirror: async (desired) => {
+      applyCalls.push(desired);
+    },
+    _fire: (status) => {
+      if (listener) {
+        listener(status);
+      }
+    },
     applyCalls,
   };
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const st = (over = {}) => ({ operationMode: 'heat', power: 1, spHeat: 21, spCool: 24, fanSpeed: 'auto', ...over });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const st = (over: Partial<MirrorState> = {}): MirrorState =>
+  ({ operationMode: 'heat', power: 1, spHeat: 21, spCool: 24, fanSpeed: 'auto', ...over });
+
+const controller = (
+  pairs: Array<{ source: string; target: string }>,
+  handlers: FakeHandler[],
+  debounceMs: number,
+) => new MirrorController(makeLog() as never, pairs, handlers as never, debounceMs);
 
 // ---- signature (pure) -----------------------------------------------------
 
@@ -54,7 +83,7 @@ test('signature: a fan-speed change triggers (fan is mirrored)', () => {
 
 test('baseline seed: the first source observation does not push', async () => {
   const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
-  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
+  controller([{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
   src._fire(st({ spHeat: 21 }));
   await sleep(45);
   assert.strictEqual(tgt.applyCalls.length, 0);
@@ -62,7 +91,7 @@ test('baseline seed: the first source observation does not push', async () => {
 
 test('a source change pushes once (debounced) with the changed value', async () => {
   const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
-  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
+  controller([{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
   src._fire(st({ spHeat: 21 }));            // seed
   await sleep(45);
   src._fire(st({ spHeat: 22 }));            // change
@@ -73,7 +102,7 @@ test('a source change pushes once (debounced) with the changed value', async () 
 
 test('an unchanged repeat does not push (a manual target change survives)', async () => {
   const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
-  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
+  controller([{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
   src._fire(st({ spHeat: 21 }));            // seed
   await sleep(45);
   src._fire(st({ spHeat: 21 }));            // same signature
@@ -83,7 +112,7 @@ test('an unchanged repeat does not push (a manual target change survives)', asyn
 
 test('debounce coalesces a burst into one push of the settled state', async () => {
   const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
-  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 30);
+  controller([{ source: 'SRC', target: 'TGT' }], [src, tgt], 30);
   src._fire(st({ spHeat: 21 }));            // seed
   await sleep(60);
   src._fire(st({ spHeat: 22 }));           // drag 21→22→23 within one window
@@ -95,7 +124,7 @@ test('debounce coalesces a burst into one push of the settled state', async () =
 
 test('full re-sync: a temp-only source change pushes the full mode+setpoint state', async () => {
   const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
-  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
+  controller([{ source: 'SRC', target: 'TGT' }], [src, tgt], 15);
   src._fire(st({ operationMode: 'heat', spHeat: 21 }));   // seed
   await sleep(45);
   src._fire(st({ operationMode: 'heat', spHeat: 22 }));   // temp-only change
@@ -107,7 +136,7 @@ test('full re-sync: a temp-only source change pushes the full mode+setpoint stat
 
 test('one source can drive multiple targets', async () => {
   const src = makeHandler('SRC'); const t1 = makeHandler('T1'); const t2 = makeHandler('T2');
-  new MirrorController(makeLog(), [
+  controller([
     { source: 'SRC', target: 'T1' },
     { source: 'SRC', target: 'T2' },
   ], [src, t1, t2], 15);
@@ -121,7 +150,7 @@ test('one source can drive multiple targets', async () => {
 
 test('unknown / self-referential pairs are skipped without throwing', () => {
   const src = makeHandler('SRC');
-  assert.doesNotThrow(() => new MirrorController(makeLog(), [
+  assert.doesNotThrow(() => controller([
     { source: 'SRC', target: 'NOPE' },
     { source: 'GONE', target: 'SRC' },
     { source: 'SRC', target: 'SRC' },
@@ -129,7 +158,7 @@ test('unknown / self-referential pairs are skipped without throwing', () => {
 });
 
 test('toMirrorState projects a full DeviceStatus down to the mirrored fields', () => {
-  const full = {
+  const full: DeviceStatus = {
     id: 'z', deviceSerial: 'SRC', rssi: -50, power: 1, operationMode: 'cool',
     humidity: 40, fanSpeed: 'quiet', airDirection: 'auto', roomTemp: 22,
     spCool: 23, spHeat: 20, spAuto: null, modelNumber: 'X', connected: true,

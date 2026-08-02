@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression: a stale cloud/streaming reading must not revive a mirror target
 // after the source was turned off locally.
 //
@@ -23,46 +21,62 @@
 // it every time. The command on the wire is unchanged (`operationMode: 'off'`), and
 // so is the window it has to arm.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Adapter, Commands, DeviceStatus, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSOURCE01';
 
-function makeLocalClient(over = {}) {
-  const calls = [];
+interface FakeLocalClient {
+  calls: Array<{ serial: string; commands: Commands }>;
+  hasLocalResult: boolean;
+  sendCommandResult: boolean;
+  hasLocal(): boolean;
+  sendCommand(serial: string, commands: Commands): Promise<boolean>;
+  getStatus(): Promise<Partial<DeviceStatus> | null>;
+}
+
+function makeLocalClient(over: Partial<FakeLocalClient> = {}): FakeLocalClient {
+  const calls: Array<{ serial: string; commands: Commands }> = [];
   return {
     calls,
     hasLocalResult: true,
     sendCommandResult: true,
     hasLocal() { return this.hasLocalResult; },
-    sendCommand(serial, commands) { calls.push({ serial, commands }); return Promise.resolve(this.sendCommandResult); },
+    sendCommand(serial: string, commands: Commands) { calls.push({ serial, commands }); return Promise.resolve(this.sendCommandResult); },
     getStatus() { return Promise.resolve(null); },
     ...over,
   };
 }
-function makeHarness({ localClient = null } = {}) {
+function makeHarness({ localClient = null }: { localClient?: FakeLocalClient | null } = {}) {
   const platform = {
     Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} },
     kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
     localClient,
   };
   const kumoAPI = { subscribeToDevice() {}, onDeviceProfileUpdate() {}, sendCommand() { return Promise.resolve(true); } };
-  const handler = new KumoThermostatAccessory(platform, makeAccessory('Kitchen', SERIAL), kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    makeAccessory('Kitchen', SERIAL) as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler };
 }
 
 // A cloud (streaming/polling) zone reading for the source.
-const cloudZone = (over = {}) => ({
+const cloudZone = (over: Partial<Adapter> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
     fanSpeed: 'auto', airDirection: 'auto',
     roomTemp: 24, spCool: 24, spHeat: 20, spAuto: null, humidity: null, ...over,
   },
-});
-const localStatus = (over = {}) => ({
+}) as unknown as Zone;
+const localStatus = (over: Partial<DeviceStatus> = {}): Partial<DeviceStatus> => ({
   roomTemp: 24, operationMode: 'cool', power: 1, spCool: 24, spHeat: 20,
   spAuto: null, fanSpeed: 'auto', airDirection: 'auto', filterDirty: false,
   defrost: false, standby: false, ...over,
@@ -77,7 +91,7 @@ test('a stale cloud "cool" after a local OFF does not re-fire the mirror hook', 
   // via a cloud reading, leaving lastLocalUpdateTs unset).
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1, spCool: 24 }));
 
-  const seen = [];
+  const seen: Array<{ operationMode: string; power: number }> = [];
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
   // Skylight scene turns the source OFF over the LAN. Under HeaterCooler the off
@@ -102,7 +116,7 @@ test('a REAL local change after an OFF still fires the mirror hook (following pr
   const { handler } = makeHarness({ localClient: local });
 
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1, spCool: 24 }));
-  const seen = [];
+  const seen: Array<{ operationMode: string; power: number }> = [];
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
   await handler.setActive(Characteristic.Active.INACTIVE);

@@ -1,5 +1,3 @@
-'use strict';
-
 // Regression tests for the cloud failure paths that composed into
 // brick-until-restart.
 //
@@ -15,25 +13,47 @@
 // tears its timers down in a `finally`: a failed assertion that leaked the 15
 // minute refresh timer would hang the runner instead of reporting.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const sioc = require('socket.io-client');
-const { KumoAPI } = require('../dist/kumo-api.js');
-const { KumoV3Platform } = require('../dist/platform.js');
-const { makeLog } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+import type { PlatformConfig } from 'homebridge';
+
+// `import ... = require` and not `import * as sioc`: the tests swap socket.io's
+// `io` for a fake, and under esModuleInterop a namespace import of a CommonJS
+// module without an `__esModule` marker (socket.io-client is one) is copied into
+// a fresh object. Patching the copy would leave kumo-api.js calling the real
+// `io` and dialling Mitsubishi's socket endpoint from the test suite.
+import sioc = require('socket.io-client');
+
+import { KumoAPI } from '../dist/kumo-api.js';
+import { KumoV3Platform } from '../dist/platform.js';
+import type { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { KumoConfig, SensorReading, Site, Zone } from '../dist/settings.js';
+import { makeLog } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
-const SITE = { id: 'site-1', name: 'Home' };
-const ZONE = { isActive: true, name: 'Living room', adapter: { deviceSerial: SERIAL } };
+const SITE: Site = { id: 'site-1', name: 'Home' };
+// Discovery and polling read isActive, name and adapter.deviceSerial and nothing
+// else, so the payload stays at those three rather than inventing the fifteen
+// adapter fields these paths never look at.
+const ZONE = {
+  isActive: true, name: 'Living room', adapter: { deviceSerial: SERIAL },
+} as unknown as Zone;
 
-function delay(ms) {
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+type KumoStub =
+  Pick<KumoAPI, 'destroy'>
+  & Partial<Pick<KumoAPI, 'login' | 'getSites' | 'getZones' | 'startStreaming'>>;
+
+/** Homebridge's `platformAccessory` constructor. Never `new`ed on these paths. */
+class FakePlatformAccessory {}
+
 function makeApi() {
   return {
-    hap: { Service: {}, Characteristic: {}, uuid: { generate: (s) => `uuid-${s}` } },
-    platformAccessory: function PlatformAccessory() {},
+    hap: { Service: {}, Characteristic: {}, uuid: { generate: (s: string) => `uuid-${s}` } },
+    platformAccessory: FakePlatformAccessory,
     on: () => {},
     registerPlatformAccessories: () => {},
     updatePlatformAccessories: () => {},
@@ -41,8 +61,8 @@ function makeApi() {
   };
 }
 
-function makePlatform(kumoStub, configOverrides = {}) {
-  const platform = new KumoV3Platform(makeLog(), {
+function makePlatform(kumoStub: KumoStub, configOverrides: Partial<KumoConfig> = {}): KumoV3Platform {
+  const config: PlatformConfig = {
     name: 'test',
     platform: 'KumoV3',
     username: 'user@example.com',
@@ -50,65 +70,101 @@ function makePlatform(kumoStub, configOverrides = {}) {
     disablePolling: true,
     degradedPollInterval: 10,
     ...configOverrides,
-  }, makeApi());
-  platform.kumoAPI = kumoStub;
+  };
+  const platform = new KumoV3Platform(makeLog() as never, config, makeApi() as never);
+  (platform as unknown as { kumoAPI: KumoAPI }).kumoAPI = kumoStub as never;
   return platform;
 }
 
 /** A stand-in accessory handler that records the zone updates polling delivers. */
-function makeHandler(serial, siteId, updates) {
-  return {
+type HandlerStub = Pick<
+  KumoThermostatAccessory, 'getDeviceSerial' | 'getSiteId' | 'updateFromZone' | 'destroy'
+>;
+
+function addHandler(platform: KumoV3Platform, serial: string, siteId: string, updates: string[]): void {
+  const handler: HandlerStub = {
     getDeviceSerial: () => serial,
     getSiteId: () => siteId,
     updateFromZone: () => updates.push(serial),
     destroy: () => {},
   };
+  platform['accessoryHandlers'].push(handler as never);
 }
+
+function sitePollers(platform: KumoV3Platform): Map<string, NodeJS.Timeout> {
+  return platform['sitePollers'];
+}
+
+/**
+ * The delay a timer was scheduled with. `_idleTimeout` is Node's internal field
+ * and is absent from @types/node, but reading it is the only way to assert what
+ * was scheduled without waiting the interval out.
+ */
+function scheduledDelay(timer: NodeJS.Timeout | null | undefined): number {
+  if (!timer) {
+    throw new Error('expected a scheduled timer, found none');
+  }
+  return (timer as unknown as { _idleTimeout: number })._idleTimeout;
+}
+
+type SocketHandler = (data?: unknown) => void;
 
 /**
  * A stand-in for the socket.io client. `fire` does NOT catch listener errors,
  * because socket.io's own emit loop does not either: a throw escaping a handler is
  * precisely the hazard the guards under test exist for.
  */
-function makeFakeSocket() {
-  const handlers = new Map();
-  return {
+interface FakeSocket {
+  connected: boolean;
+  id: string;
+  on(event: string, fn: SocketHandler): FakeSocket;
+  once(event: string, fn: SocketHandler): FakeSocket;
+  emit(): FakeSocket;
+  disconnect(): FakeSocket;
+  removeAllListeners(): FakeSocket;
+  fire(event: string, data?: unknown): void;
+}
+
+function makeFakeSocket(): FakeSocket {
+  const handlers = new Map<string, SocketHandler[]>();
+  const socket: FakeSocket = {
     connected: false,
     id: 'fake-socket',
-    on(event, fn) {
+    on(event: string, fn: SocketHandler) {
       if (!handlers.has(event)) {
         handlers.set(event, []);
       }
-      handlers.get(event).push(fn);
-      return this;
+      handlers.get(event)!.push(fn);
+      return socket;
     },
-    once(event, fn) {
-      return this.on(event, fn);
+    once(event: string, fn: SocketHandler) {
+      return socket.on(event, fn);
     },
     emit() {
-      return this;
+      return socket;
     },
     disconnect() {
-      this.connected = false;
-      return this;
+      socket.connected = false;
+      return socket;
     },
     removeAllListeners() {
       handlers.clear();
-      return this;
+      return socket;
     },
-    fire(event, data) {
+    fire(event: string, data?: unknown) {
       for (const fn of handlers.get(event) || []) {
         fn(data);
       }
     },
   };
+  return socket;
 }
 
 /** Run `fn` with socket.io's `io()` replaced by a fake socket. */
-async function withFakeSocket(fn) {
+async function withFakeSocket<T>(fn: (socket: FakeSocket) => Promise<T>): Promise<T> {
   const socket = makeFakeSocket();
   const realIo = sioc.io;
-  sioc.io = () => socket;
+  sioc.io = (() => socket) as never;
   try {
     return await fn(socket);
   } finally {
@@ -117,9 +173,9 @@ async function withFakeSocket(fn) {
 }
 
 /** A KumoAPI with its listeners wired to `socket`, which never connects. */
-async function streamingApi(socket) {
-  const api = new KumoAPI('user@example.com', 'secret', makeLog());
-  api.accessToken = 'test-token';
+async function streamingApi(socket: FakeSocket): Promise<KumoAPI> {
+  const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
+  api['accessToken'] = 'test-token';
   const started = api.startStreaming([SERIAL]);
   socket.fire('connect_error', new Error('getaddrinfo ENOTFOUND'));
   await started;
@@ -129,20 +185,20 @@ async function streamingApi(socket) {
 // ---- 1. token refresh must survive a single failure -----------------------
 
 test('a failed token refresh schedules another attempt', async () => {
-  const api = new KumoAPI('user@example.com', 'secret', makeLog());
+  const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
   let attempts = 0;
-  api.refreshAccessToken = async () => {
+  api['refreshAccessToken'] = async () => {
     attempts++;
     return false;
   };
 
-  api.scheduleTokenRefresh(20);
+  api['scheduleTokenRefresh'](20);
   await delay(60);
 
   try {
     assert.strictEqual(attempts, 1);
-    assert.ok(api.refreshTimer, 'the refresh chain must not end on one failure');
-    assert.strictEqual(api.refreshTimer._idleTimeout, 60000,
+    assert.ok(api['refreshTimer'], 'the refresh chain must not end on one failure');
+    assert.strictEqual(scheduledDelay(api['refreshTimer']), 60000,
       'the other two call sites are on success paths, so nothing else would ever re-arm it');
   } finally {
     api.destroy();
@@ -152,14 +208,14 @@ test('a failed token refresh schedules another attempt', async () => {
 test('a successful token refresh does not arm the failure retry', async () => {
   // The success path schedules its own 15 minute refresh; re-arming here as well
   // would refresh the token every 60s for the life of the process.
-  const api = new KumoAPI('user@example.com', 'secret', makeLog());
-  api.refreshAccessToken = async () => true;
+  const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
+  api['refreshAccessToken'] = async () => true;
 
-  api.scheduleTokenRefresh(20);
+  api['scheduleTokenRefresh'](20);
   await delay(60);
 
   try {
-    assert.notStrictEqual(api.refreshTimer._idleTimeout, 60000);
+    assert.notStrictEqual(scheduledDelay(api['refreshTimer']), 60000);
   } finally {
     api.destroy();
   }
@@ -168,46 +224,46 @@ test('a successful token refresh does not arm the failure retry', async () => {
 // ---- 2. degraded mode has to create the pollers, not just restart them ----
 
 test('entering degraded mode starts a poller per site even with disablePolling: true', async () => {
-  const updates = [];
-  const kumo = {
-    getZones: async (siteId) => (siteId === 'site-1' ? [ZONE] : [{ ...ZONE, adapter: { deviceSerial: 'S2' } }]),
+  const updates: string[] = [];
+  const kumo: KumoStub = {
+    getZones: async (siteId: string) => (siteId === 'site-1'
+      ? [ZONE]
+      : [{ ...ZONE, adapter: { ...ZONE.adapter, deviceSerial: 'S2' } }]),
     destroy: () => {},
   };
   const platform = makePlatform(kumo, { disablePolling: true });
-  platform.accessoryHandlers = [
-    makeHandler(SERIAL, 'site-1', updates),
-    makeHandler('S2', 'site-2', updates),
-  ];
+  addHandler(platform, SERIAL, 'site-1', updates);
+  addHandler(platform, 'S2', 'site-2', updates);
 
   try {
-    platform.enterDegradedMode();
+    platform['enterDegradedMode']();
 
-    assert.deepStrictEqual([...platform.sitePollers.keys()].sort(), ['site-1', 'site-2'],
+    assert.deepStrictEqual([...sitePollers(platform).keys()].sort(), ['site-1', 'site-2'],
       'startSitePoller had one caller, behind `if (!disablePolling)`, so this map was empty here');
     await delay(20);
     assert.deepStrictEqual(updates.sort(), ['S2', SERIAL].sort(),
       'the fallback has to actually reach the accessories, not just log "poller(s) active"');
   } finally {
-    platform.cleanup();
+    platform['cleanup']();
   }
 });
 
 test('degraded mode leaves an existing poller alone, at the degraded interval', async () => {
-  const updates = [];
-  const kumo = { getZones: async () => [ZONE], destroy: () => {} };
+  const updates: string[] = [];
+  const kumo: KumoStub = { getZones: async () => [ZONE], destroy: () => {} };
   const platform = makePlatform(kumo, { disablePolling: false, pollInterval: 30, degradedPollInterval: 10 });
-  platform.accessoryHandlers = [makeHandler(SERIAL, SITE.id, updates)];
+  addHandler(platform, SERIAL, SITE.id, updates);
 
   try {
-    platform.startSitePoller(SITE.id);
-    assert.strictEqual(platform.sitePollers.get(SITE.id)._idleTimeout, 30000);
+    platform['startSitePoller'](SITE.id);
+    assert.strictEqual(scheduledDelay(sitePollers(platform).get(SITE.id)), 30000);
 
-    platform.enterDegradedMode();
+    platform['enterDegradedMode']();
 
-    assert.strictEqual(platform.sitePollers.size, 1, 'no second poller for a site already polling');
-    assert.strictEqual(platform.sitePollers.get(SITE.id)._idleTimeout, 10000);
+    assert.strictEqual(sitePollers(platform).size, 1, 'no second poller for a site already polling');
+    assert.strictEqual(scheduledDelay(sitePollers(platform).get(SITE.id)), 10000);
   } finally {
-    platform.cleanup();
+    platform['cleanup']();
   }
 });
 
@@ -215,8 +271,8 @@ test('degraded mode leaves an existing poller alone, at the degraded interval', 
 
 test('startStreaming reports failure when the socket never connects', async () => {
   await withFakeSocket(async (socket) => {
-    const api = new KumoAPI('user@example.com', 'secret', makeLog());
-    api.accessToken = 'test-token';
+    const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
+    api['accessToken'] = 'test-token';
 
     const started = api.startStreaming([SERIAL]);
     socket.fire('connect_error', new Error('getaddrinfo ENOTFOUND'));
@@ -232,8 +288,8 @@ test('startStreaming reports failure when the socket never connects', async () =
 
 test('startStreaming reports success once the socket connects', async () => {
   await withFakeSocket(async (socket) => {
-    const api = new KumoAPI('user@example.com', 'secret', makeLog());
-    api.accessToken = 'test-token';
+    const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
+    api['accessToken'] = 'test-token';
 
     const started = api.startStreaming([SERIAL]);
     socket.connected = true;
@@ -252,18 +308,18 @@ test('health checks run even for a socket that never connected', async () => {
     const api = await streamingApi(socket);
 
     try {
-      assert.ok(api.healthCheckTimer,
+      assert.ok(api['healthCheckTimer'],
         'startHealthChecks used to be reachable only from inside the connect handler');
     } finally {
       api.destroy();
     }
-    assert.strictEqual(api.healthCheckTimer, null, 'and destroy still stops them');
+    assert.strictEqual(api['healthCheckTimer'], null, 'and destroy still stops them');
   });
 });
 
 test('a socket that never connects still degrades to polling at startup', async () => {
-  const updates = [];
-  const kumo = {
+  const updates: string[] = [];
+  const kumo: KumoStub = {
     login: async () => true,
     getSites: async () => [SITE],
     getZones: async () => [ZONE],
@@ -272,36 +328,36 @@ test('a socket that never connects still degrades to polling at startup', async 
   };
   const platform = makePlatform(kumo, { disablePolling: true });
   // Pre-seed the handler so the idempotency guard skips real accessory construction.
-  platform.accessoryHandlers = [makeHandler(SERIAL, SITE.id, updates)];
+  addHandler(platform, SERIAL, SITE.id, updates);
 
   try {
-    const ok = await platform.attemptDiscovery();
+    const ok = await platform['attemptDiscovery']();
 
     assert.strictEqual(ok, true, 'a dead stream is not a discovery failure');
-    assert.strictEqual(platform.isDegradedMode, true,
+    assert.strictEqual(platform['isDegradedMode'], true,
       'nothing else fires a health change for a socket that was never healthy');
-    assert.strictEqual(platform.sitePollers.size, 1);
+    assert.strictEqual(sitePollers(platform).size, 1);
     await delay(20);
     assert.deepStrictEqual(updates, [SERIAL], 'the accessory is actually being updated');
   } finally {
-    platform.cleanup();
+    platform['cleanup']();
   }
 });
 
 test('an unhealthy report degrades even without a preceding healthy report', async () => {
-  const kumo = { getZones: async () => [ZONE], destroy: () => {} };
+  const kumo: KumoStub = { getZones: async () => [ZONE], destroy: () => {} };
   const platform = makePlatform(kumo, { disablePolling: true });
-  platform.accessoryHandlers = [makeHandler(SERIAL, SITE.id, [])];
+  addHandler(platform, SERIAL, SITE.id, []);
 
   try {
     // isStreamingHealthy starts false, so the old `wasHealthy && !isHealthy` gate
     // made this transition unreachable for a socket that had never connected.
-    platform.handleStreamingHealthChange(false);
+    platform['handleStreamingHealthChange'](false);
 
-    assert.strictEqual(platform.isDegradedMode, true);
-    assert.strictEqual(platform.sitePollers.size, 1);
+    assert.strictEqual(platform['isDegradedMode'], true);
+    assert.strictEqual(sitePollers(platform).size, 1);
   } finally {
-    platform.cleanup();
+    platform['cleanup']();
   }
 });
 
@@ -315,17 +371,17 @@ test('a routine reconnect that never comes up is still reported unhealthy', asyn
   // learned streaming had died, and under `disablePolling: true` it never started
   // the fallback poller. Reachable on the ordinary 15 minute token-refresh path,
   // and 100% of the time when the socket endpoint is down while REST is up.
-  const sockets = [];
+  const sockets: FakeSocket[] = [];
   const realIo = sioc.io;
-  sioc.io = () => {
+  sioc.io = (() => {
     const socket = makeFakeSocket();
     sockets.push(socket);
     return socket;
-  };
+  }) as never;
 
-  const api = new KumoAPI('user@example.com', 'secret', makeLog());
-  api.accessToken = 'test-token';
-  const health = [];
+  const api = new KumoAPI('user@example.com', 'secret', makeLog() as never);
+  api['accessToken'] = 'test-token';
+  const health: boolean[] = [];
   api.onStreamingHealthChange((isHealthy) => health.push(isHealthy));
   api.subscribeToDevice(SERIAL, () => {});
 
@@ -345,7 +401,7 @@ test('a routine reconnect that never comes up is still reported unhealthy', asyn
 
     assert.deepStrictEqual(health, [true, false],
       'the platform must be told streaming died, or the fallback never starts');
-    assert.strictEqual(api.isReconnecting, false,
+    assert.strictEqual(api['isReconnecting'], false,
       'the suppression flag must not stay latched once the reconnect has failed');
   } finally {
     api.destroy();
@@ -358,7 +414,7 @@ test('a routine reconnect that never comes up is still reported unhealthy', asyn
 test('a throwing device_update consumer does not escape into the socket emit loop', async () => {
   await withFakeSocket(async (socket) => {
     const api = await streamingApi(socket);
-    const sensors = [];
+    const sensors: SensorReading[] = [];
     api.onSensorUpdate((reading) => sensors.push(reading));
     api.subscribeToDevice(SERIAL, () => {
       // What the consumer does on a payload it did not expect: it dereferences
@@ -381,7 +437,7 @@ test('a throwing device_update consumer does not escape into the socket emit loo
 test('one throwing profile_update consumer does not skip the others', async () => {
   await withFakeSocket(async (socket) => {
     const api = await streamingApi(socket);
-    const seen = [];
+    const seen: string[] = [];
     api.onDeviceProfileUpdate(() => {
       throw new Error('accessory blew up applying the profile');
     });

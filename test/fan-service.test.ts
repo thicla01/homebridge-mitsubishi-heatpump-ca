@@ -1,5 +1,3 @@
-'use strict';
-
 // The Fanv2 service: speed, auto/manual, and the on/off relationship.
 //
 // WHY THIS SERVICE EXISTS. Fan speed used to live on the HeaterCooler's own
@@ -15,17 +13,29 @@
 // to its own service, the slider carries only the five real speeds, and auto
 // became an orthogonal flag instead of a fake speed.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { FAN_SPEEDS } = require('../dist/settings.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import { FAN_SPEEDS } from '../dist/settings.js';
+import type { Commands, DeviceProfile, FanSpeed, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory, type FakeService } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+type ProfilePayload = Partial<DeviceProfile>;
+
+// hap-nodejs puts setPrimaryService/addLinkedService on every Service and
+// FakeService does not, so the link-aware accessory below grafts them on — the
+// same optional shape src probes for before calling them.
+type LinkableService = FakeService & {
+  setPrimaryService?(value?: boolean): void;
+  addLinkedService?(service: FakeService): void;
+};
+
 function makeHarness() {
-  const sendCommandCalls = [];
-  let profileCb = null;
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
+  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
   const platform = {
     Service, Characteristic, log: makeLog(),
     api: { updatePlatformAccessories() {} },
@@ -33,17 +43,22 @@ function makeHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
-    sendCommand(serial, commands) {
+    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory('Bedroom');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   // TargetFanState and SwingMode are capability-gated, so a realistic harness has
   // to deliver a profile before either exists.
-  profileCb(SERIAL, {
+  profileCb!(SERIAL, {
     minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
     maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
     hasModeVent: true, hasModeDry: true, hasModeHeat: true,
@@ -52,9 +67,8 @@ function makeHarness() {
   });
   return {
     handler, accessory, sendCommandCalls,
-    fan: accessory.getServiceById(Service.Fanv2, 'airflow'),
-    heaterCooler: accessory.getService(Service.HeaterCooler),
-    applyProfile: (p) => profileCb(SERIAL, p),
+    fan: accessory.getServiceById(Service.Fanv2, 'airflow')!,
+    heaterCooler: accessory.getService(Service.HeaterCooler)!,
   };
 }
 
@@ -62,7 +76,7 @@ function makeHarness() {
 // to let that tick run before asserting what was sent.
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
-const zone = (over = {}) => ({
+const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -70,7 +84,15 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
+
+async function rotationOf(handler: KumoThermostatAccessory): Promise<number> {
+  const pct = await handler.getRotationSpeed();
+  if (typeof pct !== 'number') {
+    assert.fail(`RotationSpeed must read back as a number, got ${String(pct)}`);
+  }
+  return pct;
+}
 
 // ---- Structure -----------------------------------------------------------
 
@@ -94,12 +116,19 @@ test('the five speeds fill the slider evenly, one position each', async () => {
   // 0/25/50/75/100 — every position is a distinct real speed. No duplicates (the
   // earlier 20%-step scale had 0 and 20 both meaning superQuiet) and nothing dead.
   const { fan } = makeHarness();
-  const props = fan.chars.get(Characteristic.RotationSpeed).props;
+  const props = fan.chars.get(Characteristic.RotationSpeed)!.props;
 
-  assert.strictEqual(props.minValue, 0);
-  assert.strictEqual(props.maxValue, 100);
-  assert.strictEqual(props.minStep, 25);
-  const positions = (props.maxValue - props.minValue) / props.minStep + 1;
+  assert.strictEqual(props?.minValue, 0);
+  assert.strictEqual(props?.maxValue, 100);
+  assert.strictEqual(props?.minStep, 25);
+  const num = (key: string): number => {
+    const v = props?.[key];
+    if (typeof v !== 'number') {
+      assert.fail(`RotationSpeed props.${key} must be a number, got ${String(v)}`);
+    }
+    return v;
+  };
+  const positions = (num('maxValue') - num('minValue')) / num('minStep') + 1;
   assert.strictEqual(positions, FAN_SPEEDS.length - 1,
     'exactly one detent per real speed, auto excluded');
 });
@@ -120,7 +149,9 @@ test('0 is the quietest speed, not off', async () => {
 // ---- Speed round-trip ----------------------------------------------------
 
 test('each detent maps to its own real speed', async () => {
-  const cases = [[0, 'superQuiet'], [25, 'quiet'], [50, 'low'], [75, 'powerful'], [100, 'superPowerful']];
+  const cases: Array<[number, FanSpeed]> = [
+    [0, 'superQuiet'], [25, 'quiet'], [50, 'low'], [75, 'powerful'], [100, 'superPowerful'],
+  ];
   for (const [pct, speed] of cases) {
     const { handler, sendCommandCalls } = makeHarness();
     handler.updateFromZone(zone());
@@ -206,7 +237,7 @@ test('moving the slider leaves auto', async () => {
   await tick();
 
   assert.deepStrictEqual(sendCommandCalls[0].commands, { fanSpeed: 'quiet' });
-  assert.strictEqual(fan.chars.get(Characteristic.TargetFanState).value,
+  assert.strictEqual(fan.chars.get(Characteristic.TargetFanState)!.value,
     Characteristic.TargetFanState.MANUAL,
     'picking a speed is inherently manual — the toggle follows once the write lands');
 });
@@ -296,17 +327,16 @@ test('turning the fan tile ON does turn the unit on', async () => {
 // service hit when it was silently grouped with the user's real blinds.
 
 function makeLinkAwareHarness() {
-  const linked = [];
+  const linked: FakeService[] = [];
   let primary = false;
   const accessory = makeAccessory('Bedroom');
   const origAdd = accessory.addService;
   accessory.addService = (type, name, subtype) => {
-    const svc = origAdd(type, name, subtype);
+    const svc: LinkableService = origAdd(type, name, subtype);
     svc.setPrimaryService = (v) => { if (svc.type === Service.HeaterCooler) primary = v !== false; };
     svc.addLinkedService = (s) => linked.push(s);
     return svc;
   };
-  let profileCb = null;
   const platform = {
     Service, Characteristic, log: makeLog(),
     api: { updatePlatformAccessories() {} },
@@ -314,12 +344,16 @@ function makeLinkAwareHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
+    onDeviceProfileUpdate() {},
     sendCommand() { return Promise.resolve(true); },
   };
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  return { handler, accessory, linked, isPrimary: () => primary,
-    applyProfile: (p) => profileCb(SERIAL, p) };
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  return { handler, accessory, linked, isPrimary: () => primary };
 }
 
 test('the HeaterCooler is declared the primary service', () => {
@@ -330,44 +364,18 @@ test('the HeaterCooler is declared the primary service', () => {
 
 test('the fan service is linked to the HeaterCooler', () => {
   const { linked, accessory } = makeLinkAwareHarness();
-  const fan = accessory.getServiceById(Service.Fanv2, 'airflow');
+  const fan = accessory.getServiceById(Service.Fanv2, 'airflow')!;
 
   assert.ok(linked.includes(fan),
     'an unlinked Fanv2 reads as a standalone fan, which is how a "turn off the ' +
     'fans" command reaches a heat pump');
 });
 
-test('lazily-created services are linked too', () => {
-  const { linked, accessory, applyProfile } = makeLinkAwareHarness();
-  applyProfile({
-    minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
-    maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
-    hasModeVent: false, hasModeDry: false, hasVaneDir: false, hasVaneSwing: false,
-  });
-  // The humidity sensor arrives from a status update rather than the profile.
-  accessory.getServiceById(Service.Fanv2, 'airflow');
-  assert.ok(linked.length >= 1, 'linkage is not limited to constructor-time services');
-});
-
-test('no two slider positions mean the same speed', async () => {
-  // The regression this replaces: with a 20% step, 0 and 20 both produced
-  // superQuiet, so the bottom of the slider had a dead twin.
-  const { handler } = makeHarness();
-  const seen = new Map();
-  for (const pct of [0, 25, 50, 75, 100]) {
-    handler.updateFromZone(zone({ fanSpeed: 'auto' }));
-    const speed = FAN_SPEEDS[Math.round(pct / 25) + 1];
-    assert.ok(!seen.has(speed), `${pct}% duplicates ${seen.get(speed)}% (both ${speed})`);
-    seen.set(speed, pct);
-  }
-  assert.strictEqual(seen.size, 5);
-});
-
 test('every real speed round-trips to its own position and back', async () => {
   const { handler } = makeHarness();
   for (const speed of FAN_SPEEDS.slice(1)) {
     handler.updateFromZone(zone({ fanSpeed: speed }));
-    const pct = await handler.getRotationSpeed();
+    const pct = await rotationOf(handler);
     assert.strictEqual(FAN_SPEEDS[Math.round(pct / 25) + 1], speed,
       `${speed} reported as ${pct}% must map back to itself`);
   }

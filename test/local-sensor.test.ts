@@ -1,5 +1,3 @@
-'use strict';
-
 // Local sensor reads, transport hardening, and fan-speed vocabulary tolerance.
 //
 // All five behaviours here came out of an audit against the two reference
@@ -17,14 +15,15 @@
 // indoorUnit.status at all, so under local control (where cloud updates are
 // dropped for 45s after every local read) it would otherwise go stale.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const {
+import test from 'node:test';
+import assert from 'node:assert';
+
+import {
   classifyApiError,
   LocalKumoClient,
-} = require('../dist/local-api.js');
-const { normalizeFanSpeed, FAN_SPEEDS } = require('../dist/settings.js');
-const { makeLog } = require('./helpers.js');
+} from '../dist/local-api.js';
+import { normalizeFanSpeed, FAN_SPEEDS } from '../dist/settings.js';
+import { makeLog } from './helpers';
 
 // ---- _api_error classification ------------------------------------------
 //
@@ -83,10 +82,13 @@ test('an unknown fan speed is undefined, never silently "auto"', () => {
 // LocalKumoClient.request is stubbed per test so no network is touched. Bodies
 // are matched on their leaf so the assertions read like the wire protocol.
 
-function makeClient(replies) {
-  const client = new LocalKumoClient(makeLog());
+/** A canned reply, or a thunk when a test needs to observe that it was asked. */
+type Reply = Record<string, unknown> | (() => Record<string, unknown>);
+
+function makeClient(replies: Array<[string, Reply]>) {
+  const client = new LocalKumoClient(makeLog() as never);
   client.setCreds('S1', { ip: '10.0.0.1', password: 'cGFzcw==', cryptoSerial: '00112233445566778899' });
-  const asked = [];
+  const asked: string[] = [];
   client.request = async (serial, body) => {
     const b = body.toString('utf8');
     asked.push(b);
@@ -131,6 +133,7 @@ test('the sensor temperature replaces the unit\'s 0.5°C-quantized roomTemp', as
   // 22.5°C is exactly 72.5°F — the one 0.5°C step where a rounding renderer and a
   // truncating one disagree (73 vs 72). The sensor's 22.648632 is 72.77°F, which
   // both render as 73. This is the live Bedroom reading.
+  assert.ok(status, 'a status was read');
   assert.strictEqual(status.roomTemp, 22.648632,
     'the fine-grained sensor reading wins over the quantized roomTemp');
   assert.strictEqual(status.humidity, 51.617188, 'humidity comes from the sensor');
@@ -144,6 +147,7 @@ test('a unit with no sensor keeps its own roomTemp and reports no humidity', asy
 
   const status = await client.getStatus('S1');
 
+  assert.ok(status, 'a status was read');
   assert.strictEqual(status.roomTemp, 21.5, 'the head unit thermistor reading is used as-is');
   assert.ok(status.humidity === undefined || status.humidity === null);
   assert.ok(!asked.some((b) => b.includes('sensors')),
@@ -158,6 +162,7 @@ test('MHK2 humidity is used when there is no wireless sensor', async () => {
   ]);
 
   const status = await client.getStatus('S1');
+  assert.ok(status, 'a status was read');
   assert.strictEqual(status.humidity, 44.5);
 });
 
@@ -183,7 +188,10 @@ test('sensor slots stop at the first gap', async () => {
   const { client } = makeClient([
     ['indoorUnit', STATUS_WITH_SENSOR],
     ['"0"', { sensors: { 0: {} } }],   // no uuid => list ends here
-    ['"1"', () => { slot1Asked = true; return { sensors: { 1: { uuid: 'x', humidity: 50 } } }; }],
+    ['"1"', () => {
+      slot1Asked = true;
+      return { sensors: { 1: { uuid: 'x', humidity: 50 } } };
+    }],
     ['mhk2', { mhk2: { status: { indoorHumid: null } } }],
   ]);
 

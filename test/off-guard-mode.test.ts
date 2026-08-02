@@ -1,8 +1,6 @@
-'use strict';
-
 // Regression test: the MODE writer must not trail an "AC off" scene either.
 //
-// Companion to off-scene-setpoint-race.test.js, which covers the setpoint and
+// Companion to off-scene-setpoint-race.test.ts, which covers the setpoint and
 // fan-speed writers. Same physical failure — a unit left running after a scene
 // told it to stop — through the one writer that was missing the guard.
 //
@@ -23,15 +21,22 @@
 // chosen on a unit that is merely off is how a user turns it back on, so only an
 // off IN FLIGHT blocks. The two controls below pin that distinction down.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { Commands, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 
+interface SentCommand {
+  serial: string;
+  commands: Commands;
+}
+
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sendCommandCalls: SentCommand[] = [];
   const platform = {
     Service,
     Characteristic,
@@ -42,17 +47,22 @@ function makeHarness() {
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate() {},
-    sendCommand(serial, commands) {
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
   const accessory = makeAccessory('Living room');
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler, accessory, sendCommandCalls };
 }
 
-const zone = (over = {}) => ({
+const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -60,14 +70,14 @@ const zone = (over = {}) => ({
     roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const isOff = (c) => c.commands.operationMode === 'off';
+const isOff = (c: SentCommand) => c.commands.operationMode === 'off';
 // Any mode this setter can send is an active mode, so any operationMode other
 // than 'off' on the wire is a command that powers the unit back on.
-const isActiveMode = (c) =>
+const isActiveMode = (c: SentCommand) =>
   c.commands.operationMode !== undefined && c.commands.operationMode !== 'off';
-const isSetpoint = (c) =>
+const isSetpoint = (c: SentCommand) =>
   c.commands.spHeat !== undefined || c.commands.spCool !== undefined;
 
 test('AC-off scene: a mode dispatched right after the off does not reach the device', async () => {

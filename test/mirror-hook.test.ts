@@ -1,5 +1,3 @@
-'use strict';
-
 // The source-side status hook: onStatusUpdate must fire both when an update is
 // observed (streaming/poll/local, via processZoneUpdate) AND when a HomeKit
 // setter changes this unit — so a HomeKit change to the source mirrors without
@@ -14,10 +12,12 @@
 // streaming/poll echo (up to a full poll interval late), which is exactly the
 // latency this hook exists to remove.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type { DeviceStatus, Zone } from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSOURCE01';
 
@@ -31,22 +31,27 @@ function makeHarness() {
     subscribeToDevice() {}, onDeviceProfileUpdate() {},
     sendCommand() { return Promise.resolve(true); },
   };
-  const handler = new KumoThermostatAccessory(platform, makeAccessory('Source', SERIAL), kumoAPI, 30);
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    makeAccessory('Source', SERIAL) as never,
+    kumoAPI as never,
+    30,
+  );
   return { handler };
 }
-const zone = (over = {}) => ({
+const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'heat',
     fanSpeed: 'auto', airDirection: 'auto',
     roomTemp: 21, spCool: 24, spHeat: 20, spAuto: null, humidity: null, ...over,
   },
-});
+}) as unknown as Zone;
 
 test('onStatusUpdate fires on an observed (polled) update with the new state', () => {
   const { handler } = makeHarness();
-  const seen = [];
-  handler.onStatusUpdate((s) => seen.push({ mode: s.operationMode, spHeat: s.spHeat }));
+  const seen: Array<Record<string, unknown>> = [];
+  handler.onStatusUpdate((s: DeviceStatus) => seen.push({ mode: s.operationMode, spHeat: s.spHeat }));
   handler.updateFromZone(zone({ operationMode: 'heat', spHeat: 22 }));
   assert.strictEqual(seen.length, 1);
   assert.deepStrictEqual(seen[0], { mode: 'heat', spHeat: 22 });
@@ -67,8 +72,8 @@ test('onStatusUpdate fires on an observed (polled) update with the new state', (
 test('onStatusUpdate fires after a HomeKit setpoint change (setter hook)', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'heat', spHeat: 20 })); // seed status
-  const seen = [];
-  handler.onStatusUpdate((s) => seen.push(s.spHeat));
+  const seen: number[] = [];
+  handler.onStatusUpdate((s: DeviceStatus) => seen.push(s.spHeat));
   await handler.setHeatingThresholdTemperature(23);
   assert.ok(seen.includes(22.8), `expected a listener fire with spHeat 22.8, got ${JSON.stringify(seen)}`);
 });
@@ -76,8 +81,8 @@ test('onStatusUpdate fires after a HomeKit setpoint change (setter hook)', async
 test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'heat' })); // seed status
-  const seen = [];
-  handler.onStatusUpdate((s) => seen.push(s.operationMode));
+  const seen: string[] = [];
+  handler.onStatusUpdate((s: DeviceStatus) => seen.push(s.operationMode));
   await handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.COOL);
   assert.ok(seen.includes('cool'), `expected a listener fire with mode cool, got ${JSON.stringify(seen)}`);
 });
@@ -92,8 +97,8 @@ test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () 
 test('onStatusUpdate fires after a HomeKit on/off change (Active setter hook)', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'cool', power: 1 })); // seed status
-  const seen = [];
-  handler.onStatusUpdate((s) => seen.push({ mode: s.operationMode, power: s.power }));
+  const seen: Array<Record<string, unknown>> = [];
+  handler.onStatusUpdate((s: DeviceStatus) => seen.push({ mode: s.operationMode, power: s.power }));
   await handler.setActive(Characteristic.Active.INACTIVE);
   assert.deepStrictEqual(
     seen.filter((s) => s.mode === 'off' && s.power === 0).length, 1,

@@ -1,5 +1,3 @@
-'use strict';
-
 // The paired wireless sensor, delivered by the cloud `sensor_update` event.
 //
 // WHY THIS PATH EXISTS. Mitsubishi's v3 cloud stopped distributing the two
@@ -16,30 +14,57 @@
 // ambiguity: 22.5°C is exactly 72.5°F, the one 0.5°C step where a rounding
 // renderer shows 73°F and a truncating one shows 72°F.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const { KumoThermostatAccessory } = require('../dist/accessory.js');
-const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers.js');
+import test from 'node:test';
+import assert from 'node:assert';
+
+import { KumoThermostatAccessory } from '../dist/accessory.js';
+import type {
+  Commands, DeviceProfile, DeviceStatus, KumoConfig, SensorReading, Zone,
+} from '../dist/settings.js';
+import { Characteristic, Service, makeLog, makeAccessory, type FakeService } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
 const OTHER_SERIAL = 'TESTSERIAL002';
 
+// The fake hooks are typed by what these tests actually push at them. Profile
+// fixtures carry only the fields the accessory reads; two tests below emit a
+// sensor reading with NO deviceSerial, which the live event always has but an
+// unkeyed one must survive; and the streaming payload carries displayConfig,
+// which DeviceUpdateCallback does not declare but handleStreamingUpdate reads
+// off the same object.
+type ProfilePayload = Partial<DeviceProfile>;
+type SensorPayload = Partial<SensorReading>;
+type StreamingPayload = Partial<DeviceStatus> & {
+  displayConfig?: { filter?: boolean; defrost?: boolean; standby?: boolean };
+};
+
+// hap-nodejs puts setPrimaryService/addLinkedService on every Service and
+// FakeService does not, so the link-aware accessory grafts them on — the same
+// optional shape src probes for before calling them.
+type LinkableService = FakeService & {
+  setPrimaryService?(value?: boolean): void;
+  addLinkedService?(service: FakeService): void;
+};
+
 // The harness now has to supply onSensorUpdate as well as the streaming and
 // profile hooks — the accessory subscribes to all three in its constructor.
-function makeHarness(kumoConfig = {}, { linkAware = false, displayName = 'Bedroom' } = {}) {
-  const sendCommandCalls = [];
-  const linked = [];
+function makeHarness(
+  kumoConfig: Partial<KumoConfig> = {},
+  { linkAware = false, displayName = 'Bedroom' } = {},
+) {
+  const sendCommandCalls: Array<{ serial: string; commands: Commands }> = [];
+  const linked: FakeService[] = [];
   let primary = false;
   let publishes = 0;
-  let profileCb = null;
-  let sensorCb = null;
-  let streamCb = null;
+  let profileCb: ((serial: string, profile: ProfilePayload) => void) | null = null;
+  let sensorCb: ((reading: SensorPayload) => void) | null = null;
+  let streamCb: ((serial: string, data: StreamingPayload) => void) | null = null;
 
   const accessory = makeAccessory(displayName);
   if (linkAware) {
     const origAdd = accessory.addService;
     accessory.addService = (type, name, subtype) => {
-      const svc = origAdd(type, name, subtype);
+      const svc: LinkableService = origAdd(type, name, subtype);
       svc.setPrimaryService = (v) => { if (svc.type === Service.HeaterCooler) primary = v !== false; };
       svc.addLinkedService = (s) => linked.push(s);
       return svc;
@@ -52,17 +77,24 @@ function makeHarness(kumoConfig = {}, { linkAware = false, displayName = 'Bedroo
     kumoConfig,
   };
   const kumoAPI = {
-    subscribeToDevice(serial, cb) { streamCb = cb; },
-    onDeviceProfileUpdate(cb) { profileCb = cb; },
-    onSensorUpdate(cb) { sensorCb = cb; },
-    sendCommand(serial, commands) {
+    subscribeToDevice(serial: string, cb: (serial: string, data: StreamingPayload) => void) {
+      streamCb = cb;
+    },
+    onDeviceProfileUpdate(cb: (serial: string, profile: ProfilePayload) => void) { profileCb = cb; },
+    onSensorUpdate(cb: (reading: SensorPayload) => void) { sensorCb = cb; },
+    sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
     },
   };
 
-  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  profileCb(SERIAL, {
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    accessory as never,
+    kumoAPI as never,
+    30,
+  );
+  profileCb!(SERIAL, {
     minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
     maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
     hasModeVent: true, hasModeDry: true, hasModeHeat: true,
@@ -73,18 +105,20 @@ function makeHarness(kumoConfig = {}, { linkAware = false, displayName = 'Bedroo
   return {
     handler, accessory, sendCommandCalls, linked,
     isPrimary: () => primary,
-    heaterCooler: accessory.getService(Service.HeaterCooler),
+    heaterCooler: accessory.getService(Service.HeaterCooler)!,
     battery: () => accessory.getService(Service.Battery),
     humidity: () => accessory.getService(Service.HumiditySensor),
     publishes: () => publishes,
-    emitSensor: (reading) => sensorCb({ deviceSerial: SERIAL, ...reading }),
-    emitRaw: (reading) => sensorCb(reading),
-    emitStreaming: (data) => streamCb(SERIAL, data),
+    emitSensor: (reading: SensorPayload) => sensorCb!({ deviceSerial: SERIAL, ...reading }),
+    emitRaw: (reading: SensorPayload) => sensorCb!(reading),
+    emitStreaming: (data: StreamingPayload) => streamCb!(SERIAL, data),
     hasSensorHook: () => typeof sensorCb === 'function',
   };
 }
 
-const zone = (over = {}) => ({
+type Harness = ReturnType<typeof makeHarness>;
+
+const zone = (over: Record<string, unknown> = {}): Zone => ({
   id: 'zone-1',
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
@@ -92,9 +126,10 @@ const zone = (over = {}) => ({
     roomTemp: 22.5, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
-});
+}) as unknown as Zone;
 
-const currentTemp = (h) => h.heaterCooler.chars.get(Characteristic.CurrentTemperature).value;
+const currentTemp = (h: Harness) =>
+  h.heaterCooler.chars.get(Characteristic.CurrentTemperature)!.value;
 
 // ---- Subscription ---------------------------------------------------------
 
@@ -216,8 +251,8 @@ test('a sensor reading is telemetry: it sends nothing and moves nothing', async 
   // command.
   const h = makeHarness();
   h.handler.updateFromZone(zone({ power: 0, operationMode: 'off', roomTemp: 22.5 }));
-  const mirrored = [];
-  h.handler.onStatusUpdate((s) => mirrored.push(s.operationMode));
+  const mirrored: string[] = [];
+  h.handler.onStatusUpdate((s: DeviceStatus) => mirrored.push(s.operationMode));
 
   h.emitSensor({ temperature: 22.30543, humidity: 55.5, battery: 100 });
 
@@ -240,7 +275,7 @@ test('a battery reading lazily creates the Battery service and publishes it', ()
 
   const battery = h.battery();
   assert.notStrictEqual(battery, null);
-  assert.strictEqual(battery.chars.get(Characteristic.BatteryLevel).value, 100);
+  assert.strictEqual(battery!.chars.get(Characteristic.BatteryLevel)!.value, 100);
   assert.strictEqual(h.publishes(), before + 1,
     'a service added after discovery is invisible to HomeKit without a re-publish');
 });
@@ -271,25 +306,26 @@ test('the Battery service carries only characteristics HAP allows on it', () => 
   // exactly what ConfiguredName on Fanv2 did.
   const h = makeHarness();
   h.emitSensor({ battery: 100 });
-  const battery = h.battery();
+  const battery = h.battery()!;
 
-  const allowed = new Set([
+  const allowed = new Set<unknown>([
     Characteristic.StatusLowBattery,
     Characteristic.BatteryLevel,
     Characteristic.ChargingState,
     Characteristic.Name,
   ]);
   for (const key of battery.chars.keys()) {
-    assert.ok(allowed.has(key), `${key._name} is not in Battery's required or optional set`);
+    assert.ok(allowed.has(key),
+      `${(key as { _name: string })._name} is not in Battery's required or optional set`);
   }
   assert.ok(battery.chars.has(Characteristic.StatusLowBattery), 'the one required characteristic');
-  assert.strictEqual(battery.chars.get(Characteristic.ChargingState).value,
+  assert.strictEqual(battery.chars.get(Characteristic.ChargingState)!.value,
     Characteristic.ChargingState.NOT_CHARGEABLE,
     'a wireless sensor runs on a cell you replace, not one you charge');
 });
 
 test('StatusLowBattery flips at 20%, with a case either side', () => {
-  const cases = [
+  const cases: Array<[number, number]> = [
     [100, Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL],
     [21, Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL],
     [20, Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL],
@@ -299,7 +335,7 @@ test('StatusLowBattery flips at 20%, with a case either side', () => {
   for (const [percent, expected] of cases) {
     const h = makeHarness();
     h.emitSensor({ battery: percent });
-    assert.strictEqual(h.battery().chars.get(Characteristic.StatusLowBattery).value, expected,
+    assert.strictEqual(h.battery()!.chars.get(Characteristic.StatusLowBattery)!.value, expected,
       `${percent}% must report ${expected === 1 ? 'LOW' : 'NORMAL'}`);
   }
 });
@@ -307,11 +343,11 @@ test('StatusLowBattery flips at 20%, with a case either side', () => {
 test('the battery level is clamped and rounded to the uint8 HAP expects', () => {
   // The value comes off the cloud, so it is a trust boundary: hand HAP something
   // it will reject and the characteristic silently keeps its old value.
-  const cases = [[100, 100], [55.6, 56], [-5, 0], [140, 100]];
+  const cases: Array<[number, number]> = [[100, 100], [55.6, 56], [-5, 0], [140, 100]];
   for (const [raw, expected] of cases) {
     const h = makeHarness();
     h.emitSensor({ battery: raw });
-    assert.strictEqual(h.battery().chars.get(Characteristic.BatteryLevel).value, expected);
+    assert.strictEqual(h.battery()!.chars.get(Characteristic.BatteryLevel)!.value, expected);
   }
 });
 
@@ -322,8 +358,8 @@ test('a later battery reading updates the existing service without re-publishing
 
   h.emitSensor({ battery: 12 });
 
-  assert.strictEqual(h.battery().chars.get(Characteristic.BatteryLevel).value, 12);
-  assert.strictEqual(h.battery().chars.get(Characteristic.StatusLowBattery).value,
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.BatteryLevel)!.value, 12);
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.StatusLowBattery)!.value,
     Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW);
   assert.strictEqual(h.publishes(), after, 'the service is only structurally new once');
 });
@@ -336,7 +372,7 @@ test('the battery survives a cloud poll rebuilding the cached status', () => {
 
   h.handler.updateFromZone(zone({ roomTemp: 23 }));
 
-  assert.strictEqual(h.battery().chars.get(Characteristic.BatteryLevel).value, 42,
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.BatteryLevel)!.value, 42,
     'the published value stands');
 });
 
@@ -344,7 +380,7 @@ test('the Battery service is linked to the climate tile', () => {
   const h = makeHarness({}, { linkAware: true });
   h.emitSensor({ battery: 100 });
 
-  assert.ok(h.linked.includes(h.battery()),
+  assert.ok(h.linked.includes(h.battery()!),
     'an unlinked Battery reads as a standalone accessory rather than part of the unit');
 });
 
@@ -359,7 +395,7 @@ test('humidity from a sensor reading reaches the HumiditySensor service', () => 
 
   assert.notStrictEqual(h.humidity(), null, 'the first reading creates the service');
   assert.strictEqual(
-    h.humidity().chars.get(Characteristic.CurrentRelativeHumidity).value, 55.523438);
+    h.humidity()!.chars.get(Characteristic.CurrentRelativeHumidity)!.value, 55.523438);
 });
 
 test('a poll reporting no humidity does not wipe the sensor value', () => {
@@ -369,7 +405,7 @@ test('a poll reporting no humidity does not wipe the sensor value', () => {
   h.handler.updateFromZone(zone({ humidity: null }));
 
   assert.strictEqual(
-    h.humidity().chars.get(Characteristic.CurrentRelativeHumidity).value, 55.523438);
+    h.humidity()!.chars.get(Characteristic.CurrentRelativeHumidity)!.value, 55.523438);
 });
 
 test('showHumiditySensor: false keeps the sensor humidity out of HomeKit', () => {
