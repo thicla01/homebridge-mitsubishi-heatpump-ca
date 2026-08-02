@@ -185,6 +185,13 @@ export class KumoAPI {
       if (!response.ok) {
         const errorText = await response.text();
 
+        // A credential error here may be a lie. Under login rate limiting the v3 API
+        // does not always answer 429 — it also returns `{"error":
+        // "usernameOrPasswordIncorrect"}` for credentials that are perfectly valid,
+        // and keeps doing so for 15-30 minutes. Anyone debugging "my password stopped
+        // working" after a burst of restarts is most likely looking at this. It is why
+        // login attempts are spaced by `minLoginInterval` and token refresh carries
+        // jitter, rather than retrying as fast as the transport allows.
         // Handle rate limiting
         if (response.status === 429) {
           this.loginRetryCount++;

@@ -464,6 +464,18 @@ export class KumoThermostatAccessory {
     // answered with an invalidSpCoolRange 400. On HeaterCooler each threshold IS
     // the setpoint for its own mode, so the correct bound is per-characteristic.
     // In AUTO both handles are live, so widen each to cover the auto range too.
+    //
+    // These bounds are NOT ours to widen, and the recurring "why can't I set 55°F"
+    // question has no answer in this code. They are installer settings stored in the
+    // unit (MHK2 Function Code 181, or an installer's service tool), reported to us
+    // read-only via profile_update. The cloud enforces them independently: a write
+    // outside the range comes back 400 with `{"commands":["invalidSpHeatRange"]}`.
+    // There is no cloud endpoint that changes them — /devices/{serial}/profile is
+    // read-only and rejects PUT/PATCH/POST, and no installer-level auth exists on the
+    // v3 API (verified 2025-12-25 against /installer/login, /admin/login,
+    // /technician/login, /devices/{serial}/settings and a role/userType/installerPin
+    // login variant sweep; all 404 or ignored). Clamping to the profile is the whole
+    // of what a client can do.
     const heatMin = Math.min(profile.minimumSetPoints.heat, profile.minimumSetPoints.auto);
     const heatMax = Math.max(profile.maximumSetPoints.heat, profile.maximumSetPoints.auto);
     const coolMin = Math.min(profile.minimumSetPoints.cool, profile.minimumSetPoints.auto);
@@ -2257,7 +2269,7 @@ export class KumoThermostatAccessory {
   // Driven by the MirrorController when a source unit changes. Reconstructs a
   // single atomic command from the source's desired state, clamped to this unit's
   // own limits — one combined command, so the 1.7.2 trailing-setpoint race cannot
-  // recur. See docs/mirroring-design.md.
+  // recur.
 
   /** Clamp a setpoint to this unit's supported range for a mode (no-op until profile loads). */
   private clampSetpoint(value: number, mode: 'heat' | 'cool' | 'auto'): number {

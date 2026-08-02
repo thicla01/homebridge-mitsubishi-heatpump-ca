@@ -5,6 +5,15 @@ import type { KumoThermostatAccessory } from './accessory';
 /**
  * Device mirroring: makes one unit (target) follow another (source).
  *
+ * WHY THIS LIVES IN THE PLUGIN AND NOT IN HOMEKIT. HomeKit cannot express it:
+ * automations are trigger → *static* scene, and there is no "copy whatever value
+ * the source currently has" primitive. A generic HomeKit-layer mirror plugin can
+ * express it but is lossy for these units, because the HomeKit projection is not
+ * the device state — dry and fan-only are surfaced as separate switches, auto is
+ * a two-handle band rather than one setpoint, and dry reports itself as Cooling.
+ * Mirroring that projection would copy the lossy view. The faithful place is the
+ * device-command layer, which is to say here. Hence opt-in, in this plugin.
+ *
  * One-way and edge-triggered. The controller subscribes to each source
  * accessory's status updates (which fire for any observed change — wall
  * thermostat, Kumo app, streaming, local poll — and for a HomeKit change to the
@@ -16,7 +25,11 @@ import type { KumoThermostatAccessory } from './accessory';
  * can't spuriously re-clobber a manually-adjusted target. Between source changes
  * the target is free — a manual change there persists until the next source change.
  *
- * See docs/mirroring-design.md.
+ * The first source state seen after a (re)start seeds the signature WITHOUT
+ * pushing: a restart is not "someone changed the kitchen", so a manually-set
+ * target survives a reboot.
+ *
+ * User-facing behaviour and config: docs/configuration.md.
  */
 
 const DEFAULT_DEBOUNCE_MS = 1000;

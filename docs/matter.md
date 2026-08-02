@@ -11,7 +11,7 @@ This fork ships HAP only. No Matter accessory graph until Homebridge exposes Fan
 
 The HAP accessory already delivers, per unit:
 
-- Heat / Cool / Auto with a heat-cool band (`TargetHeatingCoolingState`, heating + cooling threshold temperatures).
+- Heat / Cool / Auto with a heat-cool band (`TargetHeaterCoolerState`, heating + cooling threshold temperatures; power is the separate `Active` characteristic).
 - Fan-only and Dry as separate `Service.Switch` subtypes (`'fan-only'`, `'dry'` in `src/accessory.ts`), because HAP has no such thermostat modes.
 - Six named fan speeds (`auto`, `superQuiet`, `quiet`, `low`, `powerful`, `superPowerful`) and seven vane positions incl. `swing` (`src/settings.ts`), all confirmed writable on the author's MLZ-KX06NL-U1, MLZ-KX12NL-U1 and MSZ-GX06NL-U1 units.
 
@@ -137,7 +137,7 @@ Items 1 and 2 are Homebridge-side and observable from source. Item 3 needs an em
 1. Feature-flag it: `matter: boolean` in `config.schema.json`, default off. Register the HAP accessory unconditionally; add the Matter graph only when `api.isMatterEnabled()` and the flag is set.
 2. Device type: `deviceTypes.RoomAirConditioner` if AutoMode is present by then, else a hand-built `RoomAirConditionerDevice.with(RoomAirConditionerRequirements.ThermostatServer.with('Heating', 'Cooling', 'AutoMode'))` and a pinned `@matter/main` dependency.
 3. Clusters: `onOff` for power, `thermostat` for mode plus `occupiedHeatingSetpoint` / `occupiedCoolingSetpoint` (hundredths of a degree Celsius), `temperatureMeasurement` and `relativeHumidityMeasurement` from the existing zone poll, `fanControl` for speed.
-4. Fan speed: map `percentSetting` onto `FAN_SPEEDS`. Index 0 is `auto`, so a linear slider needs the same off-by-one care already documented at `src/settings.ts:197`. Only add MultiSpeed once Homebridge preserves the feature.
+4. Fan speed: map `percentSetting` onto `FAN_SPEEDS`. Index 0 is `auto`, so a linear slider needs the same off-by-one care already documented in the `FAN_SPEEDS` comment in `src/settings.ts`. Only add MultiSpeed once Homebridge preserves the feature.
 5. Vane: `airflowDirection` for fixed positions, `rockSetting` for `swing`. Both stay unimplemented until finding 3 clears. Do not ship a partial vane control; a silent no-op is worse than an absent control, since the adapter returns HTTP 200 for invalid writes.
 6. Dry and Fan-only: separate `OnOffSwitch` endpoints or `MatterAccessoryPart` entries, mirroring the existing HAP switches.
 7. Writes reuse `local-api.ts` / `kumo-api.ts` unchanged. Validate every vane and fan value client-side with `isVaneDirection` / `isFanSpeed` before the write — the adapter accepts garbage silently.

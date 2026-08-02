@@ -168,8 +168,6 @@ unit's sensor is reachable only over a direct CN105 serial connection.
 | [Configuration](docs/configuration.md) | Every option, validation rules, device mirroring |
 | [Protocol](docs/protocol.md) | REST, Socket.IO, local LAN, HomeKit services |
 | [Matter support](docs/matter.md) | Why it is deferred, and what would unblock it |
-| [Mirroring design](docs/mirroring-design.md) | Why mirroring lives at the device-command layer |
-| [API exploration](docs/api-exploration.md) | Endpoint spelunking notes |
 | [Changelog](CHANGELOG.md) | |
 
 ## License

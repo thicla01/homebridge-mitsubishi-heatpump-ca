@@ -5,8 +5,8 @@ from the Mitsubishi Comfort app and cross-checked against
 [pykumo](https://github.com/dlarrick/pykumo); none of it is documented by the vendor and
 any of it can change without notice.
 
-Earlier endpoint spelunking, including endpoints that turned out not to exist, is in
-[api-exploration.md](api-exploration.md).
+Negative results live here too — see [What does not exist](#what-does-not-exist) — so the
+same dead ends do not get explored twice.
 
 ## REST
 
@@ -23,7 +23,41 @@ carry `Authorization: Bearer <token>` and `X-App-Version` (`APP_VERSION`, curren
 | `GET /devices/{serial}/status` | Read `cryptoSerial`, and only that. Connection state comes from the zones payload, not from here |
 | `POST /devices/send-command` | `{ deviceSerial, commands }` |
 
-That is the complete set. `GET /devices/{serial}` and `/config` exist but are not called.
+That is the complete set. Two more exist but are not called: `GET /devices/{serial}`, and
+`GET /config` (notification rate limits and archiving settings — nothing this plugin needs).
+
+`GET /devices/{serial}/profile` returns the same capability and setpoint-limit data that
+arrives over the socket as `profile_update`, and is read-only: PUT, PATCH and POST all
+404.
+
+### Login rate limiting
+
+Login is rate limited, and **the rate-limit response is not always a 429**. A burst of
+login attempts also gets `{"error": "usernameOrPasswordIncorrect"}` for credentials that
+are entirely valid, and keeps doing so for 15–30 minutes. If a password appears to have
+stopped working right after a run of restarts, this is the first thing to rule out.
+
+The plugin spaces login attempts by 10 seconds and adds 0–60 s of jitter to token
+refresh for this reason.
+
+### What does not exist
+
+Verified 2025-12-25, while looking for a way to lower a unit's minimum heating setpoint
+below the installer-set 17 °C. All of these 404:
+
+`/installer/login` · `/admin/login` · `/technician/login` ·
+`/devices/{serial}/settings` · `/devices/{serial}/config` ·
+`/devices/{serial}/installer` · `/devices/{serial}/functioncodes` ·
+`/sites/{siteId}/settings` · `/functioncodes` · `/limits` · `/ranges`
+
+Login also ignores `role`, `userType`, `accountType` and `installerPin`. There is no
+installer-level authentication on the v3 API.
+
+**Conclusion, recorded so nobody repeats the search:** setpoint limits are installer
+settings held in the unit (MHK2 Function Code 181, or an installer's service tool). The
+cloud reports them read-only and enforces them — a write outside the range returns 400
+with `{"error":{"<serial>":{"commands":["invalidSpHeatRange"]}}}`. No API can change
+them.
 
 ## Socket.IO
 
@@ -58,6 +92,64 @@ not on routine reconnects.
 The adapter does not validate writes: `vaneDir: "notARealVane"` returns HTTP 200 and is
 silently ignored, so every fan-speed and vane value is checked against a known vocabulary
 before it is sent (`src/settings.ts`).
+
+### Payloads
+
+Field documentation cross-referenced against
+[dlarrick/hass-kumo](https://github.com/dlarrick/hass-kumo),
+[EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws) and pykumo's `Cloud_api_v3.md`.
+The plugin reads a subset; the rest is recorded because the vendor documents none of it.
+
+`device_update` — primary state event, sent on change and on subscription:
+
+```json
+{
+  "deviceSerial": "string",
+  "roomTemp": 21.5,
+  "spHeat": 20, "spCool": 24, "spAuto": null,
+  "power": 1,
+  "operationMode": "heat",
+  "previousOperationMode": "heat",
+  "fanSpeed": "auto",
+  "airDirection": "auto",
+  "humidity": 45,
+  "rssi": -55,
+  "connected": true,
+  "modelNumber": "SVZ-KP30NA",
+  "displayConfig": { "filter": false, "defrost": false, "hotAdjust": false, "standby": false },
+  "activeThermistor": "string",
+  "tempSource": "string",
+  "scheduleOwner": "adapter",
+  "scheduleHoldEndTime": 0,
+  "isSimulator": false, "ledDisabled": false, "isHeadless": false,
+  "lastStatusChangeAt": "ISO 8601", "createdAt": "ISO 8601", "updatedAt": "ISO 8601"
+}
+```
+
+`displayConfig` is the cloud's spelling of what the local API exposes under
+`indoorUnit.status`:
+
+| Cloud | Local (pykumo) | Meaning |
+|---|---|---|
+| `displayConfig.filter` | `filterDirty` | Filter needs cleaning |
+| `displayConfig.defrost` | `defrost` | Defrost cycle active |
+| `displayConfig.standby` | `standby` | Compressor idle |
+| `displayConfig.hotAdjust` | — | Hot adjust active |
+
+`tempSource` is worth knowing: it names which thermistor regulates the unit. `sensor0`
+means a paired wireless sensor is the real thermostat, not the head unit.
+
+`profile_update` — capabilities and limits. Beyond the fields the plugin consumes it also
+carries `hasHotAdjust`, `hasInitialSettings`, `hasModeTest` and `extendedTemps`.
+`minimumSetPoints` / `maximumSetPoints` are `{ cool, heat, auto }` in Celsius.
+
+`adapter_update` — `{ deviceSerial, firmwareVersion, routerRssi, minSetpoint, maxSetpoint,
+roomTempDisplayOffset }`, and formerly `password`. **Strip before logging.**
+
+`device_status_v2` — `{ deviceSerial, status, lastTimeConnected, lastDisconnectedReason }`;
+`status` is `"connected"` or `"disconnected"`.
+
+`acoil_update` — `{ deviceSerial, date }`. That is all of it.
 
 ## Local LAN
 

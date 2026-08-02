@@ -129,5 +129,5 @@ How it behaves:
 One source can drive several targets — add one entry per target. Vane direction, room
 temperature and humidity are **not** mirrored; those are readings, not settings.
 
-Design rationale, including why this lives at the device-command layer rather than in a
-generic HomeKit mirror: [mirroring-design.md](mirroring-design.md).
+Why this lives in the plugin rather than in a HomeKit automation or a generic mirror
+plugin: see the header comment in `src/mirror.ts`.

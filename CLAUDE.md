@@ -74,11 +74,15 @@ Four behaviours that are not visible from the shapes:
 
 | Doc | Covers |
 |---|---|
-| `docs/protocol.md` | REST, Socket.IO, local LAN, HomeKit service inventory |
+| `docs/protocol.md` | REST, Socket.IO, payload shapes, local LAN, HomeKit services, and what does **not** exist |
 | `docs/matter.md` | Why Matter is deferred, and shell commands to re-verify each blocker |
-| `docs/mirroring-design.md` | Why mirroring lives at the device-command layer |
-| `docs/api-exploration.md` | Endpoint spelunking, including what does not exist |
 | `docs/configuration.md` | Every config option, validation, UI coverage |
+
+Three docs, and that is deliberate. Design rationale for code that exists lives in a
+comment next to that code, not in a doc — a design doc written before the code goes stale
+the moment the code moves, and nothing fails when it does. `docs/` is for what has no code
+site: a vendor API we do not control, a decision *not* to build something, and the
+user-facing manual.
 
 ## Working rules
 
