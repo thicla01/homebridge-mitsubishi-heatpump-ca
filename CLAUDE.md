@@ -75,14 +75,20 @@ Four behaviours that are not visible from the shapes:
 | Doc | Covers |
 |---|---|
 | `docs/protocol.md` | REST, Socket.IO, payload shapes, local LAN, HomeKit services, and what does **not** exist |
-| `docs/matter.md` | Why Matter is deferred, and shell commands to re-verify each blocker |
 | `docs/configuration.md` | Every config option, validation, UI coverage |
 
-Three docs, and that is deliberate. Design rationale for code that exists lives in a
-comment next to that code, not in a doc — a design doc written before the code goes stale
-the moment the code moves, and nothing fails when it does. `docs/` is for what has no code
-site: a vendor API we do not control, a decision *not* to build something, and the
-user-facing manual.
+Two docs, and that is deliberate. Design rationale for code that exists lives in a comment
+next to that code, not in a doc — a design doc written before the code goes stale the
+moment the code moves, and nothing fails when it does. `docs/` is for what has no code
+site: the vendor API we do not control, and the user-facing manual.
+
+**Do not add a Matter accessory graph.** Homebridge 2.2.1 has no `fanControl`
+feature-preservation branch and no rocking/airflow handlers, so vane and swing are
+structurally unreachable over Matter — and vane control is the reason this plugin exists.
+A full blocker-by-blocker analysis with re-verification commands was written on 2026-07-27
+and then deleted, because it was pinned to Homebridge internals that will churn long
+before Matter is viable. Recover it if the question comes up again:
+`git show dbf6651:docs/matter.md`. Re-verify before trusting a line of it.
 
 ## Working rules
 

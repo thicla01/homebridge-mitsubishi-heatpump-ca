@@ -167,8 +167,11 @@ unit's sensor is reachable only over a direct CN105 serial connection.
 |---|---|
 | [Configuration](docs/configuration.md) | Every option, validation rules, device mirroring |
 | [Protocol](docs/protocol.md) | REST, Socket.IO, local LAN, HomeKit services |
-| [Matter support](docs/matter.md) | Why it is deferred, and what would unblock it |
 | [Changelog](CHANGELOG.md) | |
+
+**Matter:** not supported. Homebridge does not yet expose the FanControl features or
+handlers a Matter build would need for vane and swing, and losing those is the whole
+reason this plugin exists. HAP only until that changes.
 
 ## License
 
