@@ -6,24 +6,26 @@
   "footerDisplay": "For help and support, visit the [GitHub repository](https://github.com/ukaratay/homebridge-mitsubishi-heatpump).",
   "schema": {
     "type": "object",
+    "required": [
+      "name",
+      "username",
+      "password"
+    ],
     "properties": {
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "Kumo",
-        "required": true
+        "default": "Kumo"
       },
       "username": {
         "title": "Username",
         "type": "string",
-        "required": true,
         "format": "email",
         "description": "Your Kumo Cloud email address"
       },
       "password": {
         "title": "Password",
         "type": "string",
-        "required": true,
         "description": "Your Kumo Cloud password"
       },
       "pollInterval": {
@@ -130,18 +132,20 @@
         "description": "Make one unit follow another. Whenever the source changes (via any control \u2014 wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
         "items": {
           "type": "object",
+          "required": [
+            "source",
+            "target"
+          ],
           "properties": {
             "source": {
               "title": "Source Device Serial",
               "type": "string",
-              "required": true,
               "placeholder": "e.g., 9X34P008S100095F",
               "description": "The unit to copy from (found in logs during device discovery)"
             },
             "target": {
               "title": "Target Device Serial",
               "type": "string",
-              "required": true,
               "placeholder": "e.g., 9X34P008S100096A",
               "description": "The unit that follows the source"
             }
