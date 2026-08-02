@@ -1,6 +1,5 @@
 import { createHash } from 'crypto';
-import { Agent } from 'http';
-import fetch from 'node-fetch';
+import { Agent, request as httpRequest } from 'http';
 import { Logger } from 'homebridge';
 import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
 
@@ -51,6 +50,91 @@ export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}'
  * closes an idle connection and the next write on it fails.
  */
 const LOCAL_AGENT = new Agent({ keepAlive: false, maxSockets: 1 });
+
+/**
+ * One signed PUT to an adapter, resolving its parsed JSON reply.
+ *
+ * Plain `node:http` rather than the global `fetch`, and the agent above is the
+ * whole reason: undici's fetch — which is what global fetch is — has no way to
+ * take an `http.Agent`. It does not reject the option, it ignores it, so a swap
+ * to `fetch()` would have silently put every LAN request back on a keep-alive
+ * pool with no per-adapter socket cap. `http.request` takes the agent directly.
+ *
+ * Two timers, because one is not enough. `timeout` is the socket timeout: it
+ * covers a dead IP and an adapter that accepts the connection then says nothing,
+ * and it destroys the socket rather than parking it. But Node arms it when the
+ * agent ASSIGNS a socket, not when the request is created, so a request queued
+ * behind `maxSockets: 1` waits with no timer running at all. `signal` is the
+ * missing half: armed here, at call time, it bounds total duration the way the
+ * caller's wall-clock `Promise.race` used to (node-fetch v3 had dropped its own
+ * `timeout` option, which is why that race existed).
+ *
+ * Dropping the race and keeping only the socket timeout was measurably wrong.
+ * `maxSockets` is per origin, so a /24 sweep does not queue — 253 candidates are
+ * 253 origins — but a rediscovery sweep probing an IP the poller is already
+ * talking to does. Measured 2026-08-02 against a silent server, 8 requests to one
+ * origin at a 500ms cap: 503ms with the race, 4022ms with the socket timeout
+ * alone, i.e. the cap became per-socket rather than per-call. Distinct origins
+ * were 505ms and 508ms, unchanged.
+ *
+ * Rejects on any transport failure and resolves `null` when the reply is not a
+ * JSON object: the callers' 'transport' and 'malformed'. The HTTP status is
+ * deliberately not read, exactly as the node-fetch version never read `res.ok`.
+ * The adapter answers 200 to everything it parses, its own `_api_error` replies
+ * included, so the body is the only signal there is.
+ */
+function putSigned(
+  ip: string,
+  token: string,
+  accept: string,
+  body: Buffer,
+  timeoutMs: number,
+): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      `http://${ip}/api?m=${token}`,
+      {
+        method: 'PUT',
+        agent: LOCAL_AGENT,
+        timeout: timeoutMs,
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': accept,
+          // Explicit because `http.request` sends no Accept-Encoding at all, while
+          // node-fetch advertised gzip and transparently inflated the reply. Nothing
+          // here can inflate one, so a server that took the silence as licence to
+          // compress would surface as a bogus 'malformed'. Content-Length needs no
+          // such help: handing the whole body to `req.end()` below makes Node compute
+          // and send it (verified against a capture — chunked is only what a body
+          // written in pieces would get, and it never was).
+          'Accept-Encoding': 'identity',
+        },
+      },
+      (res) => {
+        res.setEncoding('utf8');
+        let text = '';
+        res.on('data', (chunk: string) => {
+          text += chunk;
+        });
+        res.on('error', reject);
+        res.on('end', () => {
+          try {
+            const parsed: unknown = JSON.parse(text);
+            resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : null);
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    // `timeout` only fires the event; the socket lives on until something tears it
+    // down, so an unreachable unit would still stall the poll forever without this.
+    req.on('timeout', () => req.destroy(new Error(`timed out after ${timeoutMs}ms`)));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
 
 /**
  * Why a local request produced no data.
@@ -301,28 +385,13 @@ export class LocalKumoClient {
   ): Promise<{ result: Record<string, unknown> | null; error: LocalErrorKind }> {
     const token = computeLocalToken(creds.password, creds.cryptoSerial, body);
     try {
-      const fetchPromise = fetch(`http://${creds.ip}/api?m=${token}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/plain, */*',
-        },
+      const json = await putSigned(
+        creds.ip,
+        token,
+        'application/json, text/plain, */*',
         body,
-        agent: LOCAL_AGENT,
-      } as Parameters<typeof fetch>[1]);
-      // node-fetch v3 dropped the `timeout` option, so race the request against a
-      // timer — an unreachable unit must not stall the poll. The losing fetch is
-      // left to settle in the background; swallow its eventual rejection.
-      fetchPromise.catch(() => undefined);
-      const res = await Promise.race([
-        fetchPromise,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), this.timeoutMs)),
-      ]);
-      if (!res) {
-        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: timed out after ${this.timeoutMs}ms`);
-        return { result: null, error: 'transport' };
-      }
-      const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+        this.timeoutMs,
+      );
       if (json && json.r && typeof json.r === 'object') {
         return { result: json.r as Record<string, unknown>, error: 'none' };
       }
@@ -496,21 +565,7 @@ type ProbeResult = 'match' | 'kumo' | null;
 async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
   try {
     const token = computeLocalToken(creds.password, creds.cryptoSerial, STATUS_READ_BODY);
-    const fetchPromise = fetch(`http://${ip}/api?m=${token}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
-      body: STATUS_READ_BODY,
-      agent: LOCAL_AGENT,
-    } as Parameters<typeof fetch>[1]);
-    fetchPromise.catch(() => undefined);
-    const res = await Promise.race([
-      fetchPromise,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-    ]);
-    if (!res) {
-      return null;
-    }
-    const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+    const json = await putSigned(ip, token, '*/*', STATUS_READ_BODY, timeoutMs);
     if (json && json.r && typeof json.r === 'object' && (json.r as Record<string, unknown>).indoorUnit) {
       return 'match';
     }

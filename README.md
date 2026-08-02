@@ -28,8 +28,7 @@ liability for damage or loss arising from it.
 
 ## Installation
 
-Requires **Node.js 20.19+, 22.12+, or 24+** (the HTTP client is ESM-only and `require()`
-of it fails on older releases) and **Homebridge 1.6.0+, including 2.x**.
+Requires **Node.js 20 or newer** and **Homebridge 1.6.0+, including 2.x**.
 
 ```bash
 npm install -g homebridge-mitsubishi-heatpump

@@ -11,10 +11,12 @@ jobs:
       # Every version reports, so one broken runtime does not hide the others.
       fail-fast: false
       matrix:
-        # 20.19 is the floor declared in package.json engines: node-fetch v3 is
-        # ESM-only and the compiled output is CommonJS, so `require()` of it
-        # throws ERR_REQUIRE_ESM on anything older.
-        node-version: ['20.19', '22', '24']
+        # The low end is the exact floor declared in package.json engines, so the
+        # claim is tested rather than asserted. It is a plain 20.0.0 now: the
+        # runtime has no dependency that has to be `require`d across the ESM
+        # boundary, so the old 20.19 / 22.12 patch floors (the releases that first
+        # carried `require(esm)`, which node-fetch v3 needed) no longer apply.
+        node-version: ['20.0', '22', '24']
     steps:
       - uses: actions/checkout@v5
 

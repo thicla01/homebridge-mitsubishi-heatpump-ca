@@ -1,4 +1,3 @@
-import fetch, { RequestInit } from 'node-fetch';
 import type { Logger } from 'homebridge';
 import { io, Socket } from 'socket.io-client';
 import {
@@ -68,6 +67,24 @@ export type SensorUpdateCallback = (reading: SensorReading) => void;
  */
 function asNumberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The message to log for a failed request, with the reason the transport buried.
+ *
+ * Undici — which is what the global `fetch` is — reports every network failure as the
+ * literal string `fetch failed` and hangs the real reason off `error.cause`. node-fetch
+ * used to inline it (`request to http://… failed, reason: connect ECONNREFUSED …`), so
+ * moving to the built-in fetch silently reduced every one of these log lines to two
+ * useless words. The cloud is the only transport with live users, so this is the line
+ * someone gets sent when the plugin stops working.
+ */
+export function describeRequestError(error: Error): string {
+  // Cast rather than raise the tsconfig target: `Error.cause` is only in the es2022 lib,
+  // and the property is present at runtime on every Node this package supports.
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const reason = cause instanceof Error ? cause.message : undefined;
+  return reason && reason !== error.message ? `${error.message}: ${reason}` : error.message;
 }
 
 export class KumoAPI {
@@ -263,7 +280,7 @@ export class KumoAPI {
       return true;
     } catch (error) {
       if (error instanceof Error) {
-        this.log.error('Login error:', error.message);
+        this.log.error('Login error:', describeRequestError(error));
         if (this.debugMode) {
           this.log.debug('Login error stack:', error.stack);
         }
@@ -406,7 +423,7 @@ export class KumoAPI {
       return true;
     } catch (error) {
       if (error instanceof Error) {
-        this.log.error('Token refresh error:', error.message);
+        this.log.error('Token refresh error:', describeRequestError(error));
         if (this.debugMode) {
           this.log.debug('Token refresh error stack:', error.stack);
         }
@@ -537,7 +554,7 @@ export class KumoAPI {
     } catch (error) {
       // Log errors without exposing sensitive details
       if (error instanceof Error) {
-        this.log.error('Request error:', error.message);
+        this.log.error('Request error:', describeRequestError(error));
         if (this.debugMode) {
           this.log.debug('Full error stack:', error.stack);
         }
@@ -616,7 +633,7 @@ export class KumoAPI {
       return zones;
     } catch (error) {
       if (error instanceof Error) {
-        this.log.error('Error fetching zones:', error.message);
+        this.log.error('Error fetching zones:', describeRequestError(error));
       } else {
         this.log.error('Error fetching zones: Unknown error occurred');
       }
