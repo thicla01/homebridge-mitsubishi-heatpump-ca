@@ -16,7 +16,7 @@ import type { KumoThermostatAccessory } from './accessory';
  * can't spuriously re-clobber a manually-adjusted target. Between source changes
  * the target is free — a manual change there persists until the next source change.
  *
- * See docs/superpowers/specs/2026-07-22-device-mirroring-design.md.
+ * See docs/mirroring-design.md.
  */
 
 const DEFAULT_DEBOUNCE_MS = 1000;

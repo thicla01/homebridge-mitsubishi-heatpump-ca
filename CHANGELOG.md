@@ -44,7 +44,7 @@ the upstream project this was forked from.
   - **Faithful + safe push:** `applyMirror` normalizes `autoHeat`/`autoCool` → `auto`, clamps setpoints to the target's own range, skips modes the target can't do, and sends **one combined atomic command** (so the 1.7.2 trailing-setpoint race can't recur) via the local-first path. Fan speed mirrored verbatim via new `Commands.fanSpeedRaw` (bypasses the coarse enum locally; folded into `fanSpeed` on cloud)
   - New `src/mirror.ts` (`MirrorController` + `signature`/`toMirrorState`); `accessory.ts` (`onStatusUpdate`/`notifyStatusListeners` source hook, `applyMirror`/`clampSetpoint`/`normalizeMirrorMode` target side); `platform.ts` (construct/teardown); `local-api.ts` + `kumo-api.ts` (`toCloudCommands`) fan passthrough; `settings.ts`; `config.schema.json`
   - `node:test`: `test/mirror-controller.test.js`, `test/mirror-apply.test.js`, `test/mirror-hook.test.js`, `test/local-fanspeed-raw.test.js`. 90 tests total green
-  - Spec: `docs/superpowers/specs/2026-07-22-device-mirroring-design.md`. See "Device Mirroring"
+  - Spec: `docs/mirroring-design.md`. See "Device Mirroring"
 - **1.7.2** - Don't let an "AC off" scene revive the unit it's turning off (July 2026)
   - Fixed: an "AC off" HomeKit **scene** could leave a unit **running (in dry)** right after it fired. A scene is a saved snapshot of each thermostat's full state, so on every trigger it re-pushes `TargetHeatingCoolingState = OFF` *and* the captured setpoints — `TargetTemperature`, and for an AUTO unit the two AUTO band handles (`HeatingThresholdTemperature`/`CoolingThresholdTemperature`). HomeKit dispatches these concurrently in an arbitrary order. A setpoint dispatched **after** the off reached the LAN adapter as a bare, mode-less write (local commands carry no `power` field — `mode` alone carries on/off, see `local-api.ts`), which powered the unit back **on** in its prior mode
   - Root cause: the 1.5.2 powered-off guard suppresses a setpoint only when the *cached* mode already reads off. During the concurrent scene burst the off command's optimistic state update hasn't landed yet, so setpoint handlers still see "on" and send a live command. With local control, that trailing bare setpoint revives the unit
@@ -158,7 +158,7 @@ the upstream project this was forked from.
   - Enhanced temperature change logging with Fahrenheit conversion
   - Improved error logging for API validation failures (always log 400 errors)
   - Discovered new API endpoints: `/config` and `/devices/{serial}/profile`
-  - Documented temperature limit constraints (see `API-EXPLORATION-FINDINGS.md`)
+  - Documented temperature limit constraints (see `docs/api-exploration.md`)
   - Code: `kumo-api.ts:284-291`, `accessory.ts:326-372`
 - **1.3.0** - Intelligent streaming health monitoring and adaptive polling (95% API call reduction)
 - **1.2.0** - Added Socket.IO streaming for real-time updates

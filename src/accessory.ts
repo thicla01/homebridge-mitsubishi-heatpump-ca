@@ -2257,7 +2257,7 @@ export class KumoThermostatAccessory {
   // Driven by the MirrorController when a source unit changes. Reconstructs a
   // single atomic command from the source's desired state, clamped to this unit's
   // own limits — one combined command, so the 1.7.2 trailing-setpoint race cannot
-  // recur. See docs/superpowers/specs/2026-07-22-device-mirroring-design.md.
+  // recur. See docs/mirroring-design.md.
 
   /** Clamp a setpoint to this unit's supported range for a mode (no-op until profile loads). */
   private clampSetpoint(value: number, mode: 'heat' | 'cool' | 'auto'): number {

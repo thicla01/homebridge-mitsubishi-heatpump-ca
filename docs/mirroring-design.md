@@ -1,8 +1,9 @@
 # Device Mirroring — Design
 
 **Date:** 2026-07-22
-**Status:** Approved (ready for implementation plan)
-**Target version:** 1.8.0
+**Status:** Implemented. Shipped in 1.8.0, carried into 2.0.0
+**Code:** `src/mirror.ts`, plus `applyMirror` / `clampSetpoint` in `src/accessory.ts`
+**User guide:** [docs/configuration.md](configuration.md#device-mirroring)
 
 ## Problem
 
