@@ -1,5 +1,7 @@
 # Homebridge Mitsubishi Heat Pump
 
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+
 HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) through the Mitsubishi
 Comfort v3 cloud API, with optional direct LAN control.
 
