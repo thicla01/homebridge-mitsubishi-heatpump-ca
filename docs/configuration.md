@@ -88,34 +88,69 @@ point a Canadian account at the v3 endpoint that answers it HTTP 500 forever, wi
 nothing in the log to say why. Case and surrounding whitespace are forgiven (`"CA"`,
 `" ca "`), and the value is normalised once, before anything reads it.
 
-Six combinations are contradictions and are rejected with the reason:
+Contradictory combinations split two ways, on whether the contradiction has exactly one
+possible resolution.
+
+**Three are absorbed with a warning**, by `reconcileImpliedConfig` (`src/platform.ts`),
+which runs *before* the validator, deletes the contradicting value, and lets the platform
+start:
+
+| Absorbed | Resolution |
+|---|---|
+| `cloudRegion: "ca"` + `localCredentialSource: "v3"` | v3 answers those accounts HTTP 500 and can never serve them, so the `"v3"` is dropped and v2 used |
+| `cloudRegion: "ca"` + `localControl: false` | The LAN is the only transport in that region, so the `false` is dropped and LAN control left on |
+| `localCredentialSource: "v2"` + `localControl: false` | The v2 source exists only to feed LAN control, so the `false` is dropped likewise |
+
+The mechanism exists because the Homebridge UI **materialises every schema `default` into
+`config.json` when the settings form is saved**, so an untouched field arrives looking
+exactly like a deliberate choice. While these three were fatal, merely opening the
+settings page of a working Canadian install and pressing Save wrote
+`localCredentialSource: "v3"` into the config and idled the platform on the next restart
+— observed on real hardware, 2026-08-19. No amount of care in the schema fully fixes
+that, because the UI is free to write whatever it likes; the runtime has to absorb it.
+The cost is that reconcile cannot tell a UI-manufactured value from one you typed — an
+explicit `"v3"` under `cloudRegion: "ca"` is overridden with the same warning. Each
+warning names the dropped value and how to silence it (delete the key in the config
+editor).
+
+**The rest stay fatal**, because more than one resolution is defensible and refusing to
+start is the safe answer:
 
 | Rejected | Why |
 |---|---|
 | `cloudRegion` other than `us`/`ca` | Nothing else names a backend |
 | `localCredentialSource` other than `v3`/`v2` | Same |
-| `cloudRegion: "ca"` + `localCredentialSource: "v3"` | v3 answers those accounts HTTP 500; it can never serve them |
-| `localOnly: true` + `localCredentialSource: "v2"` | `localOnly` promises no cloud contact of any version |
-| `cloudRegion: "ca"` + `localControl: false` | The LAN is the only transport in that region |
-| `localCredentialSource: "v2"` + `localControl: false` | Fetching secrets that will never be used is a pointless exposure |
+| `localOnly: true` + `localCredentialSource: "v2"` | `localOnly` promises no cloud contact of any version. You either want no cloud (drop the v2 source) or want the secrets fetched (drop `localOnly`), and guessing wrong either exposes credentials or silently controls nothing |
 
-Only an **explicit** value contradicts. `cloudRegion: "ca"` *implies* the v2 credential
-source and local control, and an implication never collides with the default it is
-derived from — so a Canadian config is `username`, `password` and `cloudRegion`, and
-nothing else. Two combinations are accepted with a **warning** instead, because an
-inert option cannot misbehave: `cloudRegion` alongside `localOnly` (no cloud of any
-version is contacted, so it does nothing), and a non-empty `localDevices` without
+`cloudRegion: "ca"` *implies* the v2 credential source and local control when the keys
+are simply **absent** — so the intended Canadian config is `username`, `password` and
+`cloudRegion`, and nothing else. That absence is load-bearing for
+`localCredentialSource`: an absent key means "whatever the region implies", and only a
+written value can collide with it. This is why `config.schema.json` no longer declares
+a `default` for `localCredentialSource` — the behaviour is unchanged (v3 is still the
+default, applied at runtime), but the UI has nothing to materialise into a spurious
+explicit `"v3"`. The per-unit capability fields under `localDevices` lost their schema
+defaults for the same reason; their runtime defaults are in the
+[local-only table](#local-only-mode) below.
+
+Two combinations are accepted with a **warning** without any value being touched,
+because an inert option cannot misbehave: `cloudRegion` alongside `localOnly` (no cloud
+of any version is contacted, so it does nothing), and a non-empty `localDevices` without
 `localOnly` (only read in that mode).
 
-When one of those fails, the platform logs a single error naming the problem and then
+When a fatal check fails, the platform logs a single error naming the problem and then
 **stays idle** — it registers no accessories and starts no timers. Homebridge itself keeps
 running and your other plugins are untouched. Fix the value in the Homebridge UI and
 restart; nothing else needs cleaning up.
 
-The minimum and maximum values on `degradedPollInterval`, `streamingHealthCheckInterval`
-and `localPollInterval` live in `config.schema.json` only. The Homebridge UI form enforces
-them; nothing clamps at runtime, so a value written straight into `config.json` is used
-as-is.
+The minimum and maximum values on `degradedPollInterval` and
+`streamingHealthCheckInterval` live in `config.schema.json` only. The Homebridge UI form
+enforces them; nothing clamps at runtime, so a value written straight into `config.json`
+is used as-is. `localPollInterval` is the exception: its floor of 5 is enforced at
+runtime by `validatePlatformConfig` (only its maximum of 120 is schema-only), because
+local-only configs are routinely hand-edited — the form cannot express `localDevices`'
+secrets — and a negative value would reach `setInterval`, which Node clamps to 1 ms:
+the local poller would then hammer the adapter without pause.
 
 ### UI coverage
 

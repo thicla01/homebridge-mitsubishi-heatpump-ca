@@ -8,8 +8,16 @@ problem.
 ## Reporting
 
 Please open a GitHub issue for anything that is already public (a crash, a log
-leak you can see). For a genuine vulnerability that is not yet public, contact the
-maintainer privately rather than filing a public issue.
+leak you can see). For a genuine vulnerability that is not yet public, use
+GitHub's private vulnerability reporting for this repository rather than filing a
+public issue:
+
+    https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/security/advisories/new
+
+That form works only while private vulnerability reporting is enabled in the
+repository's settings. If it is not accepting reports, open a public issue saying
+only that you have a security report — no details — and a private channel will be
+arranged.
 
 ## What this plugin trusts
 
@@ -21,17 +29,25 @@ maintainer privately rather than filing a public issue.
 - **Homebridge's storage.** `config.json` holds your cloud password in clear text,
   as every Homebridge plugin's config does. `localDevices` secrets, if you declare
   them, are stored the same way. Protect the Homebridge host accordingly.
-- **The cloud vendor.** One sign-in per startup goes to Kumo's servers
-  (`mesca-prod.kumocloud.com` for Canadian accounts, `app-prod.kumocloud.com` for
-  US). A compromise of those servers, or of DNS for them, is outside what this
-  plugin can defend against — though it does refuse redirects, so a single
-  redirect cannot silently divert your credentials elsewhere (see below).
+- **The cloud vendor.** Your credentials go to Kumo's servers. On a `"ca"`
+  install that is one sign-in per startup, to `mesca-prod.kumocloud.com`. On a US
+  install it is `app-prod.kumocloud.com` at startup and again on every re-login —
+  the v3 client re-sends the account credentials whenever a token refresh fails,
+  paced by a 10-second minimum between login attempts. A compromise of those
+  servers, or of DNS for them, is outside what this plugin can defend against —
+  though it does refuse redirects, so a single redirect cannot silently divert
+  your credentials elsewhere (see below).
 
 ## What it defends
 
-- **Credential requests never follow redirects** (`redirect: 'error'` on every
-  cloud call). A 307/308 cannot re-send your password, refresh token or bearer
-  header to a host you never named.
+- **Credential requests never follow redirects** (`redirect: 'error'` on all
+  five HTTP calls that carry a credential or token: the v3 login, refresh,
+  authenticated request — shared by its 401 retry — and status-GET paths, and the
+  v2 sign-in). A 307/308 cannot re-send your password, refresh token or bearer
+  header to a host you never named. One transport sits outside this policy: on a
+  US install the Socket.IO streaming connection also sends the bearer token, and
+  it is not a fetch, so a redirect option cannot cover it. A `"ca"` install has
+  no such exposure — the kill switch never opens the streaming connection.
 - **Secrets are kept out of logs.** Payloads and error bodies are redacted before
   logging; the LAN token, the cloud password and the cryptoSerial do not appear at
   any log level, debug included. This is pinned by tests and was verified on real

@@ -10,6 +10,13 @@ same dead ends do not get explored twice.
 
 ## REST
 
+Everything in this section and in [Socket.IO](#socketio) is the **v3** cloud, and under
+`cloudRegion: "ca"` or `localOnly` none of it is contacted at all — no login, no polling,
+no streaming, no per-command fallback; a `cloudDisabled` kill switch guards every call
+path (`src/kumo-api.ts`). A `ca` install's only cloud contact is the one v2 login POST
+([REST, v2](#rest-v2)); a `localOnly` install contacts no cloud whatsoever. Both then
+live entirely on the [local LAN](#local-lan).
+
 Base `https://app-prod.kumocloud.com/v3` (`API_BASE_URL`, `src/settings.ts:7`). Requests
 carry `Authorization: Bearer <token>` and `X-App-Version` (`APP_VERSION`, currently
 `3.2.4`). Access tokens live 20 minutes and are refreshed 5 minutes early.
@@ -62,7 +69,9 @@ them.
 ## Socket.IO
 
 `https://socket-prod.kumocloud.com` (`SOCKET_BASE_URL`), upgraded to `wss://` by
-socket.io. Streaming is the primary update path; cloud polling is the fallback.
+socket.io. Streaming is the primary update path; cloud polling is the fallback. That
+sentence describes a US v3 install: under `cloudRegion: "ca"` and `localOnly` the socket
+is never opened (see the caveat at [REST](#rest)).
 
 **Emitted:**
 
@@ -73,8 +82,11 @@ socket.io. Streaming is the primary update path; cloud polling is the fallback.
 | `force_adapter_request(serial, 'iuStatus' \| 'profile' \| 'adapterStatus')` | On first connect, pull current state rather than waiting for a push |
 | `device_status_v2('')` and `device_status_v2(serial)` | Request connection status |
 
-`force_adapter_request` and `device_status_v2` are sent on the initial connection only,
-not on routine reconnects.
+`device_status_v2` is sent on the initial connection only, not on routine reconnects.
+`force_adapter_request` mostly is too, with one exception: while gathering local
+credentials the platform re-emits `force_adapter_request(serial, 'adapterStatus')` for
+each unit still missing its password, on a ~2 s loop until it arrives or the wait times
+out (`gatherLocalCreds`, `src/platform.ts`; `requestAdapterStatus`, `src/kumo-api.ts`).
 
 **Received:**
 
@@ -156,9 +168,13 @@ roomTempDisplayOffset }`, and formerly `password`. **Strip before logging.**
 `PUT http://<unit-ip>/api?m=<token>`. Reads and writes are both PUTs — a status read sends
 empty leaf objects and the adapter fills them in.
 
-The token is a port of pykumo's `_token()`: two SHA-256 passes over an 88-byte buffer
-assembled from a fixed 32-byte constant, `sha256(password ‖ body)`, and the first 4 bytes
-of `cryptoSerial` (`src/local-api.ts:101-124`).
+The token is a port of pykumo's `_token()`: two SHA-256s — `sha256(password ‖ body)`
+first, then SHA-256 over an 88-byte buffer laid out as `W_PARAM` (a fixed 32-byte
+constant) at `[0:32)`, that inner hash at `[32:64)`, the constant `0x0840` at `[64:66)`,
+`S_PARAM = 0` at `[66]` with `[67:79)` zero, and the cryptoSerial in shuffled order —
+byte `[8]` at `[79]`, bytes `[4:8)` at `[80:84)`, bytes `[0:4)` at `[84:88)`
+(`computeLocalToken`, `src/local-api.ts:232-252`). Note the token signs the request
+**body** — that detail matters below.
 
 Both halves of the key come from the cloud — `password` from `adapter_update`,
 `cryptoSerial` from `GET /devices/{serial}/status` — and **the v3 cloud stopped serving both
@@ -167,6 +183,86 @@ around 2026-07-31**. See [README → Local LAN control](../README.md#local-lan-c
 Both are per-unit and stable, so they can come from elsewhere: the **v2 cloud** below
 serves them still (`localCredentialSource: "v2"`, or implied by `cloudRegion: "ca"`), and
 `localOnly` reads them from `localDevices` in the config and skips every cloud entirely.
+
+### Wire format
+
+The body shape is `{"c":{"indoorUnit":{"status":{...}}}}` for reads and writes alike;
+the reply echoes the populated tree under `"r"`. The field vocabulary is not the
+cloud's (`buildLocalCommandBody` / `mapLocalStatus`, `src/local-api.ts`):
+
+| Cloud (v3) | Local | Notes |
+|---|---|---|
+| `operationMode` | `mode` | Same strings: `off` / `heat` / `cool` / `auto` / `vent` / `dry` |
+| `airDirection` | `vaneDir` | Same vocabulary |
+| `power` | — | **No local `power` field.** `mode: "off"` is off; any active mode is on |
+| `fanSpeed` | `fanSpeed` | Same vocabulary |
+| `displayConfig.filter` / `.defrost` / `.standby` | `filterDirty` / `defrost` / `standby` | Straight from the status |
+| `humidity` | — | Not in `indoorUnit.status` at all — see the sensor leaves below |
+
+Two more leaves are read, because humidity and a paired sensor's finer temperature
+live outside `indoorUnit.status`:
+
+| Body | Returns |
+|---|---|
+| `{"c":{"sensors":{"<i>":{}}}}` | Paired wireless sensor slot `i` (0–3): `uuid`, `temperature` (~6 decimals, against the unit's 0.5 °C-quantized `roomTemp`), `humidity`. Slots are consecutive — the first slot with no `uuid` ends the list |
+| `{"c":{"mhk2":{"status":{}}}}` | An MHK2 wall thermostat; `indoorHumid` is the only field read |
+
+They are queried only while the unit reports a `tempSource`/`activeThermistor` of
+`sensorN`; a unit that yields neither is latched and not asked again until its
+temperature source changes (`getSensorReadings`, `src/local-api.ts`).
+
+### `_api_error`
+
+The adapter answers HTTP 200 to everything it parses, its own errors included, so the
+body is the only signal there is. A reply without `"r"` carries `_api_error`
+(vocabulary from pykumo; `classifyApiError`, `src/local-api.ts`):
+
+| Code | Meaning |
+|---|---|
+| `device_authentication_error` | The token did not verify. **Not proof of a wrong credential** — see below |
+| `serializer_error`, `__no_memory` | "Not right now." Transient; says nothing about identity or credentials |
+
+Observed live 2026-08-19, twice in one day: an adapter with provably correct
+credentials (the token is a pure function of them and the body) rejected exactly one
+poll out of ~30 and then kept working. The token signs the request **body**, so an
+adapter that reads a truncated body computes a different digest and can only report it
+as a signature failure — an authentication error. The likely trigger is contention:
+the adapter holds roughly one connection, and the Kumo phone app is a second client
+that owes us no turn-taking. A single `device_authentication_error` is therefore not
+evidence of a wrong password.
+
+### Client behaviour
+
+- **Per-device mutex, keep-alive off.** Requests are serialized per unit — the adapter
+  tolerates ~one concurrent local connection (pykumo locks for this reason; the HA
+  library dropped the lock, which is not repeated here). Keep-alive stays off because a
+  parked socket occupies a slot in the adapter's tiny connection table; both reference
+  implementations tear the connection down after every exchange.
+- **Retry once.** A transport failure is retried once on a fresh socket — the adapter
+  closes idle connections and the next write on one fails. An auth rejection is also
+  retried once, after a 250 ms pause (long enough for a competing client to finish its
+  exchange). Retrying is safe because every command is an idempotent absolute-value
+  write, never a delta.
+- **Warning after 3 consecutive rejected requests.** Counted per request, not per
+  attempt — a retried request that fails twice is one piece of evidence. Any success
+  resets the streak and re-arms the warning. A genuinely wrong credential still
+  surfaces within a minute at the default 15 s poll; an isolated blip stays at debug.
+- **64 KB reply cap**, aborted mid-stream. A real adapter answers ~1–2 KB; an
+  unauthenticated LAN peer answering an unbounded body would otherwise grow the buffer
+  without limit.
+
+### Discovery
+
+The cloud provides neither the unit's IP nor its MAC, so each unit is identified by
+which adapter authenticates its token: the plugin enumerates the host's /24 and sends
+every candidate IP a signed status read per unit — which puts a signed PUT on every
+LAN host. `r.indoorUnit` in the reply is a match; `device_authentication_error` is a
+Kumo adapter that is a different unit, so the sweep tries the account's other serials
+at that IP; busy or unreachable proves nothing and leaves the IP eligible to be probed
+again. The sweep runs **once, at
+startup** — a unit powered off or on another subnet is missed until the next restart —
+and a serial pinned in `localControlIps` skips it entirely (`discoverDeviceIps` /
+`probeIpForSerial`, `src/local-api.ts`).
 
 ## REST, v2
 
@@ -187,12 +283,13 @@ which is why the option is a named region rather than a hostname. The body is
 the v3 backend knows and does not serve. `mesca-prod` resolves to an ELB named
 `mesca-kumo-green-west-arm-app` (mesca = Mitsubishi Electric Sales Canada).
 
-The reply is an **array**, and only `root[2]` is read (`src/kumo-v2.ts`):
+The reply is an **array**; `root[2]` is the payload, plus one boolean from `root[1]`
+(`parseV2Login`, `src/kumo-v2.ts`):
 
 | Element | Contents | Read? |
 |---|---|---|
 | `root[0]` | `{ token, username, device, emailIsVerified }` — a 32-char session token, not a JWT | No |
-| `root[1]` | Display preferences (`celsius`, `filterReminder`) | No |
+| `root[1]` | Display preferences (`celsius`, `filterReminder`) | Only `celsius`, to seed HomeKit's `TemperatureDisplayUnits` (otherwise Fahrenheit for want of any source). Read defensively — a host that omits the element leaves it undefined — and nothing else in the element is retained |
 | `root[2]` | The site tree. Each node may carry `zoneTable` (keyed by device serial) and `children` | **Yes** |
 | `root[3]` | Absent on mesca; the string `"no device token"` on geo-c | No |
 | `root[4]` | `userDetails` (name, phone, email) and `siteDetails` (postal addresses) | No |
@@ -216,8 +313,9 @@ Station, not a thermostat), plus three blocks:
   `status_display.filter`, `seconds_since_contact`) with a `more` block giving the
   human-readable label for each numeric field. It is often **completely empty**
   (`{_created, more: {}}`). Modes are numeric: `2` = dry is proven by
-  `more.operation_mode_text: "Dehumidify"`; `1`/`3`/`7`/`8` fit the Mitsubishi CN105 mode
-  byte but were not observed, and nothing else is guessed.
+  `more.operation_mode_text: "Dehumidify"`; `8` = auto came from the live mapping
+  session; `1`/`3`/`7` (heat/cool/vent) are corroborated by the Mitsubishi CN105 mode
+  byte that 2 and 8 fit, but were not observed, and nothing else is guessed.
 - `overrideSettings` — `{ heatMode, dryMode }`, apparently the cloud's counterpart of the
   local `userHasModeHeat`/`userHasModeDry`. `{}` in the pykumo samples, so only an
   explicit `false` is honoured.
