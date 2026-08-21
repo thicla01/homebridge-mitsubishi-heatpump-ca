@@ -1,0 +1,28 @@
+# Dependabot version updates. The alerts and security-update halves are repository
+# settings, not this file — this covers the routine keep-current PRs.
+#
+# Sized for a one-maintainer fork: weekly, grouped, capped. Every PR runs the test
+# workflow (512 tests), which is the real gate — but note two updates that deserve
+# HUMAN attention beyond green tests:
+#   - socket.io-client: the only production dependency. It carries the v3 streaming
+#     transport, which a cloudRegion "ca" install never exercises — so the test
+#     suite AND a Canadian deployment can both be green while a US install breaks.
+#   - homebridge (devDependency): type-level only here, but a major bump usually
+#     tracks a HAP behaviour change worth reading the release notes for.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
