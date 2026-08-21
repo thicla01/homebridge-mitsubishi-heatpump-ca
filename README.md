@@ -1,9 +1,13 @@
 # Homebridge Mitsubishi Heat Pump — Canada
 
-HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) on **Canadian accounts**,
-which the Mitsubishi Comfort v3 cloud API cannot serve at all. Signs in once to the v2
-cloud for the unit inventory and the per-unit LAN secrets, then controls everything over
-your own network.
+HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) on **Canadian accounts**.
+
+Mitsubishi is in the middle of moving customers from the *kumo cloud* app to the
+*Comfort* app, and the two speak different cloud APIs — kumo cloud is v2, Comfort is v3.
+The rollout is regional, and **Canada has not migrated yet**: Canadian accounts are still
+on the v2 cloud, so the v3 API that this plugin's upstream targets cannot serve them at
+all. This fork signs in once to the Canadian v2 cloud for the unit inventory and the
+per-unit LAN secrets, then controls everything over your own network.
 
 US accounts keep working exactly as upstream: the v3 cloud, with optional LAN control.
 
@@ -14,12 +18,11 @@ Not affiliated with, endorsed by, or associated with Mitsubishi Electric. **Use 
 own risk** — this drives real heating and cooling equipment, and the author assumes no
 liability for damage or loss arising from it.
 
-> **This is a fork.** It adds support for Canadian accounts, which the v3 cloud API does
-> not serve at all: Canada has not been migrated from the *kumo cloud* app (v2) to the
-> *Comfort* app (v3), so its accounts live at `mesca-prod.kumocloud.com` over v2.
-> See [Canadian accounts](#canadian-accounts). With `cloudRegion: "ca"` the plugin signs in there once at startup
-> for the unit inventory, the real capability profile and the per-unit LAN secrets,
-> then controls everything over your LAN and never contacts v3 at all.
+> **This is a fork.** With `cloudRegion: "ca"` the plugin signs in once at startup to
+> `mesca-prod.kumocloud.com` — where Canadian accounts live until the migration reaches
+> them — for the unit inventory, the real capability profile and the per-unit LAN
+> secrets, then controls everything over your LAN and never contacts v3 at all.
+> See [Canadian accounts](#canadian-accounts) for the full picture.
 >
 > Upstream is [ukaratay/homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump),
 > forked at v2.2.1. Files have been modified; see `NOTICE` for the statement of changes
