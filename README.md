@@ -1,9 +1,11 @@
-# Homebridge Mitsubishi Heat Pump
+# Homebridge Mitsubishi Heat Pump — Canada
 
-[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) on **Canadian accounts**,
+which the Mitsubishi Comfort v3 cloud API cannot serve at all. Signs in once to the v2
+cloud for the unit inventory and the per-unit LAN secrets, then controls everything over
+your own network.
 
-HomeKit control for Mitsubishi ductless heat pumps (MLZ / MSZ) through the Mitsubishi
-Comfort v3 cloud API, with optional direct LAN control.
+US accounts keep working exactly as upstream: the v3 cloud, with optional LAN control.
 
 Each unit is a **HeaterCooler** with its fan on a linked Fan service: power, mode,
 setpoints, fan speed and vane swing all on one tile.
@@ -45,26 +47,44 @@ liability for damage or loss arising from it.
 
 Requires **Node.js 20 or newer** and **Homebridge 1.6.0+, including 2.x**.
 
-```bash
-npm install -g homebridge-mitsubishi-heatpump
-```
-
-From source:
+**This fork is not published to npm.** Build it from source — `dist/` is not committed,
+so a build step is required either way.
 
 ```bash
 git clone https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca.git
-cd homebridge-mitsubishi-heatpump
+cd homebridge-mitsubishi-heatpump-ca
 npm install && npm run build && npm link
 ```
+
+To install onto a separate Homebridge host, build a tarball and install that:
+
+```bash
+npm pack
+```
+
+Copy the resulting `.tgz` to the host and install it from the Homebridge storage
+directory. On the official Raspberry Pi image the bundled Node is not on `PATH`, so the
+install has to name it explicitly:
+
+```bash
+sudo env PATH=/opt/homebridge/bin:/usr/bin:/bin /opt/homebridge/bin/npm install ./homebridge-mitsubishi-heatpump-ca-<version>.tgz
+```
+
+Changing plugin **code** needs only a child-bridge restart; changing plugin **config**
+needs a full Homebridge restart, because a child bridge receives its configuration from
+the parent process.
 
 Then add your credentials — see **[Configuration](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/docs/configuration.md)** for the
 minimal config and every option.
 
 ## Migrating from homebridge-mitsubishi-comfort
 
-This is a hard fork of
+This repository forks
+[ukaratay/homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump),
+which is itself a hard fork of
 [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort)
-at v1.8.2. It keeps the config `platform` key `KumoV3` and still derives accessory UUIDs
+at v1.8.2. Migrating from either one is the same: it keeps the config `platform` key
+`KumoV3` and still derives accessory UUIDs
 from the device serial, so **your existing `config.json` works unchanged and your
 accessories keep their identity**.
 
