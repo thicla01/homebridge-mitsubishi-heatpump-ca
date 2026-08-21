@@ -20,6 +20,30 @@ updates:
       dev-dependencies:
         dependency-type: development
         update-types: ["minor", "patch"]
+    # Two majors are pinned deliberately. Ignoring only the major keeps the minor
+    # and patch bumps coming, which is where the security value is anyway. Revisit
+    # by removing the entry — do not let a permanently red weekly PR train you to
+    # stop reading CI.
+    ignore:
+      # TypeScript 7 REMOVES moduleResolution "node10", the option that lets this
+      # CommonJS plugin import the ESM-only `homebridge` package at all. Verified
+      # 2026-08-21 in an isolated clone: tsc refuses to start, and setting
+      # module/moduleResolution to node16 instead surfaces 7 TS1479/TS1541 errors
+      # across src/ — every import of `homebridge` becomes illegal from CJS. So a
+      # TS7 bump is not a toolchain update, it is an ESM migration of the plugin
+      # (add "type": "module", revisit import extensions, re-verify on real
+      # hardware). TypeScript 5.9 compiles the tree cleanly; there is no upside
+      # today. Take this on deliberately, not as a routine merge.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # @types/node is pinned to ^24 on purpose — it matches the Node the target
+      # Homebridge hosts actually run, which is how upstream caught a characteristic
+      # that compiled against the wrong toolchain and only failed at runtime
+      # (9e799e4). Bumping past 24 moves the definitions AWAY from that runtime for
+      # no gain. The floor `engines` promises (>=20) is checked by hand instead; the
+      # procedure and its last result are in CONTRIBUTING.md.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
