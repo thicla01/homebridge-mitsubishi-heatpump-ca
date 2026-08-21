@@ -26,6 +26,7 @@ import {
   computeLocalToken,
   discoverDeviceIps,
   buildLocalCommandBody,
+  isLocalHost,
   STATUS_READ_BODY,
 } from '../dist/local-api.js';
 import { makeLog } from './helpers';
@@ -746,5 +747,65 @@ test('one adapter is never given two connections at once', async () => {
       socket.destroy();
     }
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+// ---- security hardening: address validation --------------------------------
+// Both the v2 cloud reply (zone.address) and config.json (localControlIps) are
+// attacker-influenceable and flow unescaped into http://${ip}/api?m=${token}. A
+// value that is not an IPv4[:port] would aim a signed, real-token request at a host
+// the user never named.
+
+test('isLocalHost accepts an IPv4, with or without a port, and nothing else', () => {
+  assert.ok(isLocalHost('192.168.6.11'), 'bare dotted quad');
+  assert.ok(isLocalHost('127.0.0.1:54321'), 'the shape the test harness uses');
+  assert.ok(isLocalHost('10.0.0.5:80'));
+
+  assert.ok(!isLocalHost('evil.com'), 'a hostname is not an IP');
+  assert.ok(!isLocalHost('evil.com:80'));
+  assert.ok(!isLocalHost('192.168.6.11/../../x'), 'no path smuggling');
+  assert.ok(!isLocalHost('192.168.6.11:notaport'));
+  assert.ok(!isLocalHost('192.168.6.11:99999'), 'port out of range');
+  assert.ok(!isLocalHost(''), 'empty');
+  assert.ok(!isLocalHost('::1'), 'IPv6 is out of scope for the adapter');
+});
+
+test('setCreds drops a non-IPv4 address instead of storing it', () => {
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...a: unknown[]) => warns.push(a.join(' ')) };
+  const client = new LocalKumoClient(log as never, 2000);
+
+  client.setCreds(SERIAL, { ip: 'evil.com/api', password: PW, cryptoSerial: CS });
+
+  assert.strictEqual(client.hasLocal(SERIAL), false, 'the bad address was not stored');
+  assert.strictEqual(warns.length, 1, 'and it was named');
+  assert.match(warns[0], new RegExp(SERIAL));
+  assert.match(warns[0], /evil\.com/, 'the offending string is shown');
+});
+
+test('setCreds keeps a valid address', () => {
+  const client = new LocalKumoClient(makeLog() as never, 2000);
+  client.setCreds(SERIAL, { ip: '192.168.6.11', password: PW, cryptoSerial: CS });
+  assert.strictEqual(client.hasLocal(SERIAL), true);
+});
+
+// ---- security hardening: response size cap ---------------------------------
+// An unauthenticated LAN peer that answers an unbounded body would otherwise grow
+// the accumulator without limit (and eventually throw on += inside the poll timer).
+
+test('a local reply larger than the cap is refused, not buffered without limit', async () => {
+  // ~256KB, well past the 64KB cap and any real adapter's ~1-2KB.
+  const huge = '{"r":{"indoorUnit":{"status":{"pad":"' + 'x'.repeat(256 * 1024) + '"}}}}';
+  const adapter = await startAdapter(json(JSON.parse(huge)));
+  try {
+    const out = await withDeadline(
+      makeClient(adapter.ip).requestDetailed(SERIAL, STATUS_READ_BODY),
+      4000, 'oversized reply',
+    );
+    // The point is that it terminates rather than OOMing: the destroyed request
+    // surfaces as a transport failure, not a parsed giant object.
+    assert.notStrictEqual(out.error, 'none', 'an oversized reply is not accepted as success');
+  } finally {
+    await adapter.close();
   }
 });

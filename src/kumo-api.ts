@@ -325,6 +325,9 @@ export class KumoAPI {
       this.log.debug('Attempting to login to Kumo Cloud API');
 
       const response = await fetch(`${API_BASE_URL}/login`, {
+        // A redirect would re-send the account password to a host the user never
+        // named — matching the guard in kumo-v2.ts.
+        redirect: 'error',
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -494,6 +497,8 @@ export class KumoAPI {
       }
 
       const response = await fetch(`${API_BASE_URL}/refresh`, {
+        // A redirect would re-send the refresh token to a host the user never named.
+        redirect: 'error',
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -632,6 +637,9 @@ export class KumoAPI {
 
     try {
       const options: RequestInit = {
+        // Shared by the 401-retry below, so both inherit it. A redirect would re-send
+        // the bearer token, and any body, to a host the user never named.
+        redirect: 'error',
         method,
         headers: this.getAuthHeaders(),
       };
@@ -746,6 +754,7 @@ export class KumoAPI {
 
       const startTime = Date.now();
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        redirect: 'error',
         headers: this.getAuthHeaders(),
       });
       const duration = Date.now() - startTime;

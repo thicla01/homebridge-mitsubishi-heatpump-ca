@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { Agent, request as httpRequest } from 'http';
+import { isIP } from 'net';
 import { Logger } from 'homebridge';
 import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
 
@@ -59,6 +60,9 @@ const LOCAL_AGENT = new Agent({ keepAlive: false, maxSockets: 1 });
  */
 const AUTH_RETRY_PAUSE_MS = 250;
 
+/** Hard cap on a local HTTP reply. A real adapter answers ~1-2KB. */
+const MAX_LOCAL_RESPONSE_BYTES = 65536;
+
 /**
  * One signed PUT to an adapter, resolving its parsed JSON reply.
  *
@@ -91,6 +95,31 @@ const AUTH_RETRY_PAUSE_MS = 250;
  * The adapter answers 200 to everything it parses, its own `_api_error` replies
  * included, so the body is the only signal there is.
  */
+/**
+ * Accept a bare IPv4, or an IPv4 with an explicit port, and reject everything else.
+ *
+ * Both intake sources are attacker-influenceable: a hostile or malformed v2 cloud
+ * reply supplies `zone.address`, and config.json supplies localControlIps. Either
+ * one flows unescaped into `http://${ip}/api?m=${token}` in putSigned. A value like
+ * "evil.com" or "10.0.0.5/../../x" would turn a signed request — carrying the real
+ * per-unit token — into an SSRF against a host the user never named. Discovery-swept
+ * addresses are dotted quads by construction, so nothing legitimate is rejected; the
+ * optional :port is what the test harness uses (127.0.0.1:<ephemeral>).
+ *
+ * IPv4 only: the discovery sweep enumerates an IPv4 /24 and the adapter speaks IPv4.
+ */
+export function isLocalHost(host: string): boolean {
+  const at = host.lastIndexOf(':');
+  const addr = at === -1 ? host : host.slice(0, at);
+  if (at !== -1) {
+    const port = host.slice(at + 1);
+    if (!/^[0-9]{1,5}$/.test(port) || Number(port) > 65535) {
+      return false;
+    }
+  }
+  return isIP(addr) === 4;
+}
+
 function putSigned(
   ip: string,
   token: string,
@@ -124,6 +153,12 @@ function putSigned(
         let text = '';
         res.on('data', (chunk: string) => {
           text += chunk;
+          // A real adapter answers 1-2KB; 64KB is generous. An unauthenticated LAN
+          // peer answering an unbounded body would otherwise grow this string
+          // without limit (and eventually throw on +=, unhandled, inside the poll).
+          if (text.length > MAX_LOCAL_RESPONSE_BYTES) {
+            req.destroy(new Error('response too large'));
+          }
         });
         res.on('error', reject);
         res.on('end', () => {
@@ -341,6 +376,20 @@ export class LocalKumoClient {
   ) {}
 
   setCreds(serial: string, creds: LocalDeviceCreds): void {
+    // Single choke point for the three intakes (localDevices, the v2 cloud address,
+    // and manual localControlIps). An address that is not an IPv4[:port] never
+    // becomes a request URL: drop it, name it, and leave the unit to the LAN sweep
+    // or the unreachable report rather than firing a signed PUT at an arbitrary host.
+    if (!isLocalHost(creds.ip)) {
+      this.log.warn(
+        `[LOCAL] ${serial}: ignoring address "${creds.ip}" — not an IPv4 address. `
+        + 'The unit will be looked for on the LAN instead.',
+      );
+      this.creds.delete(serial);
+      this.authWarned.delete(serial);
+      this.authFailStreak.delete(serial);
+      return;
+    }
     this.creds.set(serial, creds);
     this.authWarned.delete(serial);
     this.authFailStreak.delete(serial);
