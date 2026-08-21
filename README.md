@@ -12,6 +12,16 @@ Not affiliated with, endorsed by, or associated with Mitsubishi Electric. **Use 
 own risk** — this drives real heating and cooling equipment, and the author assumes no
 liability for damage or loss arising from it.
 
+> **This is a fork.** It adds support for Canadian accounts, which the v3 cloud API
+> cannot serve — they are served by `mesca-prod.kumocloud.com` over the older v2
+> protocol instead. With `cloudRegion: "ca"` the plugin signs in there once at startup
+> for the unit inventory, the real capability profile and the per-unit LAN secrets,
+> then controls everything over your LAN and never contacts v3 at all.
+>
+> Upstream is [ukaratay/homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump),
+> forked at v2.2.1. Files have been modified; see `NOTICE` for the statement of changes
+> required by Apache-2.0 section 4(b), and `CHANGELOG.md` for the full list.
+
 ## Features
 
 - **One tile per unit.** On/off, Heat / Cool / Auto, and the setpoint for the active
@@ -26,7 +36,10 @@ liability for damage or loss arising from it.
 - **Real-time streaming** over Socket.IO, with adaptive polling that starts only when
   streaming fails.
 - **Device mirroring** (opt-in) — make one unit follow another.
-- **Local LAN control** (opt-in) — currently blocked by a vendor change, see below.
+- **Local LAN control** (opt-in) — the v3 cloud no longer serves the two per-unit secrets
+  it needs, so the plugin can fetch them from the older **v2 cloud** instead, which also
+  serves the **Canadian accounts** v3 rejects outright. A **local-only mode** works from
+  credentials you supply, with no cloud contact at all. See below.
 
 ## Installation
 
@@ -128,26 +141,159 @@ HomeKit to collide with.
 
 ## Local LAN control
 
-**`localControl` does not work at present, and not because of anything in this plugin.**
+**With the default settings `localControl` cannot work, and not because of anything in
+this plugin.**
 
 Authenticating to a unit's WiFi adapter needs two per-device secrets that only the vendor
 cloud hands out: the adapter `password` (from the `adapter_update` socket event) and
 `cryptoSerial` (from `GET /devices/{serial}/status`). Around **2026-07-31 the Comfort v3
 API stopped serving both**, on unrelated accounts and on a second client stack
 ([pykumo #78](https://github.com/dlarrick/pykumo/issues/78), reproduced by its
-maintainer). This plugin talks to v3, so it has no way to compute a local token.
+maintainer). This plugin talks to v3, so with `localCredentialSource: "v3"` it has no way
+to compute a local token, retries for about an hour, logs one warning, and runs everything
+over the cloud.
 
-There is reportedly one other source. The **legacy v2 login** — the older `geo-c` endpoint
-that pykumo and Home Assistant use — still returned both fields over plain REST when
-[upstream tested it on 2026-07-28](https://github.com/burtherman/homebridge-mitsubishi-comfort),
-three days before the v3 change. Whether it still does is untested here, and upstream notes
-its copy of the credentials can be stale enough that the adapter rejects them. This plugin
-does not use it today.
+### Getting the secrets from the v2 cloud
 
-You do not need to do anything. The plugin retries for about an hour, logs one warning,
-and runs everything over the cloud. Nothing is written to your config, so if the fields
-come back local control resumes on its own at the next restart. Leaving `localControl:
-true` costs nothing; set it to `false` to silence the warning.
+The **older v2 login** still serves both fields, which is the fallback Home Assistant's
+`mitsubishi_comfort` integration adopted in v0.5.2. Set:
+
+```json
+{ "localCredentialSource": "v2" }
+```
+
+The plugin signs in once at startup to `https://geo-c.kumocloud.com/login`, reads the two
+secrets per unit, and uses them for LAN control (which this implies — you do not also need
+`localControl`). Nothing is written back to `config.json`, no secret is cached to disk, and
+none of it is ever logged, `debug` included. A rejected sign-in is reported once and not
+retried, so a wrong password cannot be re-posted in a loop.
+
+### Canadian accounts
+
+`POST /v3/login` answers **HTTP 500** for accounts served by Mitsubishi Electric Sales
+Canada, so the v3 API cannot be used for them at all. One line handles it:
+
+```json
+{ "cloudRegion": "ca" }
+```
+
+That signs in to `https://mesca-prod.kumocloud.com/login/v2` instead, which supplies the
+unit list, each unit's room name, its **real capability profile** and the two LAN secrets —
+and the v3 API is then contacted on no path at all. Control runs entirely over your LAN, so
+every unit needs to be reachable there (give each a DHCP reservation, or pin it with
+`localControlIps`). Nothing is declared by hand.
+
+The real profile is the practical difference from the local-only mode below: it reports
+per-mode setpoint floors, so a unit that can hold **10 °C** for heating is published as
+such rather than flattened to its 16 °C cooling floor — and HomeKit rejects a write below
+the published minimum rather than clamping it, so that band is otherwise unaskable.
+
+**[docs/configuration.md → Canadian accounts](docs/configuration.md#canadian-accounts-cloudregion-ca)**
+has the full account, including what the mode gives up (streaming, "not responding"
+detection, sensor battery).
+
+### Local-only mode
+
+`localOnly` runs **entirely on your LAN**: no sign-in of any version, no site or zone
+fetch, no streaming, and — unlike `localControl` — no per-unit cloud fallback. Every unit
+is declared in config, secrets included.
+
+**Try `cloudRegion` / `localCredentialSource` above first.** They fetch the same secrets
+for you, add the real device profile, and keep nothing sensitive in `config.json`. This
+mode is for running with no cloud contact whatsoever — an isolated VLAN, a deliberately
+offline install, or an account no endpoint serves — and for anyone who already holds the
+two secrets.
+
+The situations it was built for:
+
+- **Your account cannot use the v3 API.** Canadian accounts are served by a different
+  backend, `https://mesca-prod.kumocloud.com/login/v2`, speaking the older v2 protocol.
+  This plugin only talks to `app-prod.kumocloud.com/v3`, where those accounts answer
+  **HTTP 500** on login — as opposed to the 403 a genuinely wrong password gets — so
+  discovery never starts and no amount of retrying helps.
+- **The cloud no longer serves the secrets.** The change described above
+  ([pykumo #78](https://github.com/dlarrick/pykumo/issues/78)) removed both fields from
+  v3 for everyone, so even a working v3 account cannot bootstrap local control any more.
+
+#### Getting the two secrets
+
+Each unit needs its adapter `password` (base64) and `cryptoSerial` (hex, 9 bytes or
+more). They are per-unit and they do not change. You need a source that still hands them
+out:
+
+- **The plugin itself**, which is now the easy answer: `cloudRegion: "ca"` or
+  `localCredentialSource: "v2"` sign in to the v2 endpoint and read the secrets for you,
+  so you do not have to hold them at all. Reach for the manual route below only if you want
+  no cloud contact whatsoever.
+- **The v2 endpoint by hand**, if you prefer — `POST https://mesca-prod.kumocloud.com/login/v2`.
+  This is how the values in the config below were obtained, and local control was then
+  confirmed working against the unit (a signed status read returned `roomTemp` and the
+  current mode). Any v2 client will do; [pykumo](https://github.com/dlarrick/pykumo) is
+  the reference implementation.
+- **An older capture.** If you ran a version of this plugin (or pykumo, or Home Assistant)
+  with local control working before 2026-07-31, the values you had then are still valid.
+
+> ⚠️ Both values sit in **clear text** in `config.json`, and together they grant full
+> control of that unit to anything on your LAN. Treat that file accordingly. Note the
+> credentials belong to your own hardware — nothing here is sent anywhere.
+
+#### Configuration
+
+```json
+{
+  "platform": "KumoV3",
+  "name": "Kumo",
+  "localOnly": true,
+  "localPollInterval": 15,
+  "showDrySwitch": true,
+  "showFanOnlySwitch": true,
+  "localDevices": [
+    {
+      "deviceSerial": "1234A5678901234B",
+      "name": "Living room",
+      "ip": "192.168.6.11",
+      "password": "<base64 adapter password>",
+      "cryptoSerial": "<hex cryptoSerial>",
+      "hasModeDry": true,
+      "hasModeVent": true
+    }
+  ]
+}
+```
+
+`username` and `password` are not required and are ignored. Give each unit a **DHCP
+reservation** on your router: there is no cloud to fall back on, so a moved lease simply
+ends control of that unit until you correct the address. On startup the plugin reads each
+unit once and tells you how many answered — `Local-only control active for 1/1 device(s)`
+— and names any that did not. After that the poller keeps watch: a unit that fails three
+polls in a row (~45 s at the default interval) is named in one warning, latched until it
+answers again, and a unit that rejects the credentials outright
+(`device_authentication_error` — the password and cryptoSerial must both belong to the unit
+at *that* address) says so once by name.
+
+`hasModeDry` and `hasModeVent` declare what the *unit* can do, and in local-only mode that
+declaration is enough: each one adds its switch tile, because `HeaterCooler` has no
+dehumidify or fan-only state and the tile is the only way to reach those modes. The
+`showDrySwitch` / `showFanOnlySwitch` display options still decide on the **cloud** path,
+where the capability is discovered for every unit that has one rather than declared per
+unit — and setting either explicitly to `false` still wins here too, in which case the log
+says once that the mode cannot be selected.
+
+#### What you give up
+
+Without the cloud there is no `profile_update` and no account-level socket, so:
+
+| | |
+|---|---|
+| **Indoor humidity** | Gone. It came from a separate cloud sensor query, not from the unit's local status. The `HumiditySensor` service is not added. A paired wireless sensor's readings are cloud-delivered too, so its finer temperature and battery level go with it |
+| **Setpoint limits and capabilities** | Not discovered. The per-unit fields above stand in for them, defaulting to 16–31 °C and no dry/vent. Declaring a range wider than the unit's own installer limits fails **silently** — the adapter answers HTTP 200 and ignores the value, where the cloud would have returned a 400 |
+| **"Not responding" in the Home app** | Not available. An unreachable unit shows its last known state instead of greying out; the poller's latched warning is what tells you, and a write that cannot be reverted is reported to HomeKit as a failure |
+| **Streaming** | Gone; status comes from LAN polling every `localPollInterval` seconds (default 15). In practice this is *faster* than the cloud, which lags 7–10 s |
+| **Cloud fallback** | Deliberately gone. A command the LAN refuses fails and the tile reverts, rather than quietly dialling an API that cannot authenticate. If nothing has ever been read from the unit there is no state to revert to, so the write is reported to HomeKit as a failure instead of appearing to succeed |
+
+Mirroring, fan speed, vane, swing and the Fahrenheit-anchored setpoints all work normally.
+Toggling `localOnly` needs a **full Homebridge restart** — a child bridge takes its config
+from the parent process.
 
 ## Temperature display
 

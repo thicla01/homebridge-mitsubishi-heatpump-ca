@@ -1,10 +1,53 @@
-homebridge-mitsubishi-heatpump
+homebridge-mitsubishi-heatpump (Canadian v2 fork)
+Copyright 2026 thicla01
 Copyright 2026 Durmus Karatay
 
 This product includes software developed as part of the following projects.
 
 ================================================================================
-1. homebridge-mitsubishi-comfort (upstream)
+1. homebridge-mitsubishi-heatpump (upstream)
+================================================================================
+
+This work is a fork of:
+
+    https://github.com/ukaratay/homebridge-mitsubishi-heatpump
+    Copyright 2026 Durmus Karatay
+
+Forked at upstream v2.2.1 (commit 83dfd18). The upstream work is distributed
+under the Apache License, Version 2.0, and this fork continues under the same
+license. The upstream LICENSE and the whole of this NOTICE are preserved below.
+
+STATEMENT OF CHANGES (Apache-2.0 section 4(b))
+----------------------------------------------
+Files in this distribution have been modified from the upstream work. The
+principal changes are:
+
+  - Support for Canadian accounts, which the v3 cloud cannot serve at all: a new
+    src/kumo-v2.ts signs in once to https://mesca-prod.kumocloud.com/login/v2 and
+    reads the unit inventory, each unit's real capability profile, and the two
+    secrets its WiFi adapter authenticates with. Selected by cloudRegion: "ca".
+  - A v3 kill switch, so that mode contacts no v3 endpoint at any point: no
+    login, no streaming, no zone polling, no cloud fallback for a command.
+  - Config reconciliation (reconcileImpliedConfig): the Homebridge UI writes every
+    schema default into config.json when the settings form is saved, which made a
+    working install go idle over a contradiction the user never typed. Harmful
+    schema defaults were removed for fields whose absence is meaningful.
+  - Log redaction extended to the v2 sign-in and the v3 payload paths.
+  - Setpoint quantization made account-aware: a Celsius account uses the 0.5 grid
+    the Home app renders on, rather than the Fahrenheit-anchored grid.
+  - Several concurrency fixes in the HomeKit write path, each found on real
+    hardware and pinned by a regression test: a scene turning the unit on no
+    longer loses its setpoints; a scene turning it off can no longer revive it
+    through the Fanv2 tile; a superseded post-write reconcile no longer publishes
+    a stale value; a redundant mode command is no longer sent.
+  - An isolated device_authentication_error is treated as transient — retried
+    once, and warned about only after three consecutive rejections. It is not the
+    permanent configuration fault the code assumed: verified on real hardware.
+
+See CHANGELOG.md for the full list.
+
+================================================================================
+2. homebridge-mitsubishi-comfort (upstream)
 ================================================================================
 
 This work is a fork of:
@@ -54,7 +97,7 @@ principal changes are:
 See CHANGELOG.md for the full list.
 
 ================================================================================
-2. pykumo
+3. pykumo
 ================================================================================
 
 The local LAN transport's security-token algorithm in src/local-api.ts is a port
@@ -84,7 +127,7 @@ of the corresponding routine in pykumo, used under the MIT License:
 This attribution was absent from the upstream repository and is added here.
 
 ================================================================================
-3. Independent verification sources (no code derived)
+4. Independent verification sources (no code derived)
 ================================================================================
 
 The local protocol's field vocabulary was verified against, but not copied from:
