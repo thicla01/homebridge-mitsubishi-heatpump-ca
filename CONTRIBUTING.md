@@ -42,6 +42,37 @@ grepping the output for your test's name finds no failure, which reads exactly l
 test passed". Read the full `npm test` tail every time — either the node:test summary
 (`pass N` / `fail N`) or a compiler error — never a grep.
 
+## The `@types/node` floor
+
+`engines.node` promises `>=20.0.0`, but `devDependencies` pins `@types/node` to `^24` —
+deliberately, and against the usual convention of typing to the oldest supported Node.
+The reason is upstream's, in commit `9e799e4`: the definitions had drifted to `^15`
+while the plugin ran on 24, so the compiler was checking against a toolchain nobody
+used, and an invalid Fanv2 characteristic compiled cleanly and only surfaced as a
+runtime warning on the deployed box. Typing to what actually runs catches that class of
+error; typing to the floor catches the opposite one.
+
+The cost of that choice is that the compiler will NOT reject an API added after Node 20,
+which a user on Node 20 would then hit at runtime. So the floor has to be checked by
+hand whenever new platform API is introduced:
+
+```bash
+git archive HEAD | tar -x -C /tmp/types20 && cd /tmp/types20
+npm install && npm install --save-dev "@types/node@^20"
+npm test          # builds src, compiles the tests, runs them
+```
+
+Green means nothing in the tree needs a Node newer than the floor `engines` promises.
+Note `npm test`, not `tsc --noEmit`: the tests import from `dist/`, so a bare type-check
+in a fresh clone fails on missing modules rather than on anything real.
+
+**Last verified 2026-08-21 at `2.3.0-ca.13`:** clean compile, 512/512 tests against
+`@types/node@20.19.43`. The platform surface is small and old — `fetch` (Node 18),
+`AbortSignal.timeout` (17.3), and `crypto`/`http`/`net`/`os` — and `tsconfig.json`
+targets ES2018, which holds the language side well below the floor. Re-run the check if
+that inventory grows; bumping the pin past 24 has no upside while the Homebridge hosts
+this targets run 24.
+
 ## Cutting a release
 
 The fork versions as `2.3.0-ca.N` and is **not published to npm** — install is from
