@@ -274,3 +274,94 @@ test('COOL-mode cooling threshold still sends spCool only (control)', async () =
   // 23°C -> 73.4°F -> 73°F -> 22.777…°C -> stored 22.8.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.8 });
 });
+
+// ---- Post-write poll suppression -----------------------------------------
+// Observed live 2026-08-19: a 21.2 write landed, then the 15s LAN poll read the
+// unit while the adapter was still applying it and got the OLD 20.3 back. That
+// value went into the cache and out to HomeKit, flapping the tile, and made the
+// reconcile log "device holds 21.2, we asked for 20.3" — comparing the device
+// against our own clobbered cache rather than against what we asked for.
+
+test('a poll taken while the adapter is still applying does not undo the write', async () => {
+  const { handler, accessory } = makeHarness();
+  handler.updateFromZone(zone({ spHeat: 20.3 }));
+
+  await handler.setHeatingThresholdTemperature(21);   // -> spHeat 21.2 on the °F grid
+
+  // The adapter answers the very next poll with the value it has not replaced yet.
+  handler.updateFromZone(zone({ spHeat: 20.3 }));
+
+  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21.2,
+    'the stale read must not flap the handle back to the old value');
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 21.2,
+    'and the cache the reconcile compares against still holds what we asked for');
+});
+
+test('once the window closes, a genuine external change wins', async () => {
+  // The hold is brief on purpose: a wall remote or the Kumo app must still be able
+  // to move the setpoint. Backdated rather than slept through.
+  const { handler, accessory } = makeHarness();
+  handler.updateFromZone(zone({ spHeat: 20.3 }));
+
+  await handler.setHeatingThresholdTemperature(21);
+  handler['setpointWriteAt'].set('spHeat', Date.now() - 10_000);
+
+  handler.updateFromZone(zone({ spHeat: 18 }));
+
+  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 18,
+    'someone else moved it — that is not a stale read and must be honoured');
+});
+
+test('holding one setpoint does not freeze the other', async () => {
+  const { handler, accessory } = makeHarness();
+  handler.updateFromZone(zone({ spHeat: 20.3, spCool: 26 }));
+
+  await handler.setHeatingThresholdTemperature(21);
+
+  // Same poll: a stale spHeat, but a spCool someone really did change.
+  handler.updateFromZone(zone({ spHeat: 20.3, spCool: 24 }));
+
+  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21.2,
+    'the written field is held');
+  assert.strictEqual(heaterCoolerChar(accessory, 'CoolingThresholdTemperature'), 24,
+    'the untouched field is not — the guard is per field, not per update');
+});
+
+// ---- Grid follows the displayed unit -------------------------------------
+
+test('a Celsius account keeps the setpoint it asked for', async () => {
+  // 22.0 is the case the user hit: the °F grid stores it as 22.3, which the Home
+  // app then shows as 22.5. On a Celsius account the grid must not do that.
+  const { handler, accessory, sendCommandCalls } = makeHarness();
+  (accessory.context as unknown as Record<string, unknown>).displayUnits = 'C';
+  handler.updateFromZone(zone());
+
+  await handler.setCoolingThresholdTemperature(22);
+
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22 },
+    'what is stored is what was asked for');
+});
+
+test('a Fahrenheit account still gets the whole-°F ceiling', async () => {
+  // The °F anchoring exists because the Comfort app truncates while the Home app
+  // rounds; removing it for everyone would bring that one-degree split back.
+  const { handler, accessory, sendCommandCalls } = makeHarness();
+  (accessory.context as unknown as Record<string, unknown>).displayUnits = 'F';
+  handler.updateFromZone(zone());
+
+  await handler.setCoolingThresholdTemperature(22);
+
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.3 },
+    '72°F stored as 22.3 so both renderers agree');
+});
+
+test('an account with no stated preference behaves as before', async () => {
+  // displayUnits is unset for a config-declared unit (localOnly), where no cloud
+  // preference was ever read. That must not silently change behaviour.
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone());
+
+  await handler.setCoolingThresholdTemperature(22);
+
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.3 });
+});

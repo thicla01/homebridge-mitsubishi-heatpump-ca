@@ -139,3 +139,47 @@ export function quantizeSetpointInRange(c: number, min: number, max: number): nu
 export function sameSetpoint(a: number, b: number): boolean {
   return Math.abs(a - b) < SETPOINT_TOLERANCE_C;
 }
+
+/** The Celsius grid the Home app renders setpoints on. */
+const CELSIUS_DISPLAY_STEP = 0.5;
+
+/**
+ * Snap to the 0.5°C grid the Home app displays Celsius setpoints on.
+ *
+ * The °F-anchored ceiling above exists to make one whole Fahrenheit degree survive
+ * two renderers that disagree. For an account reading Celsius that trade is pure
+ * cost: 22.0°C is 71.6°F, whose nearest degree stores as 22.3, and the Home app's
+ * 0.5 grid then shows 22.5 — the setpoint the user just asked for, half a degree
+ * higher. Observed live 2026-08-19; 22 is the only point in 20–24 where it shows,
+ * because 71.6°F sits almost exactly between two Fahrenheit degrees.
+ *
+ * Snapping to 0.5 instead makes what is stored, what is displayed and what was
+ * asked for the same number. The cost is symmetric and one the °F path already
+ * pays: a value up to 0.25°C from the request, and a stored setpoint that renders
+ * to a whole °F only by chance — which does not matter to someone reading Celsius.
+ */
+export function quantizeSetpointCelsius(c: number): number {
+  return Math.round(c / CELSIUS_DISPLAY_STEP) * CELSIUS_DISPLAY_STEP;
+}
+
+/**
+ * Clamp to [min,max] after snapping to the 0.5°C grid, stepping inward so the
+ * result stays on the grid rather than landing on a raw bound. Mirrors
+ * quantizeSetpointInRange, whose reasoning about the tolerance applies here too:
+ * a real profile bound (16, 31, 10) is already a multiple of 0.5.
+ */
+export function quantizeSetpointInRangeCelsius(c: number, min: number, max: number): number {
+  const lo = min - SETPOINT_TOLERANCE_C;
+  const hi = max + SETPOINT_TOLERANCE_C;
+
+  const quantized = quantizeSetpointCelsius(c);
+  if (quantized >= lo && quantized <= hi) {
+    return quantized;
+  }
+  // One step inward is always enough: the grid is uniform, so the nearest grid point
+  // inside the range is adjacent to the one that fell out.
+  const stepped = quantized < min
+    ? Math.ceil(min / CELSIUS_DISPLAY_STEP - EPS) * CELSIUS_DISPLAY_STEP
+    : Math.floor(max / CELSIUS_DISPLAY_STEP + EPS) * CELSIUS_DISPLAY_STEP;
+  return Math.round(stepped * 10) / 10;
+}

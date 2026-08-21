@@ -222,12 +222,243 @@ test('the HTTP status is not consulted — an `r` body under a 500 still succeed
   }
 });
 
-test('device_authentication_error classifies as auth and is not retried', async () => {
+test('device_authentication_error classifies as auth and IS retried once', async () => {
+  // Reversed deliberately. This used to assert one attempt, on the reasoning that a
+  // well-formed rejection "will say the same thing again". The hardware disagreed on
+  // 2026-08-19: one poll in ~30 was rejected and the next succeeded, twice in a day,
+  // with credentials that are provably correct — computeLocalToken is a pure function
+  // of the password, cryptoSerial and body, so a wrong one cannot fail intermittently.
+  // The token signs the BODY, so a truncated read reports as a signature failure,
+  // which the adapter can only call an authentication error.
   const adapter = await startAdapter(json({ _api_error: 'device_authentication_error' }));
   try {
     const out = await makeClient(adapter.ip).requestDetailed(SERIAL, STATUS_READ_BODY);
-    assert.deepStrictEqual(out, { result: null, error: 'auth' });
-    assert.strictEqual(adapter.seen.length, 1, 'a rejection says the same thing twice');
+    assert.deepStrictEqual(out, { result: null, error: 'auth' },
+      'a rejection that repeats still surfaces as auth');
+    assert.strictEqual(adapter.seen.length, 2, 'asked twice before believing it');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a rejection that does not repeat costs the caller nothing', async () => {
+  // The case the retry exists for: the isolated rejection observed live. The second
+  // attempt succeeds, so the caller gets its status and never learns anything went
+  // wrong — no error, no warning, no gap in the poll history.
+  let reply: Reply = json({ _api_error: 'device_authentication_error' });
+  const adapter = await startAdapter((seen, res) => reply(seen, res));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    // Reject once, then answer normally — the live signature.
+    setTimeout(() => {
+      reply = json({ r: { indoorUnit: { status: { roomTemp: 21 } } } });
+    }, 50);
+
+    const out = await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(out.error, 'none', 'the retry recovered it');
+    assert.deepStrictEqual(out.result, { indoorUnit: { status: { roomTemp: 21 } } });
+    assert.deepStrictEqual(warns, [], 'and nothing was reported to the user');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a retried request counts ONCE toward the warning streak', async () => {
+  // The half that keeps ca.7 honest. Each request now makes two attempts, so counting
+  // attempts would reach the threshold in two polls instead of three and undo the
+  // point of the streak — which is to tell a wrong credential from an isolated blip.
+  const adapter = await startAdapter(json({ _api_error: 'device_authentication_error' }));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.deepStrictEqual(warns, [], 'two requests — four attempts — is not yet evidence');
+    assert.strictEqual(adapter.seen.length, 4, 'and they really were four attempts');
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 1, 'the third REQUEST is');
+    assert.match(warns[0], /3 requests in a row/);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a token rejected REPEATEDLY is warned about by name, once, and re-armed by new credentials', async () => {
+  // A wrong password or cryptoSerial fails every poll and every write, and at debug
+  // only the log said nothing without `homebridge -D`. So it is worth saying — but
+  // only once it repeats, and latched per serial so the 15s poller does not say it
+  // forever. Three in a row still surfaces a real fault within a minute of startup.
+  const adapter = await startAdapter(json({ _api_error: 'device_authentication_error' }));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 0, 'two is not yet evidence of a configuration fault');
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 1, 'the third in a row is');
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 1, 'said once, not once per poll');
+
+    assert.match(warns[0], new RegExp(SERIAL));
+    assert.match(warns[0], /device_authentication_error/);
+    assert.match(warns[0], /cryptoSerial/, 'and what to check');
+    assert.match(warns[0], /in a row/, 'and that it is a pattern, not one reply');
+
+    // Fresh credentials are exactly the event that makes it worth saying again.
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 2);
+  } finally {
+    await adapter.close();
+  }
+});
+
+// ---- an isolated rejection is not a configuration fault --------------------
+// Observed live 2026-08-19 on the real unit: exactly one poll out of ~30 came back
+// device_authentication_error, the next succeeded, and a command was accepted three
+// minutes later. Twice in a day, self-healing both times. The credentials were
+// right the whole time — the token is a deterministic digest of them and the body,
+// so a wrong one cannot fail intermittently. The old code warned on the first
+// rejection and sent the user hunting a fault that did not exist.
+
+test('an isolated rejection between successes is never warned about', async () => {
+  let reply: Reply = json({ r: { indoorUnit: { status: { roomTemp: 21 } } } });
+  const adapter = await startAdapter((seen, res) => reply(seen, res));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    // Two rejections, each surrounded by working polls — the live signature.
+    for (let i = 0; i < 2; i++) {
+      await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+      reply = json({ _api_error: 'device_authentication_error' });
+      await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+      reply = json({ r: { indoorUnit: { status: { roomTemp: 21 } } } });
+      await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    }
+
+    assert.deepStrictEqual(warns, [], 'a success in between proves the credentials are right');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('rejections separated by a success never accumulate into a warning', async () => {
+  // The property that matters over a long run. The real unit rejected one poll at
+  // 14:09 and another at 22:59 with thousands of good polls between them; those
+  // must not add up to a configuration warning, however long the plugin runs. So a
+  // success does not merely fail to increment the streak — it resets it.
+  let reply: Reply = json({ _api_error: 'device_authentication_error' });
+  const adapter = await startAdapter((seen, res) => reply(seen, res));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    // Two short of the threshold, twice over, with one working poll in between.
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    reply = json({ r: { indoorUnit: { status: { roomTemp: 21 } } } });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    reply = json({ _api_error: 'device_authentication_error' });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+
+    assert.deepStrictEqual(warns, [],
+      'four rejections, but never three in a row — the success reset the count');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('credentials that worked and then stop working are warned about again', async () => {
+  // The latch must not be permanent either. A unit re-provisioned by the cloud, or
+  // a DHCP lease that moved onto another Kumo unit, is a new fault worth saying —
+  // so a success re-arms the warning as well as resetting the streak.
+  let reply: Reply = json({ _api_error: 'device_authentication_error' });
+  const adapter = await startAdapter((seen, res) => reply(seen, res));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    for (let i = 0; i < 3; i++) {
+      await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    }
+    assert.strictEqual(warns.length, 1);
+
+    reply = json({ r: { indoorUnit: { status: { roomTemp: 21 } } } });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+
+    reply = json({ _api_error: 'device_authentication_error' });
+    for (let i = 0; i < 3; i++) {
+      await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    }
+    assert.strictEqual(warns.length, 2, 'a fault that returns is said again');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a busy reply between rejections does not shield a genuinely wrong credential', async () => {
+  // Contention is the suspected cause of the isolated rejection, so busy and auth
+  // replies interleaving is exactly what a wrong credential on a loaded adapter
+  // looks like. A busy reply says nothing about the credentials: it must neither
+  // extend the streak nor clear it. Only a success clears.
+  let reply: Reply = json({ _api_error: 'device_authentication_error' });
+  const adapter = await startAdapter((seen, res) => reply(seen, res));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    reply = json({ _api_error: '__no_memory' });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    reply = json({ _api_error: 'device_authentication_error' });
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+    assert.strictEqual(warns.length, 0, 'still only two rejections');
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+
+    assert.strictEqual(warns.length, 1, 'the busy reply must not have reset the count');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a busy adapter is not warned about — only a rejected token is', async () => {
+  // The distinction the latch depends on: `serializer_error` and `__no_memory` mean
+  // "ask me again" and say nothing about the credentials, so they stay at debug.
+  const adapter = await startAdapter(json({ _api_error: '__no_memory' }));
+  const warns: string[] = [];
+  const log = { ...makeLog(), warn: (...args: unknown[]) => warns.push(args.join(' ')) };
+  try {
+    const client = new LocalKumoClient(log as never, 2000);
+    client.setCreds(SERIAL, { ip: adapter.ip, password: PW, cryptoSerial: CS });
+
+    await client.requestDetailed(SERIAL, STATUS_READ_BODY);
+
+    assert.deepStrictEqual(warns, []);
   } finally {
     await adapter.close();
   }

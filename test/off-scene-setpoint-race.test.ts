@@ -155,3 +155,31 @@ test('a threshold write with no recent off still sends (control — AUTO handle 
   // grid, is what this control is measuring.
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 25 });
 });
+
+test('AC-off scene: no setpoint follows the off even when no status has ever been read', async () => {
+  // The same burst, on a COLD cache. This is not a corner case in local-only mode:
+  // nothing but the local poll fills `currentStatus`, so the window is the first
+  // 1.5s of every startup — and permanent on a unit whose reads come back without
+  // a roomTemp (LocalKumoClient.getStatus answers null for that) while its writes
+  // still go through.
+  //
+  // The guard used to answer "don't suppress" for a null cache without ever
+  // looking at the off window, so both threshold handles were sent as bare,
+  // mode-less writes AFTER the off — reviving the unit in its previous mode. The
+  // off window is now checked first, and null-safely.
+  const { handler, sendCommandCalls } = makeHarness();
+  // Deliberately NO updateFromZone: currentStatus stays null.
+
+  const p1 = handler.setActive(Characteristic.Active.INACTIVE);
+  const p2 = handler.setHeatingThresholdTemperature(21);
+  const p3 = handler.setCoolingThresholdTemperature(25);
+  await Promise.all([p1, p2, p3]);
+
+  const offIdx = sendCommandCalls.findIndex(isOff);
+  assert.ok(offIdx >= 0, 'the off is still sent');
+  assert.ok(
+    !sendCommandCalls.slice(offIdx + 1).some(isSetpoint),
+    'no bare setpoint may follow the off on a cold cache either. Got: ' +
+      JSON.stringify(sendCommandCalls.map((c) => c.commands)),
+  );
+});

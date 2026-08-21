@@ -380,3 +380,43 @@ test('every real speed round-trips to its own position and back', async () => {
       `${speed} reported as ${pct}% must map back to itself`);
   }
 });
+
+test('a drag that re-sends the same speed writes once, not once per HAP request', async () => {
+  // Observed live 2026-08-19: a slider drag emits one HAP request per position,
+  // each in its OWN event-loop tick, so queueFanIntent's same-tick coalescing
+  // never merges them — and HomeKit repeats the value it lands on. The real log
+  // showed eight identical "quiet" writes in two seconds, sixteen for three
+  // adjustments. The adapter tolerates about one local connection at a time, so
+  // every redundant write is a lock acquisition for no change.
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+
+  // Separate ticks on purpose: this is what a drag actually looks like.
+  for (let i = 0; i < 8; i++) {
+    await handler.setRotationSpeed(25);
+    await tick();
+  }
+
+  assert.deepStrictEqual(
+    sendCommandCalls.map((c) => c.commands), [{ fanSpeed: 'quiet' }],
+    'eight identical HAP requests reach the adapter as a single write',
+  );
+});
+
+test('a real change still writes after a redundant one was skipped', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+
+  await handler.setRotationSpeed(25);   // auto -> quiet: a change, writes
+  await tick();
+  await handler.setRotationSpeed(25);   // already quiet: skipped
+  await tick();
+  await handler.setRotationSpeed(50);   // quiet -> low: a change, writes
+  await tick();
+
+  assert.deepStrictEqual(
+    sendCommandCalls.map((c) => c.commands),
+    [{ fanSpeed: 'quiet' }, { fanSpeed: 'low' }],
+    'suppression must not swallow a genuine speed change',
+  );
+});

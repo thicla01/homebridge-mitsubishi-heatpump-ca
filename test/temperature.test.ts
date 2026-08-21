@@ -22,6 +22,8 @@ import {
   fToC,
   quantizeSetpointC,
   quantizeSetpointInRange,
+  quantizeSetpointCelsius,
+  quantizeSetpointInRangeCelsius,
   sameSetpoint,
 } from '../dist/temperature.js';
 
@@ -228,4 +230,41 @@ test('adjacent °F setpoints are never mistaken for the same setpoint', () => {
     const b = quantizeSetpointC(fToC(f + 1));
     assert.ok(!sameSetpoint(a, b), `${f}°F and ${f + 1}°F compared equal`);
   }
+});
+
+// ---- Celsius grid --------------------------------------------------------
+// For an account that reads Celsius the °F-anchored ceiling is pure cost: 22.0°C
+// is 71.6°F, whose nearest degree stores as 22.3, and the Home app's 0.5 grid
+// then displays 22.5. Reported live 2026-08-19 — "I set 22 and it goes back up
+// to 22.5". This grid makes asked-for, stored and displayed the same number.
+
+test('the whole 20-24 range round-trips on the Celsius grid', () => {
+  for (const c of [20, 20.5, 21, 21.5, 22, 22.5, 23, 23.5, 24]) {
+    assert.strictEqual(quantizeSetpointCelsius(c), c,
+      `${c}°C is already on the 0.5 grid and must come back untouched`);
+  }
+});
+
+test('22 is the case that motivated this, and it now stays 22', () => {
+  // The °F path is what the user saw; keep both in the same test so the contrast
+  // cannot drift apart unnoticed.
+  assert.strictEqual(quantizeSetpointC(22), 22.3, 'the °F grid still ceilings, unchanged');
+  assert.strictEqual(quantizeSetpointCelsius(22), 22, 'the Celsius grid does not');
+});
+
+test('an off-grid request snaps to the nearest half degree', () => {
+  assert.strictEqual(quantizeSetpointCelsius(22.2), 22);
+  assert.strictEqual(quantizeSetpointCelsius(22.3), 22.5);
+  assert.strictEqual(quantizeSetpointCelsius(21.74), 21.5);
+  assert.strictEqual(quantizeSetpointCelsius(21.76), 22);
+});
+
+test('the Celsius grid respects the profile range, stepping inward', () => {
+  // The live profile: heat 10-31, cool 16-31.
+  assert.strictEqual(quantizeSetpointInRangeCelsius(10, 10, 31), 10, 'the floor is reachable');
+  assert.strictEqual(quantizeSetpointInRangeCelsius(31, 16, 31), 31, 'and the ceiling');
+  assert.strictEqual(quantizeSetpointInRangeCelsius(8, 10, 31), 10, 'below the floor steps up to it');
+  assert.strictEqual(quantizeSetpointInRangeCelsius(40, 16, 31), 31, 'above the ceiling steps down');
+  assert.strictEqual(quantizeSetpointInRangeCelsius(15.9, 16, 31), 16,
+    'a request just under the cool floor lands on it, not below');
 });

@@ -52,6 +52,14 @@ export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}'
 const LOCAL_AGENT = new Agent({ keepAlive: false, maxSockets: 1 });
 
 /**
+ * Pause before retrying a rejected token. Long enough for a competing local client
+ * to finish its exchange — the adapter holds roughly one connection — and short
+ * enough to be invisible next to a 15s poll. A genuinely wrong credential pays it
+ * once per poll and still crosses the warning threshold inside a minute.
+ */
+const AUTH_RETRY_PAUSE_MS = 250;
+
+/**
  * One signed PUT to an adapter, resolving its parsed JSON reply.
  *
  * Plain `node:http` rather than the global `fetch`, and the agent above is the
@@ -293,6 +301,39 @@ export function mapLocalStatus(local: Record<string, unknown>): Partial<DeviceSt
 export class LocalKumoClient {
   private readonly creds = new Map<string, LocalDeviceCreds>();
   private readonly chains = new Map<string, Promise<unknown>>();
+  /**
+   * Serials already warned about a rejected token, so the warning fires once
+   * rather than on every poll. Cleared by setCreds/clearCreds — new credentials
+   * are exactly the event that makes the warning worth repeating.
+   */
+  private readonly authWarned = new Set<string>();
+
+  /**
+   * Consecutive `device_authentication_error` replies per serial, reset by any
+   * success. This is what separates the two causes, because they are
+   * indistinguishable in a single reply.
+   *
+   * A wrong password or cryptoSerial fails EVERY time: the token is a
+   * deterministic digest of the credentials and the request body, so nothing
+   * about it varies between polls. Observed live on 2026-08-19, though, the
+   * adapter rejected exactly one poll out of ~30 and then kept working — twice
+   * in a day, self-healing both times, with a command accepted three minutes
+   * later. The likely cause is contention: the adapter tolerates roughly one
+   * local connection (pykumo says so, and the Kumo phone app was in use at that
+   * moment), and a squeezed request comes back as a rejection rather than a
+   * timeout.
+   *
+   * So a single rejection proves nothing, and warning on it sent the user
+   * hunting a configuration fault that did not exist.
+   */
+  private readonly authFailStreak = new Map<string, number>();
+
+  /**
+   * Consecutive rejections before the warning fires. At the default 15s poll a
+   * genuinely wrong credential still surfaces within a minute of startup, while
+   * an isolated blip stays at debug.
+   */
+  private static readonly AUTH_FAIL_STREAK_TO_WARN = 3;
 
   constructor(
     private readonly log: Logger,
@@ -301,10 +342,14 @@ export class LocalKumoClient {
 
   setCreds(serial: string, creds: LocalDeviceCreds): void {
     this.creds.set(serial, creds);
+    this.authWarned.delete(serial);
+    this.authFailStreak.delete(serial);
   }
 
   clearCreds(serial: string): void {
     this.creds.delete(serial);
+    this.authWarned.delete(serial);
+    this.authFailStreak.delete(serial);
   }
 
   hasLocal(serial: string): boolean {
@@ -364,18 +409,99 @@ export class LocalKumoClient {
       for (let attempt = 0; attempt < 2; attempt++) {
         const outcome = await this.attempt(serial, creds, body);
         if (outcome.result) {
+          this.noteRequestOutcome(serial, creds, 'none');
           return outcome;
         }
         last = outcome.error;
-        // Only a transport failure is worth a second try. An auth rejection or a
-        // well-formed error reply will say the same thing again.
-        if (outcome.error !== 'transport') {
+
+        // A busy or malformed reply is the adapter answering coherently: asking
+        // again immediately gets the same answer. Transport and auth are both
+        // worth one more try, for different reasons.
+        if (outcome.error !== 'transport' && outcome.error !== 'auth') {
+          this.noteRequestOutcome(serial, creds, outcome.error);
           return outcome;
         }
-        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: transport failure, retrying once`);
+        if (attempt > 0) {
+          break;
+        }
+
+        if (outcome.error === 'transport') {
+          // A fresh socket IS the fix: the adapter closes idle connections and the
+          // next write on one fails.
+          this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: transport failure, retrying once`);
+        } else {
+          // An auth rejection was long treated as permanent — "it will say the same
+          // thing again". The hardware disagreed on 2026-08-19: one poll in ~30 was
+          // rejected and the next succeeded, twice in a day, with provably correct
+          // credentials (computeLocalToken is a pure function of them and the body).
+          //
+          // The mechanism that fits: the token signs the BODY, so an adapter that
+          // reads a truncated body computes a different digest and reports a
+          // signature failure — which it can only call an authentication error. The
+          // likely trigger is contention: these adapters hold about one connection,
+          // and the Kumo phone app is a second client that owes us no turn-taking.
+          //
+          // So the pause matters and the retry alone would not: a fresh socket does
+          // not help if the other client still holds the slot. Retrying is safe
+          // because every command the plugin sends is an idempotent absolute-value
+          // write (buildLocalCommandBody emits only mode/spHeat/spCool/fanSpeed/
+          // vaneDir, never a delta), and a genuinely wrong credential simply fails
+          // twice and is counted once.
+          this.log.debug(
+            `[LOCAL] ${serial} @ ${creds.ip}: credentials rejected — retrying once, `
+            + 'a single rejection is not evidence of a wrong password',
+          );
+          await new Promise(resolve => setTimeout(resolve, AUTH_RETRY_PAUSE_MS));
+        }
       }
+      this.noteRequestOutcome(serial, creds, last);
       return { result: null, error: last };
     });
+  }
+
+  /**
+   * Record what ONE request concluded, after every retry it was allowed.
+   *
+   * At the request level on purpose. The streak exists to separate a wrong
+   * credential (fails every time) from an isolated rejection (does not), and a
+   * retried request that fails twice is still one piece of evidence, not two —
+   * counting attempts would reach the warning threshold in two polls instead of
+   * three and undo the point of `ca.7`.
+   */
+  private noteRequestOutcome(serial: string, creds: LocalDeviceCreds, error: LocalErrorKind): void {
+    if (error === 'none') {
+      // Any success ends the streak. It also re-arms the warning: credentials that
+      // work and later stop working is a real event worth saying again.
+      if (this.authFailStreak.delete(serial)) {
+        this.authWarned.delete(serial);
+      }
+      return;
+    }
+    if (error !== 'auth') {
+      // A busy or malformed reply says nothing about the credentials, so it neither
+      // extends the streak nor clears it. Clearing would let an adapter that
+      // alternates busy and auth hold a genuinely wrong credential below the
+      // threshold forever; only a success clears.
+      return;
+    }
+
+    const streak = (this.authFailStreak.get(serial) ?? 0) + 1;
+    this.authFailStreak.set(serial, streak);
+    if (streak < LocalKumoClient.AUTH_FAIL_STREAK_TO_WARN || this.authWarned.has(serial)) {
+      return;
+    }
+    this.authWarned.add(serial);
+    // "requests", not a bare count: the poller keeps its OWN counter of failed
+    // POLLS and prints it on the neighbouring line, and a startup reachability
+    // probe is a request but not a poll. Live on 2026-08-20 the two landed one line
+    // apart reading "(2 in a row)" and "3 times in a row", which reads like a
+    // contradiction. Naming the unit each counter measures costs one word.
+    this.log.warn(
+      `[LOCAL] ${serial} @ ${creds.ip}: the unit rejected our credentials on `
+      + `${streak} requests in a row (device_authentication_error). The password and `
+      + 'cryptoSerial must both belong to the unit at this address — check the address '
+      + 'first if you have more than one unit.',
+    );
   }
 
   private async attempt(
@@ -398,6 +524,13 @@ export class LocalKumoClient {
       if (json && json._api_error) {
         const kind = classifyApiError(String(json._api_error));
         this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: api error ${json._api_error} (${kind})`);
+        // A rejected token is worth saying out loud, because it silently breaks
+        // every poll and every write, and at debug it was invisible without
+        // `homebridge -D`. But only once it REPEATS: a single rejection is not
+        // evidence of a configuration fault (see authFailStreak). Said once per
+        // streak, again if the credentials change, and re-armed by a success.
+        // Discovery's sweep does NOT come through here (it uses probeIpForSerial),
+        // so a stranger on the LAN cannot trigger this.
         return { result: null, error: kind };
       }
       return { result: null, error: 'malformed' };
@@ -628,7 +761,17 @@ export async function discoverDeviceIps(
   });
 
   if (remaining.size > 0) {
-    log.warn(`[LOCAL] ${remaining.size} device(s) not found on the LAN (will use cloud): ${[...remaining].join(', ')}`);
+    // Deliberately does NOT promise a cloud fallback, which is what this said. It
+    // is false in the two modes that need this sweep most: `localOnly`, and
+    // `cloudRegion: "ca"` where the v3 kill switch is armed and there is no other
+    // transport at all. Naming the two real remedies instead — both of which work
+    // in every mode — beats naming a fallback that may not exist.
+    log.warn(
+      `[LOCAL] ${remaining.size} device(s) not found on the LAN: ${[...remaining].join(', ')}. `
+      + 'The sweep runs once, at startup, so a unit that was powered off or on another subnet '
+      + 'is missed until the next restart. Give each unit a DHCP reservation, or pin it with '
+      + 'localControlIps.',
+    );
   }
   return found;
 }

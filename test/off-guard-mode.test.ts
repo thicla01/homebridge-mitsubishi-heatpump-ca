@@ -157,3 +157,121 @@ test('control: a mode change with no off in the burst still sends', async () => 
     'an ordinary mode change is untouched by the guard',
   );
 });
+
+// ---- the fan tile was the last door left open ------------------------------
+// This accessory publishes a Fanv2 tile beside the climate tile, and setFanActive
+// delegates an ON straight to setActive so that "Siri, turn on the fan" works. An
+// "AC off" scene captures the accessory's WHOLE state, so a scene recorded while
+// the unit was running stores that tile as ACTIVE and re-pushes it on every
+// trigger — an active-mode write dispatched concurrently with the off.
+//
+// The damage is not the fan tile's own command (ca.6 skips it as redundant). It is
+// that setActive calls noteModeIntent(), which ZEROES offRequestedAt: the fan tile
+// disarms the suppression window for everything dispatched behind it, and the
+// scene's setpoints then reach the adapter AFTER the off. A bare mode-less setpoint
+// revives the unit over the LAN — the 1.7.2 failure, through a new door.
+//
+// Observed live 2026-08-20, from a scene whose only purpose was to stop the unit:
+//   [ACTIVE] HomeKit sent OFF -> mode off
+//   [ACTIVE] HomeKit sent ON -> mode auto      <- the fan tile, delegated
+//   [AUTO HEAT SP] Command accepted by API     <- and the setpoints went out
+//   [AUTO COOL SP] Command accepted by API
+//
+// THE TIMING IS LOAD-BEARING. A harness whose sendCommand resolves instantly does
+// NOT reproduce this: the off's optimistic `power = 0` lands before the setpoints'
+// 1500ms hold expires, so they are suppressed by the cache instead and the bug
+// hides. On the wire the off queues behind the scene's other commands on the
+// per-device mutex and has NOT completed at that check. The harness below models
+// both, and was verified to reproduce the live command sequence exactly.
+
+/** A transport with the two properties that make the failure possible. */
+function makeSlowHarness() {
+  const sendCommandCalls: SentCommand[] = [];
+  let lane: Promise<boolean> = Promise.resolve(true);
+  const platform = {
+    Service,
+    Characteristic,
+    log: makeLog(),
+    api: { updatePlatformAccessories() {} },
+    kumoConfig: { showDrySwitch: true, showFanOnlySwitch: true, exposeVaneSlat: true },
+  };
+  const kumoAPI = {
+    subscribeToDevice() {},
+    onDeviceProfileUpdate() {},
+    sendCommand(serial: string, commands: Commands) {
+      const mine = { serial, commands: JSON.parse(JSON.stringify(commands)) as Commands };
+      // 800ms each, strictly serialised: the off is third in this burst, so it
+      // completes around 2.4s — well past the setpoints' 1500ms hold.
+      lane = lane
+        .then(() => new Promise<void>((r) => setTimeout(r, 800)))
+        .then(() => {
+          sendCommandCalls.push(mine);
+          return true;
+        });
+      return lane;
+    },
+  };
+  const handler = new KumoThermostatAccessory(
+    platform as never,
+    makeAccessory('Salon') as never,
+    kumoAPI as never,
+    30,
+  );
+  return { handler, sendCommandCalls };
+}
+
+/** The scene's whole captured tile, dispatched concurrently as HomeKit does. */
+function fireOffScene(handler: KumoThermostatAccessory) {
+  return Promise.all([
+    handler.setHeatingThresholdTemperature(22),
+    handler.setCoolingThresholdTemperature(22),
+    handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.COOL),
+    handler.setActive(Characteristic.Active.INACTIVE),
+    handler.setRotationSpeed(25),
+    handler.setFanActive(Characteristic.Active.ACTIVE),
+  ]);
+}
+
+test('AC-off scene: the fan tile ON does not let the scene setpoints trail the off', async () => {
+  const { handler, sendCommandCalls } = makeSlowHarness();
+  handler.updateFromZone(zone({ power: 1, operationMode: 'auto', spHeat: 21, spCool: 22 }));
+
+  await fireOffScene(handler);
+  await new Promise((r) => setTimeout(r, 4000));
+
+  const offIdx = sendCommandCalls.findIndex(isOff);
+  assert.ok(offIdx >= 0, 'the off itself must not be broken');
+  assert.ok(
+    !sendCommandCalls.slice(offIdx + 1).some(isSetpoint),
+    'a bare setpoint after the off revives the unit over the LAN. Got: '
+      + JSON.stringify(sendCommandCalls.map((c) => c.commands)),
+  );
+});
+
+test('AC-off scene: no active mode follows the off either', async () => {
+  const { handler, sendCommandCalls } = makeSlowHarness();
+  handler.updateFromZone(zone({ power: 1, operationMode: 'auto', spHeat: 21, spCool: 22 }));
+
+  await fireOffScene(handler);
+  await new Promise((r) => setTimeout(r, 4000));
+
+  const offIdx = sendCommandCalls.findIndex(isOff);
+  assert.ok(offIdx >= 0);
+  assert.ok(
+    !sendCommandCalls.slice(offIdx + 1).some(isActiveMode),
+    'Got: ' + JSON.stringify(sendCommandCalls.map((c) => c.commands)),
+  );
+});
+
+test('a fan tile ON with no off in flight still turns the unit on', async () => {
+  // The control. Delegating an ON is the whole point of setFanActive — Apple
+  // documents room-scoped "turn on the fan" — so only an off IN FLIGHT may block it.
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setFanActive(Characteristic.Active.ACTIVE);
+
+  assert.strictEqual(sendCommandCalls.length, 1, 'the unit is turned on');
+  assert.ok(isActiveMode(sendCommandCalls[0]),
+    'with an active mode. Got: ' + JSON.stringify(sendCommandCalls.map((c) => c.commands)));
+});

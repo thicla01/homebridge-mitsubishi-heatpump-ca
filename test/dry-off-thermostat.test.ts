@@ -203,3 +203,42 @@ test('turning the Dry switch ON leaves Active ACTIVE immediately', async () => {
     'and the tile shows it running, not "Off"',
   );
 });
+
+// ---- Redundant Active write ----------------------------------------------
+// Tapping a mode in the Home app writes Active AND TargetHeaterCoolerState in one
+// request. Active resolves to the REMEMBERED mode, so a unit already on in heat
+// got a redundant `heat` before the `cool` the user asked for — two LAN commands,
+// and a detour through the old mode. Observed live 2026-08-19.
+
+test('an Active write that would change nothing is not sent', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 1, operationMode: 'heat' }));
+
+  await handler.setActive(Characteristic.Active.ACTIVE);
+
+  assert.deepStrictEqual(sendCommandCalls, [],
+    'the unit is already on in heat — there is nothing to command');
+});
+
+test('an OFF is never skipped, even if the unit already reads off', async () => {
+  // Asymmetric on purpose: a redundant "on" is waste, a swallowed "off" is a heat
+  // pump left running. The cache can also be stale or wrong.
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setActive(Characteristic.Active.INACTIVE);
+
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }],
+    'an off always reaches the unit');
+});
+
+test('turning on a unit that is off still sends', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+
+  await handler.setActive(Characteristic.Active.ACTIVE);
+
+  assert.strictEqual(sendCommandCalls.length, 1,
+    'off -> on is a real change; the guard must not swallow it');
+  assert.notStrictEqual(sendCommandCalls[0].commands.operationMode, 'off');
+});

@@ -1,11 +1,11 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
-import { KumoAPI } from './kumo-api';
+import { KumoAPI, redactPayload } from './kumo-api';
 import {
   DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
-  FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed,
+  FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed, normalizeCloudRegion,
 } from './settings';
-import { cToF, quantizeSetpointInRange } from './temperature';
+import { cToF, quantizeSetpointInRange, quantizeSetpointInRangeCelsius } from './temperature';
 
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
@@ -146,7 +146,18 @@ export class KumoThermostatAccessory {
   // pending send. Keyed per setpoint so the two AUTO handles don't cancel each
   // other, with a generation counter so a drag only sends its final value.
   private readonly setpointWriteGen: Map<string, number> = new Map();
+  // Display options already reported as hiding a supported mode, so the notice is
+  // logged once per accessory rather than on every profile update.
+  private readonly modeTileNoticed: Set<string> = new Set();
   private readonly SETPOINT_HOLD_MS = 1500;
+  // When each setpoint field was last written and accepted. A poll landing inside
+  // the adapter's apply window still reports the OLD value, and ingesting it both
+  // flaps the tile and makes the reconcile below compare the device against our own
+  // stale cache — observed live 2026-08-19: a 21.2 write logged "device holds 21.2,
+  // we asked for 20.3", where 20.3 was what the poll had just overwritten. Must
+  // outlast SETPOINT_RECONCILE_MS, which is the authority on what the device kept.
+  private readonly setpointWriteAt: Map<string, number> = new Map();
+  private readonly SETPOINT_POLL_SUPPRESS_MS = 4000;
   // How long after an accepted setpoint write to re-read the unit and publish what
   // it actually stored. Long enough for the adapter to apply the write and answer
   // a fresh read; short enough that the tile settles while the user is still there.
@@ -555,20 +566,72 @@ export class KumoThermostatAccessory {
     // Add / remove the fan-only switch based on device capability AND config.
     // Fan speed now lives on the HeaterCooler tile, so this switch is only for
     // fan-ONLY mode (no heating or cooling) and is off by default.
-    if (profile.hasModeVent && this.platform.kumoConfig.showFanOnlySwitch === true) {
+    if (profile.hasModeVent && this.wantsModeSwitch('showFanOnlySwitch')) {
       this.setupFanOnlySwitch();
     } else {
+      if (profile.hasModeVent) {
+        this.noteModeUnreachable('vent (fan-only)', 'showFanOnlySwitch');
+      }
       this.removeFanOnlySwitch();
     }
 
     // Add / remove the dry switch based on device capability AND config.
     // HeaterCooler has no dehumidify mode either, so dry stays a Switch — but
     // it is opt-in now rather than automatic.
-    if (profile.hasModeDry && this.platform.kumoConfig.showDrySwitch === true) {
+    if (profile.hasModeDry && this.wantsModeSwitch('showDrySwitch')) {
       this.setupDrySwitch();
     } else {
+      if (profile.hasModeDry) {
+        this.noteModeUnreachable('dry (dehumidify)', 'showDrySwitch');
+      }
       this.removeDrySwitch();
     }
+  }
+
+  /**
+   * Whether a capability Switch tile (Dry / Fan-only) is wanted.
+   *
+   * The display option decides, and an explicit value wins either way. Where it is
+   * absent, local-only mode answers yes — the one place where the capability is
+   * DECLARED rather than discovered. There, `hasModeDry`/`hasModeVent` reaching
+   * this point at all means the user hand-wrote it in that unit's `localDevices`
+   * entry (both default to false), and the tile is the only thing the flag gates,
+   * since HeaterCooler has no dehumidify or fan-only state. Requiring a second,
+   * platform-level opt-in on top of that per-unit declaration made the declaration
+   * inert: the worked local-only config declares both modes and, before this,
+   * reached neither.
+   *
+   * On the cloud path the capability comes from the profile of every unit that has
+   * it, which is why the tiles stay opt-in there: they were automatic once and
+   * cluttered the Home app of everyone whose units merely supported dry.
+   */
+  private wantsModeSwitch(option: 'showDrySwitch' | 'showFanOnlySwitch'): boolean {
+    const configured = this.platform.kumoConfig[option];
+    if (configured !== undefined) {
+      return configured === true;
+    }
+    return !!this.platform.kumoConfig.localOnly;
+  }
+
+  /**
+   * Say once that a mode the unit supports cannot be reached from HomeKit.
+   *
+   * Local-only only, and deliberately: there the capability is something the user
+   * hand-wrote for this unit, so a display option cancelling it is worth one line.
+   * On the cloud path the capability is discovered for every unit that has one, and
+   * the tiles have been opt-in since 2.0.0 — saying this for each of them on every
+   * restart would be unsolicited advice, not information.
+   */
+  private noteModeUnreachable(mode: string, option: string): void {
+    if (!this.platform.kumoConfig.localOnly || this.modeTileNoticed.has(option)) {
+      return;
+    }
+    this.modeTileNoticed.add(option);
+    this.platform.log.info(
+      `${this.accessory.displayName}: supports ${mode}, but "${option}" is off, and `
+      + 'HeaterCooler has no state for that mode — so it cannot be selected from HomeKit. '
+      + `Set "${option}": true to get the switch.`,
+    );
   }
 
   /**
@@ -665,6 +728,7 @@ export class KumoThermostatAccessory {
           this.isFanOnlyActive(this.currentStatus),
         );
       }, 100);
+      this.failIfNothingToRevert(`setting fan-only ${on ? 'ON' : 'OFF'}`);
       return;
     }
 
@@ -772,6 +836,7 @@ export class KumoThermostatAccessory {
           this.isDryActive(this.currentStatus),
         );
       }, 100);
+      this.failIfNothingToRevert(`setting dry ${on ? 'ON' : 'OFF'}`);
       return;
     }
 
@@ -979,8 +1044,26 @@ export class KumoThermostatAccessory {
    * Send a control command, preferring the local LAN path when available and
    * falling back to the cloud. A failed local send (timeout/unreachable) also
    * falls back, so a flaky adapter never blocks control.
+   *
+   * EXCEPT in local-only mode, where there is no cloud to fall back to: the
+   * fallback used to fire on every hiccup of a transport that fails routinely
+   * (the adapter tolerates about one concurrent connection), turning a stutter
+   * into a POST /v3/login with credentials that do not exist. Returning false
+   * instead surfaces the failure to HomeKit, where each setter already reverts
+   * the characteristic to the unit's real state.
    */
   private async sendDeviceCommand(commands: Commands): Promise<boolean> {
+    // Truthiness, matching validatePlatformConfig and the normalization the platform
+    // constructor applies: `=== true` here was the half of the kill switch that a
+    // hand-edited non-boolean `localOnly` could slip past, re-arming this fallback.
+    //
+    // `cloudRegion: 'ca'` has no cloud fallback either, for a different reason: the
+    // v3 API answers those accounts HTTP 500, so a fallback there is not a slower
+    // path but a guaranteed failure preceded by a login attempt. Read from the
+    // config rather than from the platform's derived flag so a bare platform fake
+    // (every accessory test builds one) keeps behaving as before.
+    const localOnly = !!this.platform.kumoConfig.localOnly
+      || normalizeCloudRegion(this.platform.kumoConfig.cloudRegion) === 'ca';
     const local = this.platform.localClient;
     if (local && local.hasLocal(this.deviceSerial)) {
       const ok = await local.sendCommand(this.deviceSerial, commands);
@@ -998,9 +1081,24 @@ export class KumoThermostatAccessory {
         this.platform.log.debug(`[LOCAL] ${this.accessory.displayName}: command sent locally`);
         return true;
       }
+      if (localOnly) {
+        this.platform.log.error(
+          `[LOCAL] ${this.accessory.displayName}: local command failed and this mode has no ` +
+          'cloud fallback — not falling back',
+        );
+        return false;
+      }
       this.platform.log.debug(
         `[LOCAL] ${this.accessory.displayName}: local command failed — falling back to cloud`,
       );
+    } else if (localOnly) {
+      // Declared in localDevices but with no usable credentials — a config fault,
+      // not a transport one, so say so plainly instead of dialling the cloud.
+      this.platform.log.error(
+        `[LOCAL] ${this.accessory.displayName}: no local credentials for ${this.deviceSerial} ` +
+        'and this mode has no cloud fallback — command dropped',
+      );
+      return false;
     }
     return this.kumoAPI.sendCommand(this.deviceSerial, commands);
   }
@@ -1045,7 +1143,10 @@ export class KumoThermostatAccessory {
       // Validate required fields
       if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
         this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${zone.adapter.roomTemp}`);
-        this.platform.log.debug('Zone adapter data:', JSON.stringify(zone.adapter));
+        // Redacted through the shared field-name walk: this prints a whole vendor
+        // payload, and the cloud has served a per-device LAN credential (cryptoSerial)
+        // in a sibling payload already.
+        this.platform.log.debug('Zone adapter data:', JSON.stringify(redactPayload(zone.adapter)));
         return;
       }
 
@@ -1116,6 +1217,29 @@ export class KumoThermostatAccessory {
         defrost: this.currentStatus?.defrost,
         filterDirty: this.currentStatus?.filterDirty,
       };
+
+      // Keep a setpoint we just wrote over a reading taken while the adapter was
+      // still applying it. Only the field written is held, and only briefly: the
+      // reconcile remains the authority, so a value the device genuinely clamped
+      // still wins a couple of seconds later.
+      for (const field of ['spHeat', 'spCool', 'spAuto'] as const) {
+        const writtenAt = this.setpointWriteAt.get(field);
+        if (writtenAt === undefined) {
+          continue;
+        }
+        if (Date.now() - writtenAt >= this.SETPOINT_POLL_SUPPRESS_MS) {
+          this.setpointWriteAt.delete(field);
+          continue;
+        }
+        const ours = this.currentStatus?.[field];
+        if (typeof ours === 'number' && status[field] !== ours) {
+          this.platform.log.debug(
+            `${this.accessory.displayName}: holding ${field}=${ours}°C over the ${source} `
+            + `read of ${status[field]}°C — written ${Date.now() - writtenAt}ms ago`,
+          );
+          status[field] = ours;
+        }
+      }
 
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
@@ -1339,15 +1463,62 @@ export class KumoThermostatAccessory {
    * True when the unit is already off, or when a HomeKit off was requested within
    * OFF_SUPPRESS_WINDOW_MS — the window covers the concurrent "AC off" scene
    * burst, where the off command's optimistic state update hasn't landed yet.
+   *
+   * The off window is tested FIRST, before the cached status, and it has to stay
+   * that way. A missing cache means we don't know whether the unit is idle; it is
+   * never a reason to let a bare setpoint out behind an off HomeKit dispatched in
+   * the same burst — on the LAN path that setpoint carries no mode, so it revives
+   * the unit (the 1.7.2 failure). Consulting the cache first short-circuited the
+   * whole window whenever it was empty: the first seconds of every startup, and
+   * permanently on a unit whose reads answer without a roomTemp (getStatus returns
+   * null for those) while its writes still land. `offInFlight()` is the same
+   * null-safe primitive the fan-speed and vane writers already guard on.
    */
   private shouldSuppressSetpoint(): boolean {
+    if (this.offInFlight()) {
+      return true;
+    }
     if (!this.currentStatus) {
       return false;
     }
-    return (
-      this.currentStatus.power === 0 ||
-      this.currentStatus.operationMode === 'off' ||
-      Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS
+    return this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off';
+  }
+
+  /**
+   * Tell HomeKit a failed write really failed, when there is nothing to revert to.
+   *
+   * Every failure path below answers a rejected command by pushing the unit's real
+   * state back onto the characteristic — that revert IS the feedback, and it is why
+   * the setter can then resolve normally. With no cached status there is no real
+   * state to push, so resolving quietly left the Home app displaying whatever the
+   * user just set on a unit that never received it. Indefinitely, in local-only
+   * mode: a unit that never answers (wrong cryptoSerial, moved DHCP lease) never
+   * fills the cache either, and nothing in the plugin marks an accessory Not
+   * Responding (the cloud's `device_status_v2` is logged and nothing more), so
+   * rejecting the setter is the only signal the Home app can get.
+   *
+   * `HapStatusError` is read off the live `api.hap` rather than imported: the
+   * plugin has no runtime dependency on hap-nodejs (Homebridge injects it) and the
+   * accessory is also built by tests against a minimal fake. Any rejection makes
+   * HAP answer the controller with a communication failure; the typed error only
+   * names the status explicitly.
+   */
+  private failIfNothingToRevert(action: string): void {
+    if (this.currentStatus) {
+      return;
+    }
+    const hap = (this.platform.api as {
+      hap?: {
+        HapStatusError?: new (status: number) => Error;
+        HAPStatus?: { SERVICE_COMMUNICATION_FAILURE: number };
+      };
+    }).hap;
+    const status = hap?.HAPStatus?.SERVICE_COMMUNICATION_FAILURE;
+    if (hap?.HapStatusError && typeof status === 'number') {
+      throw new hap.HapStatusError(status);
+    }
+    throw new Error(
+      `${this.accessory.displayName}: ${action} failed and the unit's state is unknown`,
     );
   }
 
@@ -1363,9 +1534,16 @@ export class KumoThermostatAccessory {
   /**
    * Turn the unit on or off, independently of its mode.
    *
-   * Turning ON restores the mode the unit was last in rather than picking one:
-   * `previousOperationMode` is what the hardware itself remembers, and HomeKit
-   * sends Active=1 with no mode of its own.
+   * HomeKit sends Active=1 with no mode of its own, so one has to be chosen.
+   *
+   * On a unit that is already ON this reuses the mode it is in, which is what makes
+   * the ca.6 skip below possible. On a unit that is OFF it does NOT restore the
+   * previous mode — it cannot: the cached `operationMode` reads 'off', so
+   * defaultOnMode() decides, and that is AUTO unless the profile says the unit has
+   * no heat. (This comment used to claim `previousOperationMode` was consulted. It
+   * is not, anywhere in this method; the field is carried in DeviceStatus but the
+   * LAN status read never populates a meaningful one. Corrected 2026-08-20 —
+   * restoring the pre-off mode would mean remembering it ourselves.)
    */
   async setActive(value: CharacteristicValue): Promise<void> {
     const on = value === this.platform.Characteristic.Active.ACTIVE;
@@ -1389,6 +1567,23 @@ export class KumoThermostatAccessory {
     // reviving the unit. See offRequestedAt.
     this.noteModeIntent(operationMode);
 
+    // Tapping a mode in the Home app writes Active AND TargetHeaterCoolerState in
+    // one request. Active resolves to the REMEMBERED mode, so a unit already on in
+    // heat gets a redundant `heat` before the `cool` the user actually asked for —
+    // two LAN commands where one would do, and a visible detour through the old mode
+    // (observed 2026-08-19). Skip only when nothing would change, and NEVER skip an
+    // off: an off command must always reach the unit.
+    if (on && this.currentStatus?.operationMode === operationMode) {
+      this.platform.log.debug(
+        `[ACTIVE] ${this.accessory.displayName}: already ${operationMode} — not sending`,
+      );
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.Active,
+        this.platform.Characteristic.Active.ACTIVE,
+      );
+      return;
+    }
+
     const success = await this.sendDeviceCommand({ operationMode });
 
     if (!success) {
@@ -1401,6 +1596,7 @@ export class KumoThermostatAccessory {
           );
         }
       }, 100);
+      this.failIfNothingToRevert(`turning the unit ${on ? 'ON' : 'OFF'}`);
       return;
     }
 
@@ -1508,6 +1704,7 @@ export class KumoThermostatAccessory {
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${operationMode}`);
+      this.failIfNothingToRevert(`setting mode ${operationMode}`);
     }
   }
 
@@ -1707,6 +1904,34 @@ export class KumoThermostatAccessory {
       }, 100);
       return;
     }
+
+    // An ON trailing an off inside the same scene burst must NOT go through, for
+    // the same reason the mode writer refuses one — and it was the last door left
+    // open. An "AC off" scene captures the accessory's whole state, and this
+    // accessory publishes a Fanv2 tile alongside the climate tile: a scene
+    // recorded while the unit was running stores that tile as ACTIVE and re-pushes
+    // it on every trigger. Delegating it revived the unit, and worse, setActive's
+    // noteModeIntent then CLEARED the suppression window, so the setpoints
+    // dispatched behind it were sent too instead of being cached.
+    //
+    // Observed live 2026-08-20: a scene whose only purpose was to stop the heat
+    // pump left it running in auto, with both AUTO setpoints accepted 1s later.
+    //
+    // Only an off IN FLIGHT blocks. "Turn on the fan" on an idle unit still turns
+    // it on, which is the whole point of delegating an ON here.
+    if (this.offInFlight()) {
+      this.platform.log.debug(
+        `[FAN] ${this.accessory.displayName}: an off is in flight — not turning the unit on`,
+      );
+      setTimeout(() => {
+        if (this.currentStatus) {
+          this.fanService?.updateCharacteristic(
+            this.platform.Characteristic.Active, this.mapToActive(this.currentStatus));
+        }
+      }, 100);
+      return;
+    }
+
     await this.setActive(value);
   }
 
@@ -1794,6 +2019,23 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[FAN SPEED] ${this.accessory.displayName}: an off is in flight — not sending`,
       );
+      return;
+    }
+
+    // A slider drag emits one HAP request per position, each in its own event-loop
+    // tick, so queueFanIntent's same-tick coalescing does not merge them — and
+    // HomeKit re-sends the same value repeatedly. Observed live 2026-08-19 on a
+    // single unit: sixteen writes for three adjustments, including eight identical
+    // "quiet" in two seconds. The adapter tolerates about one local connection at a
+    // time (hence LocalKumoClient's per-device mutex), so each redundant write is a
+    // lock acquisition that changes nothing and risks wedging it. Skip a speed the
+    // unit is already known to be at; a genuine change still writes, and the local
+    // poll corrects any drift the wall remote introduced.
+    if (this.currentStatus?.fanSpeed === fanSpeed) {
+      this.platform.log.debug(
+        `[FAN SPEED] ${this.accessory.displayName}: already "${fanSpeed}" — not sending`,
+      );
+      this.syncFanCharacteristics(fanSpeed);
       return;
     }
 
@@ -2124,9 +2366,26 @@ export class KumoThermostatAccessory {
       return; // cloud-only: the next poll reconciles, ~7-10s behind.
     }
 
+    // Which write this reconcile belongs to. A later write on the same field makes
+    // this one worthless, and worse than worthless: two ordinary steps 2s apart
+    // (22 -> 22.5 -> 23, observed live 2026-08-20) scheduled two reconciles, and
+    // the FIRST one read the adapter before it had applied the second write. It
+    // found 22.5, published it over the 23 already on the tile, and the second
+    // reconcile then put 23 back — a visible bounce on the value the user had just
+    // set, plus two contradictory log lines blaming the device for holding a value
+    // nobody had asked it to keep any more.
+    //
+    // The write path already tracks this (setpointWriteGen, via holdSetpointWrite);
+    // the reconcile simply was not participating. Note the generation is bumped at
+    // the START of a write, so a write still in its hold already supersedes this.
+    const gen = this.setpointWriteGen.get(field);
+
     setTimeout(() => {
       void (async () => {
         try {
+          if (this.setpointWriteGen.get(field) !== gen) {
+            return; // a newer write owns this field; its own reconcile is the authority
+          }
           const status = await local.getStatus(this.deviceSerial);
           const actual = status?.[field];
           if (typeof actual !== 'number' || isNaN(actual)) {
@@ -2176,11 +2435,22 @@ export class KumoThermostatAccessory {
     const p = this.deviceProfile;
     const min = p ? Math.min(p.minimumSetPoints[field === 'spHeat' ? 'heat' : 'cool'], p.minimumSetPoints.auto) : 10;
     const max = p ? Math.max(p.maximumSetPoints[field === 'spHeat' ? 'heat' : 'cool'], p.maximumSetPoints.auto) : 35;
-    const q = quantizeSetpointInRange(temp, min, max);
+    // Quantize onto the grid of the unit actually being READ. The °F-anchored
+    // ceiling exists to reconcile two Fahrenheit renderers that disagree; for a
+    // Celsius reader it only pushes the setpoint up — 22.0 stored as 22.3 and shown
+    // as 22.5 on the Home app's 0.5 grid. The displayed unit comes from the account
+    // preference (see V2Inventory.celsius) and follows a manual flip in HomeKit, so
+    // the grid always matches what the user sees.
+    const celsius = this.accessory.context.displayUnits === 'C';
+    const q = celsius
+      ? quantizeSetpointInRangeCelsius(temp, min, max)
+      : quantizeSetpointInRange(temp, min, max);
     if (q !== temp) {
       this.platform.log.debug(
-        `[SETPOINT] ${this.accessory.displayName}: ${temp}°C -> ${q}°C ` +
-        `(${cToF(q).toFixed(0)}°F, snapped to the whole-°F grid)`,
+        `[SETPOINT] ${this.accessory.displayName}: ${temp}°C -> ${q}°C `
+        + (celsius
+          ? '(snapped to the 0.5°C grid the Home app displays)'
+          : `(${cToF(q).toFixed(0)}°F, snapped to the whole-°F grid)`),
       );
     }
     return q;
@@ -2206,20 +2476,43 @@ export class KumoThermostatAccessory {
       `[${label}] ${this.accessory.displayName}: HomeKit sent ${temp.toFixed(1)}°C (${tempF.toFixed(1)}°F)`,
     );
 
-    if (!this.currentStatus) {
-      this.platform.log.error(`[${label}] ${this.accessory.displayName}: no current status`);
-      return;
-    }
+    // No cached status is NOT a reason to drop the write. These two thresholds are
+    // the only setpoint controls on HeaterCooler, in every mode, and the transport
+    // needs no cached state to carry one — while HomeKit has already accepted the
+    // value, so bailing out left the tile showing a setpoint the unit never
+    // received. The window is wide in local-only mode, where nothing but the local
+    // poll (15s, and never at all if the unit was unreachable at startup) fills
+    // the cache. Every cache write below is therefore conditional, and
+    // shouldSuppressSetpoint() already answers false on a null status.
 
-    // Don't send a setpoint to a powered-off (or being-turned-off) unit: cache +
-    // echo only so the handle holds, without a doomed `modeRequiredWhenDeviceOff`
-    // 400 (1.5.2) and without a trailing setpoint reviving a unit an "AC off"
-    // scene is turning off (see offRequestedAt / shouldSuppressSetpoint).
-    if (this.shouldSuppressSetpoint()) {
+    // An off IN FLIGHT is decided here, synchronously, because that is the whole
+    // point of the 1.7.2 fix: a setpoint dispatched alongside an "AC off" must not
+    // trail it to the adapter, where a bare mode-less write revives the unit.
+    //
+    // A unit that is MERELY off is deliberately NOT decided here. It is decided
+    // after the hold below, by the same predicate, which reaches the same answer
+    // 1.5s later — with one exception, and the exception is the reason this guard
+    // was wrong: HomeKit dispatches every characteristic of one write request
+    // concurrently, and setActive marks the unit on only AFTER its command
+    // resolves. So an "AC on at 22" scene, which pushes Active together with the
+    // captured setpoints, had every setpoint read `power === 0` and get cached and
+    // echoed while only the mode reached the unit. The unit then ran at its old
+    // setpoint while the Home app showed the requested one, until a poll snapped
+    // the tile back. No error, no revert — the command was simply lost.
+    //
+    // This is the exact mirror of the 1.7.2 off-scene bug, and the mode writer
+    // already draws the line in the right place ("picking a mode on a unit that is
+    // merely off is how a user turns it back on"). Deferring to the post-hold
+    // check keeps every protection: a genuinely idle unit is still suppressed
+    // there, so a bare setpoint still cannot revive it, and if the concurrent on
+    // command FAILS the cache stays `power: 0` and the setpoint is suppressed too.
+    if (this.offInFlight()) {
       this.platform.log.debug(
-        `[${label}] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending`,
+        `[${label}] ${this.accessory.displayName}: an off is in flight — caching ${temp}°C without sending`,
       );
-      this.currentStatus[field] = temp;
+      if (this.currentStatus) {
+        this.currentStatus[field] = temp;
+      }
       this.service.updateCharacteristic(characteristic, temp);
       return;
     }
@@ -2249,7 +2542,10 @@ export class KumoThermostatAccessory {
 
     if (success) {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
-      this.currentStatus[field] = temp;
+      if (this.currentStatus) {
+        this.currentStatus[field] = temp;
+      }
+      this.setpointWriteAt.set(field, Date.now());
       this.service.updateCharacteristic(characteristic, temp);
       // Then confirm against the device rather than trusting our own echo.
       this.scheduleSetpointReconcile(field);
@@ -2261,6 +2557,7 @@ export class KumoThermostatAccessory {
       setTimeout(() => {
         this.service.updateCharacteristic(characteristic, this.getThresholdTemperature(field, fallback));
       }, 100);
+      this.failIfNothingToRevert(`setting ${field}`);
     }
   }
 
