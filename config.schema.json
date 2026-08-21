@@ -7,9 +7,7 @@
   "schema": {
     "type": "object",
     "required": [
-      "name",
-      "username",
-      "password"
+      "name"
     ],
     "properties": {
       "name": {
@@ -21,12 +19,51 @@
         "title": "Username",
         "type": "string",
         "format": "email",
-        "description": "Your Kumo Cloud email address"
+        "description": "Your Kumo Cloud email address. Required unless Local-only mode is on, which never signs in."
       },
       "password": {
         "title": "Password",
         "type": "string",
-        "description": "Your Kumo Cloud password"
+        "description": "Your Kumo Cloud password. Required unless Local-only mode is on, which never signs in."
+      },
+      "cloudRegion": {
+        "title": "Account Region (which Mitsubishi backend serves your account)",
+        "type": "string",
+        "default": "us",
+        "oneOf": [
+          {
+            "title": "United States and default — app-prod v3",
+            "enum": [
+              "us"
+            ]
+          },
+          {
+            "title": "Canada — mesca-prod v2, LAN control",
+            "enum": [
+              "ca"
+            ]
+          }
+        ],
+        "description": "Not a preference: a property of your account. \"United States\" is the v3 API this plugin has always spoken. \"Canada\" selects https://mesca-prod.kumocloud.com/login/v2, which is where Canadian accounts live — v3 answers HTTP 500 for them — so with \"Canada\" the plugin never contacts v3 at all: no streaming, no zone polling, no cloud fallback for a command. One v2 sign-in at startup supplies the unit list, each unit's real capability profile, and the two secrets its WiFi adapter authenticates with; control then runs entirely over your LAN, so every unit must be reachable there — give each one a DHCP reservation. Nothing has to be declared by hand, and neither secret is written to config.json. Needs a full Homebridge restart to change."
+      },
+      "localCredentialSource": {
+        "title": "Where the per-unit LAN secrets come from",
+        "type": "string",
+        "oneOf": [
+          {
+            "title": "v3 cloud — default, currently serves neither secret",
+            "enum": [
+              "v3"
+            ]
+          },
+          {
+            "title": "v2 cloud sign-in",
+            "enum": [
+              "v2"
+            ]
+          }
+        ],
+        "description": "Local control needs two secrets per unit (the adapter's password and its cryptoSerial). Around 2026-07-31 the v3 cloud stopped serving both (pykumo issue #78), which is why local control does nothing by default. \"v2 cloud sign-in\" posts your username and password once at startup to the region's v2 login (United States: https://geo-c.kumocloud.com/login) and reads the two secrets from the reply; nothing else is read from it, nothing is written back to config.json, and neither secret is ever logged — not even with Debug Mode on. Setting this implies local control. With Region = Canada it is already the v2 source and cannot be v3. Verification status: the Canadian reply was mapped live on 2026-08-18; the United States host is inherited from Home Assistant's mitsubishi_comfort v0.5.2 and is NOT re-verified here."
       },
       "pollInterval": {
         "title": "Poll Interval (seconds)",
@@ -57,7 +94,7 @@
         "title": "Show Dry (dehumidify) switch",
         "type": "boolean",
         "default": false,
-        "description": "Add a separate Dry switch tile per unit. Off by default: HeaterCooler now carries fan speed and vane on the main tile, so the extra switches are only needed if you want one-tap access to dehumidify. Only added on units whose profile reports dry support."
+        "description": "Add a separate Dry switch tile per unit. Off by default: HeaterCooler now carries fan speed and vane on the main tile, so the extra switches are only needed if you want one-tap access to dehumidify. Only added on units whose profile reports dry support. In local-only mode a unit that declares hasModeDry gets the tile without this; turning this off explicitly still suppresses it."
       },
       "showFanOnlySwitch": {
         "title": "Show Fan-only switch",
@@ -108,10 +145,10 @@
         "description": "Fast polling interval when streaming is unhealthy (default: 10 seconds)"
       },
       "localControl": {
-        "title": "Enable Local Control (currently blocked by the vendor)",
+        "title": "Enable Local Control (needs a working secret source)",
         "type": "boolean",
         "default": false,
-        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. Around 2026-07-31 Mitsubishi's cloud stopped serving the two per-device secrets a unit's adapter needs to authenticate a local request (pykumo issue #78), so this cannot work at present and everything runs over the cloud. Leaving it on costs one warning and nothing else: the plugin recovers by itself if the vendor reverts. Requires a full Homebridge restart to toggle (child bridges get their config from the parent process)."
+        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. Around 2026-07-31 Mitsubishi's v3 cloud stopped serving the two per-device secrets a unit's adapter needs to authenticate a local request (pykumo issue #78), so with the default secret source this does nothing and everything runs over the cloud. Set \"Where the per-unit LAN secrets come from\" to the v2 sign-in and it works again for accounts that endpoint serves. Requires a full Homebridge restart to toggle (child bridges get their config from the parent process)."
       },
       "localPollInterval": {
         "title": "Local Poll Interval (seconds)",
@@ -121,6 +158,105 @@
         "maximum": 120,
         "description": "How often to read unit status over the LAN when local control is enabled (default: 15)"
       },
+      "localOnly": {
+        "title": "Local-only mode (never contact the cloud)",
+        "type": "boolean",
+        "default": false,
+        "description": "Control every unit exclusively over your LAN, with no cloud contact at all: no sign-in, no site or zone fetch, no streaming, and no cloud fallback for a command the LAN refuses. Each unit must be declared under Local Devices below, including the two secrets its WiFi adapter authenticates with. This exists because the cloud cannot always supply them: around 2026-07-31 the v3 API stopped serving both (pykumo issue #78), and Canadian accounts are served by a separate v2 backend that the v3 endpoints reject outright, so those accounts cannot sign in here at all. Username and password are ignored in this mode. What you give up: indoor humidity (a separate sensor query the cloud used to answer), the real setpoint limits and capability flags from the device profile (declare them per unit below), and the cloud's \"not responding\" detection."
+      },
+      "localDevices": {
+        "title": "Local Devices",
+        "type": "array",
+        "description": "The units to control in Local-only mode. Nothing is discovered — serial, address and both secrets are read from here. To get the two secrets you need a source that still serves them: the Canadian endpoint (https://mesca-prod.kumocloud.com/login/v2, protocol v2) returns them for accounts it serves, and older Kumo app or pykumo captures also work. The password is the adapter's base64 local password; the cryptoSerial is its hex serial (9 bytes or more). Both are stored in clear text in config.json.",
+        "items": {
+          "type": "object",
+          "required": [
+            "deviceSerial",
+            "ip",
+            "password",
+            "cryptoSerial"
+          ],
+          "properties": {
+            "deviceSerial": {
+              "title": "Device Serial",
+              "type": "string",
+              "placeholder": "e.g., 1234A5678901234B",
+              "description": "The adapter's serial number — the id the plugin keys this unit on"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "placeholder": "e.g., Living room",
+              "description": "Name shown in HomeKit. Defaults to the serial number."
+            },
+            "ip": {
+              "title": "LAN IP Address",
+              "type": "string",
+              "placeholder": "e.g., 192.168.6.11",
+              "description": "The unit's address on your network. Give it a DHCP reservation on your router: when the lease moves, local control for this unit stops and there is no cloud to fall back to."
+            },
+            "password": {
+              "title": "Local Password (base64)",
+              "type": "string",
+              "description": "The adapter's local API password, base64, exactly as the cloud reports it in adapter_update"
+            },
+            "cryptoSerial": {
+              "title": "Crypto Serial (hex)",
+              "type": "string",
+              "description": "The adapter's cryptoSerial, hex, at least 9 bytes (18 hex characters)"
+            },
+            "hasModeDry": {
+              "title": "Supports dry (dehumidify)",
+              "type": "boolean",
+              "description": "Stands in for the device profile's dry capability. In local-only mode this also adds the Dry switch tile, which is the only way to select dry mode — unless \"Show Dry (dehumidify) switch\" above is explicitly turned off."
+            },
+            "hasModeVent": {
+              "title": "Supports fan-only (vent)",
+              "type": "boolean",
+              "description": "Stands in for the device profile's vent capability. In local-only mode this also adds the Fan-only switch tile — unless \"Show Fan-only switch\" above is explicitly turned off."
+            },
+            "hasModeHeat": {
+              "title": "Supports heating",
+              "type": "boolean",
+              "description": "Turn off for a cooling-only unit: HEAT and AUTO are then removed from the mode picker instead of producing commands the unit rejects"
+            },
+            "usesSetPointInDryMode": {
+              "title": "Dry mode accepts a setpoint",
+              "type": "boolean",
+              "description": "When true, the dry setpoint is read and written through spCool (there is no spDry field)"
+            },
+            "hasFanSpeedAuto": {
+              "title": "Supports auto fan speed",
+              "type": "boolean"
+            },
+            "hasVaneDir": {
+              "title": "Has a steerable vane",
+              "type": "boolean"
+            },
+            "hasVaneSwing": {
+              "title": "Vane can swing",
+              "type": "boolean"
+            },
+            "numberOfFanSpeeds": {
+              "title": "Discrete fan speeds",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Advisory only: all five named speeds are offered on every unit regardless of this value"
+            },
+            "minSetPoint": {
+              "title": "Minimum setpoint (°C)",
+              "type": "number",
+              "description": "Match the unit's own installer limit. Unlike the cloud, the adapter accepts an out-of-range setpoint and then ignores it, so a wrong bound here fails silently."
+            },
+            "maxSetPoint": {
+              "title": "Maximum setpoint (°C)",
+              "type": "number",
+              "description": "Match the unit's own installer limit. See the minimum above."
+            }
+          }
+        }
+      },
       "localControlIps": {
         "title": "Local IP Overrides",
         "type": "object",
@@ -129,7 +265,7 @@
       "mirror": {
         "title": "Device Mirroring",
         "type": "array",
-        "description": "Make one unit follow another. Whenever the source changes (via any control \u2014 wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
+        "description": "Make one unit follow another. Whenever the source changes (via any control — wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
         "items": {
           "type": "object",
           "required": [
@@ -161,8 +297,31 @@
       "expandable": false,
       "items": [
         "name",
-        "username",
-        "password"
+        {
+          "key": "username",
+          "condition": {
+            "functionBody": "return !model.localOnly;"
+          }
+        },
+        {
+          "key": "password",
+          "condition": {
+            "functionBody": "return !model.localOnly;"
+          }
+        },
+        {
+          "key": "cloudRegion",
+          "condition": {
+            "functionBody": "return !model.localOnly;"
+          }
+        },
+        {
+          "type": "help",
+          "helpvalue": "<div class=\"help-block\">Local-only mode is on, so no cloud credentials are used. Declare your units under <b>Local-only Mode</b> below.</div>",
+          "condition": {
+            "functionBody": "return model.localOnly === true;"
+          }
+        }
       ]
     },
     {
@@ -209,11 +368,56 @@
       "expandable": true,
       "expanded": false,
       "items": [
+        {
+          "key": "localCredentialSource",
+          "condition": {
+            "functionBody": "return !model.localOnly && model.cloudRegion !== 'ca';"
+          }
+        },
         "localControl",
         "localPollInterval",
         {
           "type": "help",
           "helpvalue": "<div class=\"help-block\"><b>Local IP overrides</b> (<code>localControlIps</code>) are a free-form <code>{ \"&lt;deviceSerial&gt;\": \"&lt;ip&gt;\" }</code> map, which this form cannot render as fields. Set it in the JSON config editor if you want to skip the LAN sweep for specific units. Any value already there is preserved.</div>"
+        }
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Local-only Mode (no cloud)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "localOnly",
+        {
+          "key": "localDevices",
+          "type": "array",
+          "title": "Local Devices",
+          "buttonText": "Add Local Device",
+          "condition": {
+            "functionBody": "return model.localOnly === true;"
+          },
+          "items": [
+            "localDevices[].name",
+            "localDevices[].deviceSerial",
+            "localDevices[].ip",
+            "localDevices[].password",
+            "localDevices[].cryptoSerial",
+            "localDevices[].hasModeDry",
+            "localDevices[].hasModeVent",
+            "localDevices[].hasModeHeat",
+            "localDevices[].usesSetPointInDryMode",
+            "localDevices[].hasFanSpeedAuto",
+            "localDevices[].hasVaneDir",
+            "localDevices[].hasVaneSwing",
+            "localDevices[].numberOfFanSpeeds",
+            "localDevices[].minSetPoint",
+            "localDevices[].maxSetPoint"
+          ]
+        },
+        {
+          "type": "help",
+          "helpvalue": "<div class=\"help-block\"><b>If your account is Canadian, use <i>Account Region = Canada</i> instead</b> — it fetches these values by itself, including each unit's real capability profile, and keeps no secret in config.json. Local-only mode is now only for running with <b>no cloud contact whatsoever</b>. Use this only if the cloud cannot serve your units: since about <b>2026-07-31</b> the v3 API no longer returns the two per-device local secrets (pykumo issue #78), and <b>Canadian accounts</b> live on a separate v2 backend (<code>mesca-prod.kumocloud.com</code>) that the v3 login rejects, so those accounts cannot sign in at all. Both secrets are stored in <b>clear text</b> in config.json. <code>Local Poll Interval</code> above applies here too, and toggling this needs a <b>full Homebridge restart</b> (child bridges take their config from the parent process).</div>"
         }
       ]
     },

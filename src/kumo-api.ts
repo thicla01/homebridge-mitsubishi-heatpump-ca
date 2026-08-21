@@ -16,6 +16,7 @@ import {
   SendCommandRequest,
   SendCommandResponse,
   isVaneDirection,
+  LocalCredentialSource,
 } from './settings';
 
 /**
@@ -87,6 +88,86 @@ export function describeRequestError(error: Error): string {
   return reason && reason !== error.message ? `${error.message}: ${reason}` : error.message;
 }
 
+/**
+ * Field names whose VALUE must never reach a log line, at any level.
+ *
+ * Matched on the normalized name (lower-cased, separators stripped), so
+ * `cryptoSerial`, `crypto_serial` and `CryptoSerial` are one entry — the two clouds
+ * disagree on casing and this plugin logs payloads from both shapes.
+ */
+const REDACTED_FIELD_NAMES: ReadonlySet<string> = new Set([
+  'password', 'cryptoserial', 'token', 'accesstoken', 'refreshtoken', 'refresh',
+  'idtoken', 'apikey', 'authorization', 'secret', 'mac',
+]);
+
+/** Depth cap, so a malformed or deeply nested payload cannot spin the walk. */
+const REDACTION_MAX_DEPTH = 8;
+
+/**
+ * A copy of a vendor payload with every known secret field replaced.
+ *
+ * The debug lines in this file print whole cloud payloads (`RAW Zone JSON`, the
+ * stream and adapter update details, request and error bodies) and they earn their
+ * keep: they are what a user is asked for when the plugin stops working. What they
+ * must not do is empty a per-device LAN credential into homebridge.log.
+ *
+ * Before this, the only protection anywhere was one destructured field name —
+ * `const { password, ...safeData } = data` in the `adapter_update` handler — which
+ * covered neither `cryptoSerial` nor a token, on a payload whose shape is the
+ * VENDOR's to change. The cloud has already served `cryptoSerial` from
+ * `/devices/{serial}/status`, so "it is not in this payload today" was never a
+ * property of the code. Redaction is therefore applied at every site that
+ * stringifies a cloud object, indexed on the field name rather than on the site.
+ *
+ * A deny-list rather than an allow-list, deliberately: a field APPEARING is exactly
+ * the hazard, and an allow-list would blank each newly-served diagnostic field
+ * until someone re-approved it — the same failure mode as no logs at all. The
+ * `[redacted]` marker keeps the one useful fact about a secret field (that it was
+ * present at all), which is what the local-credential outage detection reads.
+ */
+export function redactPayload(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return '[circular]';
+  }
+  if (depth >= REDACTION_MAX_DEPTH) {
+    return '[deep]';
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactPayload(entry, depth + 1, seen));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = REDACTED_FIELD_NAMES.has(key.toLowerCase().replace(/[^a-z0-9]/g, ''))
+      ? '[redacted]'
+      : redactPayload(entry, depth + 1, seen);
+  }
+  return out;
+}
+
+/**
+ * The same treatment for a response body that arrived as text.
+ *
+ * Every v3 error body observed is JSON, so parsing it is what makes the field-name
+ * rule apply. A body that is NOT JSON is returned unchanged: there is no field to
+ * index, and the 400-validation message it usually is happens to be the single most
+ * useful line in the log (it is not gated on debug for that reason).
+ */
+export function redactBodyText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === 'object') {
+      return JSON.stringify(redactPayload(parsed));
+    }
+  } catch {
+    // Not JSON — nothing to index by field name.
+  }
+  return text;
+}
+
 export class KumoAPI {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
@@ -151,19 +232,61 @@ export class KumoAPI {
   private readonly socketConnectTimeout: number = 20000; // 20 seconds
 
   constructor(
-    private readonly username: string,
-    private readonly password: string,
+    // Optional because local-only mode has no credentials at all. Typing them as
+    // `string` while the config left them undefined only hid that from the
+    // compiler; login() refuses rather than posting an empty body.
+    private readonly username: string | undefined,
+    private readonly password: string | undefined,
     private readonly log: Logger,
     debug: boolean = false,
     enableStreaming: boolean = true,
+    /**
+     * Hard kill switch for every cloud call (`localOnly`). Set at the transport
+     * rather than at each caller on purpose: the promise "never contacts the
+     * cloud" then holds structurally, instead of depending on every present and
+     * future call site remembering to check the mode. The leak this closes was
+     * accessory.sendDeviceCommand's cloud fallback, which turned any failed LAN
+     * write into a real POST /v3/login.
+     */
+    private readonly cloudDisabled: boolean = false,
+    /**
+     * Where the two per-device LAN secrets come from. `'v2'` means they are fetched
+     * by src/kumo-v2.ts, so v3 not carrying them is EXPECTED rather than an outage:
+     * the "the cloud stopped sending the local password / cryptoSerial" warnings
+     * below stay silent, because under that source local control is working and the
+     * remedy they name (`localControl: false`) is a config the validator REJECTS
+     * alongside `localCredentialSource: 'v2'` — following the advice would take the
+     * whole platform idle.
+     *
+     * Passed in rather than inferred, and defaulted to `'v3'`, so an instance built
+     * without it behaves exactly as before.
+     */
+    private readonly localCredentialSource: LocalCredentialSource = 'v3',
   ) {
     this.debugMode = debug;
-    this.streamingEnabled = enableStreaming;
+    this.streamingEnabled = enableStreaming && !cloudDisabled;
     if (this.debugMode) {
-      this.log.info('Debug mode enabled');
+      // Deliberately not "Debug mode enabled", which is what this said and which is
+      // misleading: this flag only turns on the plugin's own extra bookkeeping. Every
+      // detailed diagnostic the plugin emits goes to log.debug, and Homebridge drops
+      // that channel entirely unless Homebridge ITSELF was started with -D. Observed
+      // 2026-08-19: with this flag on and -D off, a full restart plus ten minutes of
+      // polling produced 18 log lines and not one debug line, while we were waiting
+      // on a debug line to confirm a fix. Saying "enabled" is what sent us looking.
+      this.log.info(
+        'Debug mode: extra plugin bookkeeping is on. The detailed per-command diagnostics '
+        + 'go to Homebridge\'s debug channel, which prints ONLY if Homebridge itself runs '
+        + 'with -D (Homebridge Settings -> Startup & Environment -> Homebridge Debug Mode). '
+        + 'Without that, expect this line and little else.',
+      );
       this.log.warn('Debug mode may log sensitive information - use only for troubleshooting');
     }
-    if (this.streamingEnabled) {
+    if (this.cloudDisabled) {
+      // Reworded from "Local-only mode": the same kill switch now also covers
+      // `cloudRegion: 'ca'`, which contacts a v2 host once (from src/kumo-v2.ts, a
+      // module that holds no reference to this class) while the v3 API stays inert.
+      this.log.info('The v3 cloud API is disabled — no login, no streaming, no zone polling');
+    } else if (this.streamingEnabled) {
       this.log.info('Streaming mode enabled - real-time updates will be used');
     }
   }
@@ -179,6 +302,15 @@ export class KumoAPI {
   }
 
   async login(): Promise<boolean> {
+    if (this.cloudDisabled) {
+      this.log.debug('Login skipped: the cloud API is disabled (localOnly)');
+      return false;
+    }
+    if (!this.username || !this.password) {
+      this.log.error('Cannot login: no username/password configured');
+      return false;
+    }
+
     // Enforce minimum interval between login attempts to avoid rate limiting
     const timeSinceLastLogin = Date.now() - this.lastLoginAttempt;
     if (this.lastLoginAttempt > 0 && timeSinceLastLogin < this.minLoginInterval) {
@@ -238,9 +370,12 @@ export class KumoAPI {
         }
 
         this.log.error(`Login failed with status: ${response.status}`);
-        // Only log response body in debug mode, as it may contain sensitive info
+        // Debug-gated AND field-redacted. The gate alone was the old protection, and
+        // debug is exactly the setting a user turns on to diagnose a failing login —
+        // which is when this body, the one most likely to echo an account identifier
+        // or a token back, gets printed.
         if (this.debugMode && errorText) {
-          this.log.debug(`Login error response: ${errorText}`);
+          this.log.debug(`Login error response: ${redactBodyText(errorText)}`);
         }
         this.loginRetryCount = 0;
         return false;
@@ -325,6 +460,10 @@ export class KumoAPI {
   }
 
   private async refreshAccessToken(): Promise<boolean> {
+    if (this.cloudDisabled) {
+      this.log.debug('Token refresh skipped: the cloud API is disabled (localOnly)');
+      return false;
+    }
     if (!this.refreshToken) {
       this.log.error('No refresh token available, need to login again');
       return await this.login();
@@ -368,7 +507,9 @@ export class KumoAPI {
 
       if (!response.ok) {
         const errorText = await response.text();
-        this.log.warn(`Token refresh failed (${response.status}): ${errorText}`);
+        // Not debug-gated (a failing refresh matters), so the field-name walk is the
+        // only thing between a refresh-endpoint body and homebridge.log.
+        this.log.warn(`Token refresh failed (${response.status}): ${redactBodyText(errorText)}`);
 
         // Handle rate limiting specifically
         if (response.status === 429) {
@@ -477,6 +618,11 @@ export class KumoAPI {
     method: string = 'GET',
     body?: unknown,
   ): Promise<T | null> {
+    if (this.cloudDisabled) {
+      this.log.debug(`Cloud request skipped (localOnly): ${method} ${endpoint}`);
+      return null;
+    }
+
     // Ensure we have a valid token
     const authenticated = await this.ensureAuthenticated();
     if (!authenticated) {
@@ -500,7 +646,7 @@ export class KumoAPI {
       if (this.debugMode) {
         this.log.info(`→ API Request: ${method} ${endpoint}`);
         if (body) {
-          this.log.info(`  Body: ${JSON.stringify(body)}`);
+          this.log.info(`  Body: ${JSON.stringify(redactPayload(body))}`);
         }
       }
 
@@ -532,7 +678,7 @@ export class KumoAPI {
         const errorText = await response.text();
         // Always log 400 errors to see API validation messages
         if (this.debugMode || response.status === 400) {
-          this.log.error(`  Error response: ${errorText}`);
+          this.log.error(`  Error response: ${redactBodyText(errorText)}`);
         }
         return null;
       }
@@ -572,6 +718,17 @@ export class KumoAPI {
   }
 
   async getZones(siteId: string): Promise<Zone[]> {
+    // Explicit, even though ensureAuthenticated below would also refuse: this method
+    // is the ONE place in the file that builds its own `fetch(API_BASE_URL + ...)`
+    // instead of going through makeAuthenticatedRequest, so it was safe only
+    // TRANSITIVELY — no token, no login, empty array. That inheritance breaks the
+    // moment anything seeds a token onto the instance, which a bootstrap that talks
+    // to a different backend is exactly the kind of change to want.
+    if (this.cloudDisabled) {
+      this.log.debug('Zone fetch skipped: the v3 cloud API is disabled');
+      return [];
+    }
+
     // Ensure we have a valid token
     const authenticated = await this.ensureAuthenticated();
     if (!authenticated) {
@@ -595,7 +752,9 @@ export class KumoAPI {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        this.log.error(`Failed to fetch zones for site ${siteId}: ${response.status} - ${errorBody}`);
+        this.log.error(
+          `Failed to fetch zones for site ${siteId}: ${response.status} - ${redactBodyText(errorBody)}`,
+        );
         return [];
       }
 
@@ -609,7 +768,7 @@ export class KumoAPI {
         // Log raw JSON for each zone to see all available fields
         zones.forEach(zone => {
           this.log.info(`  RAW Zone JSON for ${zone.name}:`);
-          this.log.info(JSON.stringify(zone, null, 2));
+          this.log.info(JSON.stringify(redactPayload(zone), null, 2));
         });
 
         zones.forEach(zone => {
@@ -665,7 +824,7 @@ export class KumoAPI {
     if (!response.devices || !Array.isArray(response.devices)) {
       this.log.error(`Send command failed: unexpected response format for device ${deviceSerial}`);
       if (this.debugMode) {
-        this.log.debug(`Response:`, JSON.stringify(response));
+        this.log.debug(`Response:`, JSON.stringify(redactPayload(response)));
       }
       return false;
     }
@@ -683,6 +842,10 @@ export class KumoAPI {
   // Streaming methods
 
   async startStreaming(deviceSerials: string[]): Promise<boolean> {
+    if (this.cloudDisabled) {
+      this.log.debug('Streaming skipped: the cloud API is disabled (localOnly)');
+      return false;
+    }
     if (!this.streamingEnabled) {
       this.log.debug('Streaming is disabled, skipping connection');
       return false;
@@ -804,7 +967,7 @@ export class KumoAPI {
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
-          this.log.debug(`Stream update detail: ${JSON.stringify(data)}`);
+          this.log.debug(`Stream update detail: ${JSON.stringify(redactPayload(data))}`);
         }
 
         // Trigger callbacks for this device. Guarded like sensor_update below: this
@@ -832,9 +995,16 @@ export class KumoAPI {
         if (data.deviceSerial && password) {
           this.adapterUpdatesWithoutPassword = 0;
           this.adapterPasswords.set(data.deviceSerial, password);
-        } else if (data.deviceSerial) {
+        } else if (data.deviceSerial && this.localCredentialSource === 'v3') {
           // An adapter_update for a real device that carried no password at all.
           // Three in a row is the cloud having stopped sending it, not a one-off.
+          //
+          // Only reported when v3 IS the credential source. Under
+          // `localCredentialSource: 'v2'` the secrets come from the v2 sign-in and
+          // this event is not expected to carry one, so the warning would announce a
+          // broken local control that is in fact working — and its old remedy
+          // (`localControl: false`) is rejected by validatePlatformConfig next to a
+          // v2 source, so acting on it would leave the platform idle.
           this.adapterUpdatesWithoutPassword++;
           if (this.adapterUpdatesWithoutPassword >= 3 && !this.warnedNoAdapterPassword) {
             this.warnedNoAdapterPassword = true;
@@ -842,13 +1012,16 @@ export class KumoAPI {
               'Kumo cloud has stopped sending the per-device local password in adapter_update, so '
               + 'local LAN control cannot authenticate and the plugin is using cloud control. This '
               + 'is a cloud-side change, not a problem with your network or config. Set '
-              + 'localControl: false to silence this.',
+              + 'localCredentialSource: "v2" to fetch the secrets from the v2 cloud instead, or '
+              + 'localControl: false to stay on cloud control and silence this.',
             );
           }
         }
         this.log.debug(`Adapter update for ${serial}: fw=${safeData.firmwareVersion}, rssi=${safeData.routerRssi}`);
         if (this.debugMode) {
-          this.log.debug(`Adapter update detail: ${JSON.stringify(safeData)}`);
+          // redactPayload on the WHOLE event, not on the password-stripped copy: the
+          // strip covers exactly one field name of a payload the vendor controls.
+          this.log.debug(`Adapter update detail: ${JSON.stringify(redactPayload(data))}`);
         }
       });
 
@@ -887,18 +1060,7 @@ export class KumoAPI {
           maximumSetPoints: data.maximumSetPoints ?? { cool: 31, heat: 31, auto: 31 },
         };
 
-        this.log.debug(`Profile for ${serial}: temp range ${JSON.stringify(profile.minimumSetPoints)}-${JSON.stringify(profile.maximumSetPoints)}, fans=${profile.numberOfFanSpeeds}`);
-
-        // Guarded per callback: one accessory throwing while applying a profile must
-        // not skip the remaining accessories, and must not escape into socket.io's
-        // emit loop.
-        for (const callback of this.deviceProfileCallbacks) {
-          try {
-            callback(serial, profile);
-          } catch (e) {
-            this.log.error(`Profile update callback error for ${serial}: ${(e as Error).message}`);
-          }
-        }
+        this.emitDeviceProfile(serial, profile);
       });
 
       this.socket.on('acoil_update', (data: any) => {
@@ -1009,6 +1171,31 @@ export class KumoAPI {
     this.deviceProfileCallbacks.add(callback);
   }
 
+  /**
+   * Fan a profile out to the registered listeners. The single path for both
+   * sources: the cloud's `profile_update` handler calls this, and local-only mode
+   * — which has no cloud to learn capabilities from — feeds in a profile the
+   * platform synthesises from config. Sharing it keeps one diagnostic line and
+   * one set of guards for both.
+   */
+  emitDeviceProfile(serial: string, profile: DeviceProfile): void {
+    this.log.debug(
+      `Profile for ${serial}: temp range ${JSON.stringify(profile.minimumSetPoints)}-` +
+      `${JSON.stringify(profile.maximumSetPoints)}, fans=${profile.numberOfFanSpeeds}`,
+    );
+
+    // Guarded per callback: one accessory throwing while applying a profile must
+    // not skip the remaining accessories, and must not escape into socket.io's
+    // emit loop.
+    for (const callback of this.deviceProfileCallbacks) {
+      try {
+        callback(serial, profile);
+      } catch (e) {
+        this.log.error(`Profile update callback error for ${serial}: ${(e as Error).message}`);
+      }
+    }
+  }
+
   /** Notified whenever a paired wireless sensor reports, via `sensor_update`. */
   onSensorUpdate(callback: SensorUpdateCallback): void {
     this.sensorUpdateCallbacks.add(callback);
@@ -1031,13 +1218,17 @@ export class KumoAPI {
     // endpoint still answers 200, just without the field. That used to return null
     // silently, so the only symptom a user got was local control never starting.
     if (status && (typeof status.cryptoSerial !== 'string' || status.cryptoSerial.length === 0)) {
-      if (!this.warnedNoCryptoSerial) {
+      // Guarded on the source for the same reason as its sibling in the
+      // `adapter_update` handler: under a v2 credential source the v3 endpoint is
+      // not where the value is expected to come from, so this is not an outage.
+      if (!this.warnedNoCryptoSerial && this.localCredentialSource === 'v3') {
         this.warnedNoCryptoSerial = true;
         this.log.warn(
           'Kumo cloud has stopped returning cryptoSerial from /devices/<serial>/status, so local '
           + 'LAN control cannot authenticate and the plugin is using cloud control. This is a '
-          + 'cloud-side change, not a problem with your network or config. Set localControl: false '
-          + 'to silence this.',
+          + 'cloud-side change, not a problem with your network or config. Set '
+          + 'localCredentialSource: "v2" to fetch the secrets from the v2 cloud instead, or '
+          + 'localControl: false to stay on cloud control and silence this.',
         );
       }
       return null;

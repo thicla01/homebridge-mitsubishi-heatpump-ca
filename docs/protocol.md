@@ -161,8 +161,75 @@ assembled from a fixed 32-byte constant, `sha256(password ‖ body)`, and the fi
 of `cryptoSerial` (`src/local-api.ts:101-124`).
 
 Both halves of the key come from the cloud — `password` from `adapter_update`,
-`cryptoSerial` from `GET /devices/{serial}/status` — and **the cloud stopped serving both
+`cryptoSerial` from `GET /devices/{serial}/status` — and **the v3 cloud stopped serving both
 around 2026-07-31**. See [README → Local LAN control](../README.md#local-lan-control).
+
+Both are per-unit and stable, so they can come from elsewhere: the **v2 cloud** below
+serves them still (`localCredentialSource: "v2"`, or implied by `cloudRegion: "ca"`), and
+`localOnly` reads them from `localDevices` in the config and skips every cloud entirely.
+
+## REST, v2
+
+A second, older backend, used ONLY as a bootstrap for LAN control: one POST at startup,
+nothing else, nothing written back. Two reasons to reach for it — the v3 credential
+removal above, and accounts v3 refuses outright.
+
+| Region | Endpoint |
+|---|---|
+| Canada (`cloudRegion: "ca"`) | `POST https://mesca-prod.kumocloud.com/login/v2` |
+| United States (`localCredentialSource: "v2"`) | `POST https://geo-c.kumocloud.com/login` |
+
+**The host and the path both vary** — mesca answers `/login/v2`, geo-c answers `/login` —
+which is why the option is a named region rather than a hostname. The body is
+`{ username, password, appVersion: "2.2.0" }` and there is **no `X-App-Version` header**
+(v2 carries the version in the body). Canadian accounts answer `POST /v3/login` with
+**HTTP 500**, where a non-existent account gets 403, so the 500 is specific to an account
+the v3 backend knows and does not serve. `mesca-prod` resolves to an ELB named
+`mesca-kumo-green-west-arm-app` (mesca = Mitsubishi Electric Sales Canada).
+
+The reply is an **array**, and only `root[2]` is read (`src/kumo-v2.ts`):
+
+| Element | Contents | Read? |
+|---|---|---|
+| `root[0]` | `{ token, username, device, emailIsVerified }` — a 32-char session token, not a JWT | No |
+| `root[1]` | Display preferences (`celsius`, `filterReminder`) | No |
+| `root[2]` | The site tree. Each node may carry `zoneTable` (keyed by device serial) and `children` | **Yes** |
+| `root[3]` | Absent on mesca; the string `"no device token"` on geo-c | No |
+| `root[4]` | `userDetails` (name, phone, email) and `siteDetails` (postal addresses) | No |
+
+`root[2].zoneTable` is `{}` in the live capture and the units sit in
+`root[2].children[0].zoneTable`, so the walk recurses `children` at every level rather than
+indexing a fixed depth. Per unit: `serial`, `label`, `mac`, `port` (80), sometimes
+`address` (the LAN IP), `password`, `cryptoSerial`, `unitType` (`headless` is a Kumo
+Station, not a thermostat), plus three blocks:
+
+- `reportedProfile` — the capability profile, snake_case: `fan_speed_stages`,
+  `has_auto_fan_speed`, `has_dry_function`, `display_setting_temp_of_dry`,
+  `has_heat_function`, `has_ventilation_function`, `has_air_direction`,
+  `has_swing_direction`, and **six** setpoint bounds (`minimum_heat_temp`,
+  `minimum_cool_or_dry_temp`, `minimum_auto_temp` and their maxima). v2 shares one pair
+  between cool and dry, which suits a client that routes the dry setpoint through
+  `spCool`. The three floors genuinely differ on a unit with `has_extended_temp_range`:
+  10 / 16 / 16 on the mapped account, 9 / 15 / 15 on another.
+- `reportedCondition` — a cloud-lagged state snapshot (`room_temp`, `power`,
+  `operation_mode`, `sp_heat`, `sp_cool`, `fan_speed`, `air_direction`,
+  `status_display.filter`, `seconds_since_contact`) with a `more` block giving the
+  human-readable label for each numeric field. It is often **completely empty**
+  (`{_created, more: {}}`). Modes are numeric: `2` = dry is proven by
+  `more.operation_mode_text: "Dehumidify"`; `1`/`3`/`7`/`8` fit the Mitsubishi CN105 mode
+  byte but were not observed, and nothing else is guessed.
+- `overrideSettings` — `{ heatMode, dryMode }`, apparently the cloud's counterpart of the
+  local `userHasModeHeat`/`userHasModeDry`. `{}` in the pykumo samples, so only an
+  explicit `false` is honoured.
+
+Zone level also carries `minCoolSetpoint`/`maxHeatSetpoint` (installer limits, 0.5 °C
+adrift from the profile's bounds in the samples, so not interchangeable with them) and
+`autoModeEnabled`. Neither is used.
+
+**What v2 does NOT have:** no socket, no streaming, no MQTT — nothing in the whole tree.
+It is a bootstrap and cannot be a status source; the LAN poller is the only status path in
+`cloudRegion: "ca"`. There is also no second v2 endpoint in use here: the login reply
+carries everything, so nothing else is ever called.
 
 ## HomeKit services
 

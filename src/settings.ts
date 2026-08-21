@@ -9,11 +9,193 @@ export const SOCKET_BASE_URL = 'https://socket-prod.kumocloud.com';
 export const TOKEN_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes (actual token lifetime)
 export const APP_VERSION = '3.2.4';
 
+/**
+ * A unit declared entirely in config, for local-only operation (`localOnly: true`).
+ *
+ * The two secrets are the ones the adapter's local API authenticates with. They
+ * normally come from the cloud, but that is not always a viable source: since
+ * 2026-07-31 the v3 cloud serves neither of them, and Canadian accounts are
+ * handled by a separate backend the v3 endpoints reject. Declaring them here
+ * keeps local control working without any cloud contact at all.
+ */
+export interface LocalDeviceConfig {
+  /** The adapter's device serial (the id the cloud and the plugin key on). */
+  deviceSerial: string;
+  /** Name shown in HomeKit. */
+  name?: string;
+  /** The unit's LAN address. */
+  ip: string;
+  /** Local API password, base64 — as the cloud reports it. */
+  password: string;
+  /** Local API cryptoSerial, hex, >= 9 bytes. */
+  cryptoSerial: string;
+  // --- Capabilities -------------------------------------------------------
+  // Without a cloud `profile_update`, capability-gated services would never
+  // appear. These stand in for it; the defaults suit a typical wall-mounted
+  // heat pump.
+  //
+  // Over-declaring a capability costs an inert control rather than an error: the
+  // local adapter answers HTTP 200 to a write it does not support and silently
+  // ignores it (see the `vaneDir` note further down).
+  /**
+   * Unit supports dry (dehumidify) mode. Default false.
+   *
+   * In local-only mode this declaration also ADDS the Dry switch: HeaterCooler has
+   * no dehumidify state, so the switch is the only way to reach the mode, and the
+   * tile is the only thing this flag gates — requiring `showDrySwitch: true` on top
+   * of a hand-written per-unit declaration made the declaration inert. Setting
+   * `showDrySwitch: false` explicitly still suppresses it (logged once, since dry
+   * then cannot be selected at all). On the cloud path the display option is what
+   * decides, because there the capability is discovered rather than declared.
+   */
+  hasModeDry?: boolean;
+  /**
+   * Unit supports vent (fan-only) mode. Default false.
+   *
+   * Same rule as `hasModeDry`, with `showFanOnlySwitch`. Fan SPEED while
+   * heating/cooling is on the main tile and does not depend on either flag.
+   */
+  hasModeVent?: boolean;
+  /** Unit supports heating. Default true. Gates HEAT and AUTO in the mode picker. */
+  hasModeHeat?: boolean;
+  /** Dry mode accepts a setpoint (held in spCool). Default true. */
+  usesSetPointInDryMode?: boolean;
+  /** Unit supports `auto` fan speed. Default true. Gates TargetFanState. */
+  hasFanSpeedAuto?: boolean;
+  /** Unit has a steerable vane. Default true. Gates the optional Slats service. */
+  hasVaneDir?: boolean;
+  /** Unit's vane can swing. Default true. Gates SwingMode on the main tile. */
+  hasVaneSwing?: boolean;
+  /**
+   * Discrete fan speeds, excluding auto. Default 4.
+   *
+   * ADVISORY ONLY: all five named speeds are offered on every unit regardless of
+   * this value (see FAN_SPEEDS), which matches live hardware — a unit reporting
+   * three accepted all five.
+   */
+  numberOfFanSpeeds?: number;
+  /**
+   * Setpoint floor in °C. Default 16.
+   *
+   * Should match the unit's own installer limits (MHK2 Function Code 181). Unlike
+   * the cloud, which answers a write outside them with a 400
+   * (`invalidSpHeatRange`), the local adapter accepts an out-of-range setpoint
+   * with HTTP 200 and then ignores it, so a wrong bound here fails silently.
+   */
+  minSetPoint?: number;
+  /** Setpoint ceiling in °C. Default 31. See `minSetPoint`. */
+  maxSetPoint?: number;
+}
+
+/** Which vendor backend serves the account. Not a preference: a fact about it. */
+export type CloudRegion = 'us' | 'ca';
+
+/** Where the two per-device LAN secrets come from. */
+export type LocalCredentialSource = 'v3' | 'v2';
+
+/**
+ * Accept `"CA"`, `" ca "` and the like; reject anything else by returning undefined.
+ *
+ * Case and whitespace are forgiven because a local-control config is hand-edited
+ * (the UI form cannot express `localDevices`' secrets, so users are already in the
+ * JSON editor); a value that is not a region at all is NOT forgiven, because
+ * silently defaulting it to `us` would send a Canadian account back to the v3
+ * endpoint that answers it 500 forever. validatePlatformConfig rejects it instead.
+ */
+export function normalizeCloudRegion(v: unknown): CloudRegion | undefined {
+  if (typeof v !== 'string') {
+    return undefined;
+  }
+  const key = v.trim().toLowerCase();
+  return key === 'us' || key === 'ca' ? key : undefined;
+}
+
+/** Same contract as normalizeCloudRegion, for the credential source. */
+export function normalizeLocalCredentialSource(v: unknown): LocalCredentialSource | undefined {
+  if (typeof v !== 'string') {
+    return undefined;
+  }
+  const key = v.trim().toLowerCase();
+  return key === 'v3' || key === 'v2' ? key : undefined;
+}
+
+/**
+ * Which of the two LAN secrets is unusable, or null when both are fine.
+ *
+ * One rule, two callers: the hand-declared `localDevices` entries and the units a
+ * v2 sign-in reports. They must agree, because the consequence of a bad value is
+ * the same either way and it is expensive — `computeLocalToken` THROWS on a
+ * cryptoSerial shorter than 9 bytes, and it is called outside the local client's
+ * try/catch, so a half-credentialed unit rejects every poll and every command
+ * rather than degrading.
+ *
+ * The cryptoSerial is checked as a hex STRING rather than by decoding it:
+ * `Buffer.from(x, 'hex')` stops at the first non-hex character, so a truncated or
+ * whitespace-polluted paste with 18 good characters in front of the damage decodes
+ * to a passing 9 bytes and then fails every request as an opaque authentication
+ * error. 18 characters is exactly the floor, with no margin — the live captures
+ * report exactly 9 bytes.
+ */
+export function localSecretProblem(
+  password: unknown,
+  cryptoSerial: unknown,
+): 'password' | 'cryptoSerial' | null {
+  if (typeof password !== 'string' || password.trim().length === 0) {
+    return 'password';
+  }
+  if (typeof cryptoSerial !== 'string' || !/^[0-9a-fA-F]+$/.test(cryptoSerial)
+    || cryptoSerial.length % 2 !== 0 || cryptoSerial.length < 18) {
+    return 'cryptoSerial';
+  }
+  return null;
+}
+
 export interface KumoConfig {
   platform: string;
   name?: string;
-  username: string;
-  password: string;
+  /**
+   * Kumo Cloud email. Required EXCEPT in local-only mode (see `localOnly`), which
+   * never authenticates — hence optional here and enforced by
+   * validatePlatformConfig, which knows which mode is in play.
+   */
+  username?: string;
+  /** Kumo Cloud password. Optional for the same reason as `username`. */
+  password?: string;
+  /**
+   * Which backend serves the account. Default `us`.
+   *
+   * `us` is the v3 API this plugin has always spoken. `ca` selects
+   * https://mesca-prod.kumocloud.com/login/v2, where Canadian accounts live — v3
+   * answers them HTTP 500 — and with it the v3 API is never contacted at all: no
+   * login, no streaming, no zone polling, no cloud fallback for a command. One v2
+   * sign-in at startup supplies the unit list, each unit's real capability profile
+   * and the two LAN secrets, and control then runs entirely over the LAN.
+   *
+   * Two axes, two options: this one is about the ACCOUNT's backend, while
+   * `localCredentialSource` is about where the per-device secrets come from. They
+   * are independent — the common case today is a US account whose v3 control works
+   * fine but whose secrets v3 no longer serves (pykumo #78) — which is why one
+   * region enum cannot express both.
+   *
+   * Rejected alternatives, so the debate is not replayed: a free-form
+   * `v2Endpoint` URL (an opaque host does not imply the protocol — mesca is
+   * `/login/v2`, geo-c is `/login` — and it would be a credential-exfiltration
+   * footgun); `auto` detection from v3's 500 (a 500 is also a transient outage,
+   * and it would post the account's credentials to a host the user never named);
+   * a single four-value enum (it stacks the two axes inside value names).
+   */
+  cloudRegion?: CloudRegion;
+  /**
+   * Where the two per-device LAN secrets come from. Default `v3`, or `v2` when
+   * `cloudRegion` is `ca` (v3 cannot serve those accounts at all).
+   *
+   * `v2` posts the account credentials once at startup to the region's v2 login
+   * (US: https://geo-c.kumocloud.com/login) and reads the secrets from the reply.
+   * Nothing else is read from it, nothing is written back to config.json, and
+   * neither secret is ever logged — not even with `debug` on. Setting it implies
+   * local control.
+   */
+  localCredentialSource?: LocalCredentialSource;
   pollInterval?: number;
   disablePolling?: boolean;
   debug?: boolean;
@@ -29,13 +211,28 @@ export interface KumoConfig {
   localControlIps?: Record<string, string>;
   // Seconds between local status polls (default 15).
   localPollInterval?: number;
+  /**
+   * Local-only mode: never contact the cloud, on any path. No login, no
+   * site/zone fetch, no streaming, and no per-unit cloud fallback for a failed
+   * local command. Every unit comes from `localDevices` below, and
+   * `username`/`password` are not required.
+   */
+  localOnly?: boolean;
+  /** Units to control, when `localOnly` is true. */
+  localDevices?: LocalDeviceConfig[];
   // --- Display options -----------------------------------------------------
   // Fan speed and vane now live on the HeaterCooler tile itself, so the two
   // extra Switch tiles per unit are opt-in rather than automatic. They still
   // only appear on units whose profile reports the capability.
-  /** Add a per-unit "Dry" switch (dehumidify). Default false. */
+  /**
+   * Add a per-unit "Dry" switch (dehumidify). Default false.
+   *
+   * Only consulted where the capability is DISCOVERED. In local-only mode a unit
+   * that declares `hasModeDry` gets the switch without this, since the declaration
+   * is already per-unit and deliberate; an explicit `false` here still wins.
+   */
   showDrySwitch?: boolean;
-  /** Add a per-unit "Fan" switch (fan-only mode, no heating/cooling). Default false. */
+  /** Add a per-unit "Fan" switch (fan-only, no heating/cooling). Default false. See showDrySwitch. */
   showFanOnlySwitch?: boolean;
   /**
    * Expose indoor humidity as a HumiditySensor service. Default TRUE.
