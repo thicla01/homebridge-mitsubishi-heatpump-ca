@@ -1,7 +1,7 @@
 {
   "name": "homebridge-mitsubishi-heatpump-ca",
   "version": "2.3.0-ca.12",
-  "description": "Homebridge plugin for Mitsubishi ductless heat pumps (MLZ/MSZ) over the Mitsubishi Comfort v3 API, with local LAN control, fan speed and vane control",
+  "description": "Homebridge plugin for Mitsubishi ductless heat pumps (MLZ/MSZ) on Canadian accounts, which the Comfort v3 API cannot serve: one v2 cloud sign-in for credentials, then LAN-only control. US accounts keep using v3.",
   "author": "Durmus Karatay",
   "main": "dist/index.js",
   "files": [
@@ -27,7 +27,10 @@
     "heatercooler",
     "hvac",
     "mlz",
-    "msz"
+    "msz",
+    "canada",
+    "kumo",
+    "local-control"
   ],
   "engines": {
     "node": ">=20.0.0",
