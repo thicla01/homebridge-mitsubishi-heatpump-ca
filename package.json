@@ -43,7 +43,7 @@
   "bugs": "https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/issues",
   "homepage": "https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca#readme",
   "dependencies": {
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
