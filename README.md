@@ -52,12 +52,12 @@ npm install -g homebridge-mitsubishi-heatpump
 From source:
 
 ```bash
-git clone https://github.com/ukaratay/homebridge-mitsubishi-heatpump.git
+git clone https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca.git
 cd homebridge-mitsubishi-heatpump
 npm install && npm run build && npm link
 ```
 
-Then add your credentials — see **[Configuration](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/docs/configuration.md)** for the
+Then add your credentials — see **[Configuration](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/docs/configuration.md)** for the
 minimal config and every option.
 
 ## Migrating from homebridge-mitsubishi-comfort
@@ -319,9 +319,9 @@ unit's sensor is reachable only over a direct CN105 serial connection.
 
 | | |
 |---|---|
-| [Configuration](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/docs/configuration.md) | Every option, validation rules, device mirroring |
-| [Protocol](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/docs/protocol.md) | REST, Socket.IO, local LAN, HomeKit services |
-| [Changelog](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/CHANGELOG.md) | |
+| [Configuration](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/docs/configuration.md) | Every option, validation rules, device mirroring |
+| [Protocol](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/docs/protocol.md) | REST, Socket.IO, local LAN, HomeKit services |
+| [Changelog](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/CHANGELOG.md) | |
 
 **Matter:** not supported. Homebridge does not yet expose the FanControl features or
 handlers a Matter build would need for vane and swing, and losing those is the whole
@@ -329,7 +329,7 @@ reason this plugin exists. HAP only until that changes.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/LICENSE).
+Apache License 2.0 — see [LICENSE](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/LICENSE).
 
 Forked from
 [burtherman/homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort)
@@ -337,6 +337,6 @@ at v1.8.2. The upstream repository shipped no license file and declared MIT in
 `package.json` while reproducing Apache-2.0 boilerplate in its README; Apache-2.0 is the
 only choice valid under either reading. Attribution, the statement of changes required by
 Apache-2.0 section 4(b), and third-party notices — including the pykumo port that upstream
-did not attribute — are in [NOTICE](https://github.com/ukaratay/homebridge-mitsubishi-heatpump/blob/main/NOTICE).
+did not attribute — are in [NOTICE](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/NOTICE).
 
 Inspired by [homebridge-kumo](https://github.com/fjs21/homebridge-kumo).
