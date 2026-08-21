@@ -14,9 +14,10 @@ Not affiliated with, endorsed by, or associated with Mitsubishi Electric. **Use 
 own risk** — this drives real heating and cooling equipment, and the author assumes no
 liability for damage or loss arising from it.
 
-> **This is a fork.** It adds support for Canadian accounts, which the v3 cloud API
-> cannot serve — they are served by `mesca-prod.kumocloud.com` over the older v2
-> protocol instead. With `cloudRegion: "ca"` the plugin signs in there once at startup
+> **This is a fork.** It adds support for Canadian accounts, which the v3 cloud API does
+> not serve at all: Canada has not been migrated from the *kumo cloud* app (v2) to the
+> *Comfort* app (v3), so its accounts live at `mesca-prod.kumocloud.com` over v2.
+> See [Canadian accounts](#canadian-accounts). With `cloudRegion: "ca"` the plugin signs in there once at startup
 > for the unit inventory, the real capability profile and the per-unit LAN secrets,
 > then controls everything over your LAN and never contacts v3 at all.
 >
@@ -221,8 +222,29 @@ retried, so a wrong password cannot be re-posted in a loop.
 
 ### Canadian accounts
 
-`POST /v3/login` answers **HTTP 500** for accounts served by Mitsubishi Electric Sales
-Canada, so the v3 API cannot be used for them at all. One line handles it:
+**Why this fork exists.** Mitsubishi is replacing the *kumo cloud* app with the *Comfort*
+app, and the two speak different APIs — kumo cloud is v2, Comfort is v3. The rollout is
+regional, and **Canada has not been migrated**: the shipping Canadian app is still
+[kumo cloud® Canada](https://apps.apple.com/ca/app/kumo-cloud-canada/id6738711428)
+(Android `com.mesca.kumocloud`), served by Mitsubishi Electric Sales Canada at
+`mesca-prod.kumocloud.com` over v2.
+
+That is why every other tool in this ecosystem fails for a Canadian account, and why
+their names all say *comfort*: [`mitsubishi-comfort`](https://github.com/nikolairahimi/mitsubishi-comfort)
+(the library behind Home Assistant's integration),
+[`homebridge-mitsubishi-comfort`](https://github.com/burtherman/homebridge-mitsubishi-comfort),
+and upstream itself all target v3. `POST /v3/login` answers **HTTP 500 `internalError`**
+for a Canadian account — not because anything is broken, but because the account does not
+exist in that system. This was already reported in
+[pykumo#62](https://github.com/dlarrick/pykumo/issues/62) in **March 2026**, months before
+the separate July 2026 change that stopped v3 serving LAN credentials to US accounts. The
+two are unrelated: Canada was never affected by that one, having never been on v3.
+
+The v2 fallback added to `mitsubishi-comfort` 0.5.2 (August 2026) does not help either —
+it hardcodes `https://geo-c.kumocloud.com/login`, the US v2 host, which also answers 500
+for a Canadian account. Host *and* path differ north of the border.
+
+One line handles it here:
 
 ```json
 { "cloudRegion": "ca" }
@@ -238,6 +260,14 @@ The real profile is the practical difference from the local-only mode below: it 
 per-mode setpoint floors, so a unit that can hold **10 °C** for heating is published as
 such rather than flattened to its 16 °C cooling floor — and HomeKit rejects a write below
 the published minimum rather than clamping it, so that band is otherwise unaskable.
+
+> **How long will this be needed?** Until Canada is migrated to the Comfort app, most
+> likely. When that happens `mesca-prod` presumably follows `geo-c` into retirement and
+> Canadian accounts move to v3 like everyone else — at which point `cloudRegion: "ca"`
+> should become a much smaller thing, or stop being needed at all. Until then, nothing
+> upstream is expected to serve this market: the tooling is built around v3, and Canada
+> is a small market still on the old system. If you are Canadian and want local control
+> today, this fork is the path.
 
 **[docs/configuration.md → Canadian accounts](docs/configuration.md#canadian-accounts-cloudregion-ca)**
 has the full account, including what the mode gives up (streaming, "not responding"
