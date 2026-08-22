@@ -150,6 +150,48 @@ export function localSecretProblem(
   return null;
 }
 
+/** One `localControlIps` entry in the array shape the UI form produces. */
+export interface LocalIpOverride {
+  deviceSerial?: string;
+  ip?: string;
+}
+
+/**
+ * Fold either accepted shape of `localControlIps` into the serial -> IP map the
+ * code uses.
+ *
+ * The array shape exists because the Homebridge UI form cannot render a free-form
+ * map, and an option the form cannot render is an option it DROPS: saving the
+ * settings page, or reinstalling the plugin through the UI, rewrites the platform
+ * block from the schema and silently takes the pin with it — observed on real
+ * hardware 2026-08-21, where a reinstall removed the override and the startup LAN
+ * sweep came back with no message saying why.
+ *
+ * Entries missing either half are skipped rather than fatal: a half-filled row is
+ * what an in-progress edit in the UI looks like, and refusing to start over one
+ * would be worse than ignoring it. A bad address is caught downstream by
+ * `setCreds`, which names the unit and drops the override.
+ */
+export function normalizeLocalControlIps(
+  value: Record<string, string> | LocalIpOverride[] | undefined,
+): Record<string, string> {
+  if (!value) {
+    return {};
+  }
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  const out: Record<string, string> = {};
+  for (const entry of value) {
+    const serial = entry?.deviceSerial?.trim();
+    const ip = entry?.ip?.trim();
+    if (serial && ip) {
+      out[serial] = ip;
+    }
+  }
+  return out;
+}
+
 export interface KumoConfig {
   platform: string;
   name?: string;
@@ -207,8 +249,16 @@ export interface KumoConfig {
   // the LAN and controls/reads it directly, falling back to cloud per-unit when a
   // unit is unreachable. Cloud streaming stays connected as the fallback.
   localControl?: boolean;
-  // Optional manual serial -> IP overrides (skip discovery for these units).
-  localControlIps?: Record<string, string>;
+  /**
+   * Optional manual serial -> IP overrides, skipping LAN discovery for those units.
+   *
+   * Two accepted shapes, and the reason both exist: the array is what the Homebridge
+   * UI form writes and can render, the bare map is what earlier configs (and the JSON
+   * editor) use. Read them through `normalizeLocalControlIps`, never directly — a
+   * config written by the form is an array, and indexing an array by serial silently
+   * finds nothing.
+   */
+  localControlIps?: Record<string, string> | LocalIpOverride[];
   // Seconds between local status polls (default 15).
   localPollInterval?: number;
   /**

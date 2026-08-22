@@ -235,13 +235,26 @@ test('every layout key names a property that exists', () => {
   }
 });
 
-test('the only option absent from the form is the one documented as absent', () => {
-  // localControlIps is a free-form serial -> IP map the form cannot express; the
-  // Local Control fieldset carries a help block saying to use the JSON editor.
-  // Anything else missing here is an oversight, not a decision.
+test('every option renders in the form — an option the form cannot render is one it DROPS', () => {
+  // This used to allow one exception: localControlIps, a free-form serial -> IP map
+  // the form could not express, with a help block telling the user to edit the JSON.
+  // That exception cost a working install its pin on 2026-08-21 — reinstalling the
+  // plugin through the UI rewrote the platform block from the schema and silently
+  // took the override with it, and the startup LAN sweep came back with nothing in
+  // the log to say why. The map is now an array of pairs, which the form CAN render,
+  // and the runtime accepts both shapes.
   const referenced = new Set(layoutKeys(layout).map((k) => k.split('[].')[0]));
   const absent = Object.keys(config.schema.properties ?? {}).filter((p) => !referenced.has(p));
-  assert.deepStrictEqual(absent, ['localControlIps']);
+  assert.deepStrictEqual(absent, [], 'anything listed here can be dropped by the UI');
+});
+
+test('localControlIps is an array of pairs, not a free-form map', () => {
+  const node = (config.schema.properties ?? {})['localControlIps'] as unknown as {
+    type?: string; items?: { required?: string[]; properties?: Record<string, unknown> };
+  };
+  assert.strictEqual(node?.type, 'array', 'a bare object is unrenderable, and therefore droppable');
+  assert.deepStrictEqual(node.items?.required, ['deviceSerial', 'ip']);
+  assert.deepStrictEqual(Object.keys(node.items?.properties ?? {}), ['deviceSerial', 'ip']);
 });
 
 test('a mirror entry requires both ends', () => {

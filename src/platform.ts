@@ -14,6 +14,7 @@ import {
   PLATFORM_NAME, PLUGIN_NAME, KumoConfig, LocalDeviceConfig, DeviceProfile, DeviceStatus,
   CloudRegion, LocalCredentialSource, localSecretProblem, normalizeCloudRegion,
   normalizeLocalCredentialSource,
+  normalizeLocalControlIps,
 } from './settings';
 import { KumoAPI } from './kumo-api';
 import { KumoThermostatAccessory } from './accessory';
@@ -941,7 +942,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    * already named it and said which value was wrong (never what the value was).
    */
   private resolveV2Units(inventory: V2Inventory): ResolvedLocalUnit[] {
-    const manual = this.kumoConfig.localControlIps || {};
+    const manual = normalizeLocalControlIps(this.kumoConfig.localControlIps);
     const units: ResolvedLocalUnit[] = [];
     for (const device of inventory.devices) {
       const creds = inventory.creds.get(device.deviceSerial);
@@ -1398,7 +1399,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (!this.localClient) {
       return;
     }
-    const manual = this.kumoConfig.localControlIps || {};
+    const manual = normalizeLocalControlIps(this.kumoConfig.localControlIps);
     const toDiscover = new Map<string, SerialCreds>();
     for (const [serial, c] of creds) {
       if (manual[serial]) {

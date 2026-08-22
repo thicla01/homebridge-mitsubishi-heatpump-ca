@@ -259,8 +259,29 @@
       },
       "localControlIps": {
         "title": "Local IP Overrides",
-        "type": "object",
-        "description": "Optional manual { \"<deviceSerial>\": \"<ip>\" } map to skip LAN discovery for specific units (edit via the JSON config editor)."
+        "type": "array",
+        "description": "Pin a unit to a fixed address instead of letting the plugin sweep the subnet for it at startup. Useful when a unit has a DHCP reservation or a static address, when it sits on a subnet the sweep does not reach, or on a network where you would rather not broadcast a probe to every host. A pinned unit is never swept for — if its address changes, the plugin reports no answer instead of finding it again.",
+        "items": {
+          "type": "object",
+          "required": [
+            "deviceSerial",
+            "ip"
+          ],
+          "properties": {
+            "deviceSerial": {
+              "title": "Device Serial",
+              "type": "string",
+              "placeholder": "e.g., 1234A5678901234B",
+              "description": "The adapter's serial number, as it appears in the log."
+            },
+            "ip": {
+              "title": "LAN IP Address",
+              "type": "string",
+              "placeholder": "e.g., 192.168.1.42",
+              "description": "The unit's address on your network. Non-IPv4 values are refused at startup, and the unit named."
+            }
+          }
+        }
       },
       "mirror": {
         "title": "Device Mirroring",
@@ -377,8 +398,28 @@
         "localControl",
         "localPollInterval",
         {
-          "type": "help",
-          "helpvalue": "<div class=\"help-block\"><b>Local IP overrides</b> (<code>localControlIps</code>) are a free-form <code>{ \"&lt;deviceSerial&gt;\": \"&lt;ip&gt;\" }</code> map, which this form cannot render as fields. Set it in the JSON config editor if you want to skip the LAN sweep for specific units. Any value already there is preserved.</div>"
+          "key": "localControlIps",
+          "type": "array",
+          "title": "Local IP Overrides",
+          "expandable": true,
+          "expanded": false,
+          "items": [
+            {
+              "type": "div",
+              "displayFlex": true,
+              "flex-direction": "row",
+              "items": [
+                {
+                  "key": "localControlIps[].deviceSerial",
+                  "flex": "1 1 50%"
+                },
+                {
+                  "key": "localControlIps[].ip",
+                  "flex": "1 1 50%"
+                }
+              ]
+            }
+          ]
         }
       ]
     },

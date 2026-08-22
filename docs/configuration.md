@@ -154,10 +154,18 @@ the local poller would then hammer the adapter without pause.
 
 ### UI coverage
 
-Every option renders in the Homebridge UI form except `localControlIps`, which is a
-free-form serial-to-IP map the form cannot express. Set it in the JSON config editor; the
-Local Control section carries a help block saying so, and any value already there is
-preserved when you save the form.
+**Every option renders in the Homebridge UI form**, and that is deliberate rather than
+tidy: an option the form cannot render is an option it DROPS. The UI rewrites the platform
+block from the schema when you save the settings page or reinstall the plugin through it,
+and anything the schema does not describe as a field goes with the rewrite — silently.
+
+`localControlIps` learned this the hard way. It used to be a free-form
+`{ "<serial>": "<ip>" }` map with a help block telling you to use the JSON editor, and on
+2026-08-21 a plugin reinstall through the UI removed a working pin: the startup LAN sweep
+came back, with nothing in the log to say why. It is now a list of serial/address pairs,
+which the form can render. **The runtime still accepts the old map shape**, so an existing
+config keeps working and the JSON editor stays usable — but a value entered through the
+form is written as the array.
 
 `cloudRegion` renders as a dropdown next to the credentials, and
 `localCredentialSource` as one inside **Local Control**, hidden when `cloudRegion` is
