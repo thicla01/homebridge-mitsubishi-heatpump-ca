@@ -48,7 +48,28 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { computeLocalToken } from '../dist/local-api.js';
+// The token has to be computed the way the plugin computes it, so the simulator
+// borrows the real implementation rather than restating it. Two places to find it:
+// a repo checkout (where this file normally lives), or the package as installed on
+// a Homebridge host — this tool is not shipped to npm, so on the machine where the
+// multi-unit test actually matters it gets copied in beside an installed plugin
+// rather than sitting inside a checkout.
+let computeLocalToken;
+for (const specifier of ['../dist/local-api.js', 'homebridge-mitsubishi-heatpump-ca/dist/local-api.js']) {
+  try {
+    ({ computeLocalToken } = await import(specifier));
+    break;
+  } catch { /* try the next one */ }
+}
+if (!computeLocalToken) {
+  console.error(
+    'Cannot find the plugin\'s local-api module.\n'
+    + '  In a repo checkout: run `npm run build` first.\n'
+    + '  On a Homebridge host: copy this file somewhere the installed plugin resolves from,\n'
+    + '  e.g. /var/lib/homebridge/ (which has node_modules alongside it).',
+  );
+  process.exit(1);
+}
 
 // ---- arguments ------------------------------------------------------------
 
@@ -219,6 +240,17 @@ function handle(u, req, res, rawBody) {
 
 const log = (u, msg) => console.log(`  [${u.serial} :${u.port}] ${msg}`);
 
+/**
+ * Start one unit's listener, resolving only once the port is actually bound.
+ *
+ * `server.listen()` is asynchronous, so an earlier version printed the whole
+ * "listening on ..." banner and the config block before any bind had been
+ * confirmed, then died later on an unhandled 'error' event. That is worse than a
+ * plain crash: on a host where one of the ports was already taken, the banner
+ * said three units were up while only two were, and the reads against the dead
+ * ports came back as transport failures that looked like a platform difference in
+ * the plugin. A tool used to verify behaviour has to fail loudly or not at all.
+ */
 function serve(u) {
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -245,13 +277,31 @@ function serve(u) {
       }, delay);
     });
   });
-  server.listen(u.port, BIND);
-  return server;
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(u.port, BIND, () => {
+      // Past the bind: a later error must not take the process down with a stack
+      // trace, but it must still be visible.
+      server.removeListener('error', reject);
+      server.on('error', (err) => log(u, `server error: ${err.message}`));
+      resolve(server);
+    });
+  });
 }
 
 // ---- start ----------------------------------------------------------------
 
-units.forEach(serve);
+try {
+  await Promise.all(units.map(serve));
+} catch (err) {
+  const taken = err?.port ?? '?';
+  console.error(
+    `Cannot listen on ${BIND}:${taken} — ${err?.code ?? err?.message}.\n`
+    + `  Ports ${BASE_PORT}..${BASE_PORT + UNITS - 1} must all be free; something already holds one of them.\n`
+    + `  Pick another range with --port, e.g. --port ${BASE_PORT + 1000}.`,
+  );
+  process.exit(1);
+}
 
 const platformBlock = {
   platform: 'KumoV3',
