@@ -40,8 +40,12 @@ jobs:
       - name: Skip if this version is already published
         id: check
         run: |
+          # Read the name from package.json rather than hardcoding it: this guard
+          # silently never fired after the fork was renamed, because it was still
+          # asking the registry about upstream's package.
+          NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "homebridge-mitsubishi-heatpump@$VERSION" version >/dev/null 2>&1; then
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "$VERSION is already on npm; nothing to publish."
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
@@ -50,6 +54,16 @@ jobs:
 
       # Auth is handled automatically via OIDC because a trusted publisher is
       # configured for this package on npmjs.com (no NPM_TOKEN secret needed).
+      # A version carrying a prerelease suffix (2.3.0-ca.N) is published under the
+      # `beta` dist-tag, never `latest`: `npm install <pkg>` must not resolve to it,
+      # and the Homebridge UI installs `latest`. A plain 2.3.0 publishes as usual.
       - name: Publish to npm
         if: steps.check.outputs.published == 'false'
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-* ]]; then
+            echo "$VERSION is a prerelease; publishing under the 'beta' tag."
+            npm publish --provenance --access public --tag beta
+          else
+            npm publish --provenance --access public
+          fi

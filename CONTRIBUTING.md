@@ -100,6 +100,41 @@ One-time note: a host that still has the pre-rename package must
 `npm uninstall homebridge-mitsubishi-heatpump` first — both packages register the
 `KumoV3` platform, and Homebridge cannot tell which one a `KumoV3` config block means.
 
+## Publishing to npm
+
+Not published yet. When it is, the first release is the awkward one and the rest are
+automatic.
+
+**Once, by hand.** npm's Trusted Publishing (OIDC) is what `.github/workflows/publish.yml`
+uses — no `NPM_TOKEN` secret anywhere — but a trusted publisher can only be configured for
+a package that already exists. So the first version goes up from a logged-in machine:
+
+```bash
+npm login                      # 2FA strongly recommended on the account
+npm test                       # prepublishOnly runs this too; run it first anyway
+npm publish --access public --tag beta
+```
+
+`--tag beta` matters while the version carries a prerelease suffix. `2.3.0-ca.13` under
+`latest` would be a version `npm install <pkg>` refuses to resolve to, and the Homebridge
+UI installs `latest` — so a prerelease published as `latest` is worse than not publishing.
+The workflow applies the same rule automatically: any version containing `-` goes to
+`beta`, a plain `2.3.0` goes to `latest`.
+
+**Then, on npmjs.com**, configure the trusted publisher for the package (Settings →
+Access): GitHub user `thicla01`, repository `homebridge-mitsubishi-heatpump-ca`, workflow
+`publish.yml`, environment blank. `package.json`'s `repository.url` must match that repo,
+or OIDC will refuse.
+
+**After that**, publishing is: bump the version, update `CHANGELOG.md`, push, and create a
+GitHub Release on the `vX.Y.Z` tag. The workflow builds, runs the suite, and publishes with
+provenance. Do not add `registry-url` or `NODE_AUTH_TOKEN` to `setup-node` — they make npm
+expect a token and break OIDC.
+
+**Before the first publish**, be honest about scope: this plugin has been verified hard,
+but on one unit in one home. Multi-zone, US/v3 accounts and local-only mode are exercised
+by tests and not by hardware here. That is an argument for `beta`, not against publishing.
+
 ## Merging upstream
 
 The fork tracks ukaratay's repo from v2.2.1. Before a merge, know where the fork's
