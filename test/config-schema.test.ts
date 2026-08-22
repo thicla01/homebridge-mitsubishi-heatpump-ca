@@ -248,6 +248,30 @@ test('every option renders in the form — an option the form cannot render is o
   assert.deepStrictEqual(absent, [], 'anything listed here can be dropped by the UI');
 });
 
+test('every repeatable list carries its own add-button label', () => {
+  // The Homebridge UI renders an array of objects as repeatable cards with an "add"
+  // button; buttonText is what that button says. Three of these lists had one from the
+  // start and localControlIps did not, which is how it ended up looking like a
+  // different kind of control than its neighbours for no reason.
+  const arrays: Array<{ key?: string; type?: string; buttonText?: string }> = [];
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      n.forEach(walk);
+    } else if (n && typeof n === 'object') {
+      const o = n as Record<string, unknown>;
+      if (o.type === 'array' && typeof o.key === 'string') {
+        arrays.push(o as { key?: string; type?: string; buttonText?: string });
+      }
+      Object.values(o).forEach(walk);
+    }
+  };
+  walk(layout);
+
+  assert.ok(arrays.length >= 4, `expected the repeatable lists, found ${arrays.length}`);
+  const missing = arrays.filter((a) => !a.buttonText).map((a) => a.key);
+  assert.deepStrictEqual(missing, [], 'a list with no buttonText gets a bare default label');
+});
+
 test('localControlIps is an array of pairs, not a free-form map', () => {
   const node = (config.schema.properties ?? {})['localControlIps'] as unknown as {
     type?: string; items?: { required?: string[]; properties?: Record<string, unknown> };

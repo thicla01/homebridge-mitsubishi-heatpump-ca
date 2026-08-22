@@ -401,24 +401,10 @@
           "key": "localControlIps",
           "type": "array",
           "title": "Local IP Overrides",
-          "expandable": true,
-          "expanded": false,
+          "buttonText": "Add IP Override",
           "items": [
-            {
-              "type": "div",
-              "displayFlex": true,
-              "flex-direction": "row",
-              "items": [
-                {
-                  "key": "localControlIps[].deviceSerial",
-                  "flex": "1 1 50%"
-                },
-                {
-                  "key": "localControlIps[].ip",
-                  "flex": "1 1 50%"
-                }
-              ]
-            }
+            "localControlIps[].deviceSerial",
+            "localControlIps[].ip"
           ]
         }
       ]
