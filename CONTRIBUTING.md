@@ -42,6 +42,47 @@ grepping the output for your test's name finds no failure, which reads exactly l
 test passed". Read the full `npm test` tail every time — either the node:test summary
 (`pass N` / `fail N`) or a compiler error — never a grep.
 
+## Testing without hardware — the adapter simulator
+
+`tools/kumo-adapter-sim.mjs` stands in for a real indoor unit, so the paths that need
+*more than one* unit — or a unit that misbehaves on cue — can be exercised by anyone,
+including maintainers who own exactly one heat pump.
+
+```bash
+npm run sim -- --units 3
+```
+
+It prints a ready-to-paste `localOnly` platform block and then serves the units,
+logging every request it answers. Credentials are derived from the unit index, so the
+printed block survives a restart of the simulator. Add the block to `config.json` with
+its own `_bridge` so the fake units stay off the child bridge carrying the real ones;
+the simulated serials cannot collide with a real one.
+
+Useful flags: `--humidity` (declares a paired sensor, which is what makes the client
+spend a request on the sensor leaves), `--strict` (rejects two overlapping requests to
+one unit, the way an adapter that tolerates a single connection does), `--bind` (listen
+on the LAN address to drive a Homebridge on another machine), and `--fault i=KIND` with
+KIND in `mute` / `authfail` / `busy` / `slow:MS`.
+
+**What it can prove.** Discovery matching each device to the adapter that authenticates
+its token; per-unit command routing; `localControlIps` pinning; an address nothing
+answers at; the auth-failure streak warning; the per-device request mutex; `localOnly`
+bootstrapping; several accessories in the Home app at once. Each of those is either
+impossible or destructive to arrange on real hardware.
+
+**What it cannot prove.** That the protocol is right. The simulator signs with this
+repo's own `computeLocalToken` and answers the shapes this repo expects, so it agrees
+with us by construction — *including anywhere we are both wrong*. Only real firmware
+settles that, and one real unit settles it fine. Keep the division clean: hardware
+answers "does the adapter accept this?", the simulator answers "do we do the right
+thing with N of them?". A green simulator run is never grounds for a protocol claim in
+`CHANGELOG.md`; those stay reserved for live-verified behaviour.
+
+The same mutation discipline applies to the simulator's own fault modes: a fault that
+silently does nothing would make a test pass for the wrong reason. `--strict` was
+checked by firing two raw concurrent `PUT`s (detector fires) and then two concurrent
+`LocalKumoClient` calls (detector stays quiet — the mutex holds).
+
 ## The `@types/node` floor
 
 `engines.node` promises `>=20.0.0`, but `devDependencies` pins `@types/node` to `^24` —

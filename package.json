@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "node --eval \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "sim": "npm run build && node tools/kumo-adapter-sim.mjs",
     "pretest": "npm run build && npm run build:test",
     "test": "node --test dist-test/*.test.js",
     "prepublishOnly": "npm run build && npm test",
