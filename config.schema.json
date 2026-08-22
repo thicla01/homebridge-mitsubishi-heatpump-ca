@@ -278,7 +278,7 @@
               "title": "LAN IP Address",
               "type": "string",
               "placeholder": "e.g., 192.168.1.42",
-              "description": "The unit's address on your network. Non-IPv4 values are refused at startup, and the unit named."
+              "description": "The unit's address on your network. **It must be reachable from the machine running Homebridge, not from the machine you are browsing this page on** — those are often different, and a pinned unit is never swept for, so a wrong or unroutable address shows up as \"no answer\" at the next restart rather than being found anyway. If the unit sits on another VLAN or subnet, confirm the route first: from the Homebridge host, `ping <ip>` then `nc -vz <ip> 80`. Non-IPv4 values are refused at startup, and the unit named."
             }
           }
         }
@@ -397,6 +397,10 @@
         },
         "localControl",
         "localPollInterval",
+        {
+          "type": "help",
+          "helpvalue": "<div class=\"help-block\"><b>Local IP overrides</b> pin a unit to a fixed address and skip the startup subnet sweep for it. The address must be reachable <b>from the machine running Homebridge</b> — not from the machine you are reading this on, which is often a different one and may sit on a different VLAN. A pinned unit is never swept for, so an unroutable address surfaces as <i>no answer from &lt;unit&gt;</i> in the log at the next restart. If in doubt, check the route from the Homebridge host first: <code>ping &lt;ip&gt;</code>, then <code>nc -vz &lt;ip&gt; 80</code>.</div>"
+        },
         {
           "key": "localControlIps",
           "type": "array",

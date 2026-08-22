@@ -159,6 +159,14 @@ tidy: an option the form cannot render is an option it DROPS. The UI rewrites th
 block from the schema when you save the settings page or reinstall the plugin through it,
 and anything the schema does not describe as a field goes with the rewrite — silently.
 
+A pinned address is only as good as the route to it: it must be reachable **from the
+machine running Homebridge**, which is frequently not the machine you are configuring
+from. A pinned unit is never swept for, so an address that is wrong or unroutable does
+not fall back to discovery — it surfaces as `no answer from <unit>` at the next restart.
+If the unit sits on another VLAN, confirm the route from the Homebridge host first
+(`ping <ip>`, then `nc -vz <ip> 80`); inter-VLAN routing is a router matter that no
+setting here can substitute for.
+
 `localControlIps` learned this the hard way. It used to be a free-form
 `{ "<serial>": "<ip>" }` map with a help block telling you to use the JSON editor, and on
 2026-08-21 a plugin reinstall through the UI removed a working pin: the startup LAN sweep
