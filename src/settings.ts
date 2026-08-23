@@ -309,6 +309,22 @@ export interface KumoConfig {
    * SwingMode; this option only adds the discrete tilt positions.
    */
   exposeVaneSlat?: boolean;
+  /**
+   * Record room temperature (and humidity when known) for the Eve app's history
+   * graphs. Default TRUE.
+   *
+   * On by default because history is only useful if it was already being
+   * collected when someone first looks: an opt-in that nobody discovers records
+   * nothing. The cost is one commit every ten minutes to a small JSON file per
+   * unit under the Homebridge storage path, and one extra service that the Apple
+   * Home app does not render at all — only Eve (and other apps that speak the
+   * Elgato history protocol) read it.
+   *
+   * Implemented natively (src/eve-history.ts) rather than via fakegato-history,
+   * whose hard dependency `googleapis` weighs 204MB for an optional Google Drive
+   * backup this plugin would never use.
+   */
+  eveHistory?: boolean;
   // Device mirroring (opt-in). Each pair makes `target` follow `source`: whenever
   // the source's commanded state changes (via any control path — wall thermostat,
   // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;

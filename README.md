@@ -40,6 +40,10 @@ liability for damage or loss arising from it.
   Celsius account snaps to the 0.5 °C grid the Home app displays, so 22.0 stays 22.0.
 - **Wireless sensor support.** Units with a paired sensor report its finer temperature
   and humidity, plus battery level with a low-battery warning.
+- **Eve temperature history** — long-term room-temperature graphs in the Eve app
+  (day/week/month, four weeks of retention), implemented natively rather than through
+  fakegato-history's 204MB dependency chain. On by default; `eveHistory: false` opts
+  out. Details in [docs/configuration.md](docs/configuration.md#eve-temperature-history).
 - **Real-time streaming** over Socket.IO, with adaptive polling that starts only when
   streaming fails.
 - **Device mirroring** (opt-in) — make one unit follow another.

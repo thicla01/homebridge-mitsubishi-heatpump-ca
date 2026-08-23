@@ -59,9 +59,10 @@ and stops again on reconnect.
 | `showDrySwitch` | boolean | No | Add a per-unit Dry switch (default false). Added only on units whose profile reports dry |
 | `showFanOnlySwitch` | boolean | No | Add a per-unit Fan-only switch (default false). This is fan-*only* mode; fan speed while heating or cooling is already on the main tile |
 | `exposeVaneSlat` | boolean | No | Expose vane angles as a `Slats` service (default false). Apple Home files `Slats` under window coverings — see the warning in the [README](../README.md#vane-and-swing) |
+| `eveHistory` | boolean | No | Record room temperature (and humidity when known) for the Eve app's history graphs (default **true**). See [Eve temperature history](#eve-temperature-history) |
 | `localControl` | boolean | No | Control units over the LAN (default false). Needs a working secret source: with the default `v3` it cannot work — see [Where the LAN secrets come from](#where-the-lan-secrets-come-from) |
 | `localPollInterval` | number | No | Seconds between LAN status polls when `localControl` is on (default 15) |
-| `localControlIps` | object | No | `{ "<deviceSerial>": "<ip>" }` to skip LAN discovery for specific units. **JSON editor only** — see [UI coverage](#ui-coverage) |
+| `localControlIps` | array | No | Serial/address pairs that pin a unit to a fixed address instead of sweeping for it. A form field since 2.3.0-ca.14; the older `{ "<serial>": "<ip>" }` map shape is still accepted |
 | `localOnly` | boolean | No | Run entirely on the LAN and never contact the cloud (default false). Requires `localDevices`; makes `username`/`password` unnecessary. See [Local-only mode](#local-only-mode) |
 | `localDevices` | array | No | The units to control when `localOnly` is on, each with `deviceSerial`, `ip`, `password`, `cryptoSerial` and optional capability fields. `localPollInterval` applies here too |
 | `mirror` | array | No | `{ source, target }` device-serial pairs. See [Device mirroring](#device-mirroring) |
@@ -333,6 +334,34 @@ setpoint limits, and "not responding" detection). The per-unit fields:
 declared unit is treated as a configuration mistake rather than a transient failure: it is
 logged once and not retried, and cached accessories are left registered so a typo cannot
 cost you your room assignments.
+
+## Eve temperature history
+
+On by default (`eveHistory: false` opts out). Each unit's room temperature — and
+humidity, when a source for it exists — is averaged over ten-minute intervals and
+kept in a four-week circular buffer that the Eve app reads as day/week/month graphs.
+The Apple Home app ignores the whole mechanism; only Eve (and other apps speaking the
+Elgato history protocol) render it.
+
+Facts worth knowing:
+
+- **Where the data lives:** one JSON file per unit, keyed by device serial, under
+  `<homebridge storage>/kumo-eve-history/`. Written atomically once per ten-minute
+  interval — a power cut mid-write leaves the previous file, not truncated JSON.
+  Renaming a unit does not orphan its history (the file is keyed by serial, not by
+  display name).
+- **Gaps are honest.** An interval during which the unit was unreachable draws a gap
+  in the graph, not a flat line. The reference implementation (fakegato-history)
+  repeats the last value forever, which through a LAN outage lies about the one
+  thing the graph exists to show.
+- **The Pi's clock matters.** Eve silently refuses entries stamped in the future, so
+  a host that boots with a wrong clock and writes entries ahead of real time would
+  freeze the graph. A history file that starts in the future is therefore reset with
+  a logged warning, and a sample older than the previous one is skipped.
+- **Implemented natively** (`src/eve-history.ts`), not via `fakegato-history`, whose
+  hard dependency `googleapis` weighs 204MB for a Google Drive backup this plugin
+  would never use. The wire format is pinned byte-for-byte against golden vectors
+  captured from fakegato itself (`test/eve-history.test.ts`).
 
 ## Device mirroring
 

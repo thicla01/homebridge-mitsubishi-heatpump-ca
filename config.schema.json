@@ -108,6 +108,12 @@
         "default": false,
         "description": "Expose vane direction as a HomeKit Slats service, giving discrete tilt positions. OFF by default: Apple Home categorises Slats as a WINDOW COVERING, so these tiles join the blinds/shades grouping in your rooms and a room-level blinds control can reach your louvres. Swing on/off is always available on the main climate tile regardless of this setting. Only enable if you want fixed vane angles and accept them appearing among your window coverings."
       },
+      "eveHistory": {
+        "title": "Eve Temperature History",
+        "type": "boolean",
+        "default": true,
+        "description": "Record room temperature (and humidity when known) for the Eve app’s history graphs — day/week/month views, kept across restarts. The Apple Home app ignores this entirely; only Eve and other apps that speak the Elgato history protocol read it. One small file per unit under the Homebridge storage path, written every ten minutes."
+      },
       "excludeDevices": {
         "title": "Hide Device IDs",
         "type": "array",
@@ -354,7 +360,8 @@
         "showHumiditySensor",
         "showDrySwitch",
         "showFanOnlySwitch",
-        "exposeVaneSlat"
+        "exposeVaneSlat",
+        "eveHistory"
       ]
     },
     {

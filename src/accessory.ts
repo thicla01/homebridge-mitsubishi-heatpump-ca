@@ -6,6 +6,8 @@ import {
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed, normalizeCloudRegion,
 } from './settings';
 import { cToF, quantizeSetpointInRange, quantizeSetpointInRangeCelsius } from './temperature';
+import { join } from 'path';
+import { EveHistoryStore, EveHistoryFeed, attachEveHistory } from './eve-history';
 
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
@@ -171,6 +173,8 @@ export class KumoThermostatAccessory {
    * value during the hold, which is exactly the value that must not win.
    */
   private readonly setpointPending: Map<string, number> = new Map();
+  /** Eve history feed, when enabled and running under a real Homebridge. */
+  private eveFeed?: EveHistoryFeed;
   private readonly SETPOINT_POLL_SUPPRESS_MS = 4000;
   // How long after an accepted setpoint write to re-read the unit and publish what
   // it actually stored. Long enough for the adapter to apply the write and answer
@@ -387,6 +391,50 @@ export class KumoThermostatAccessory {
       });
     }
 
+    this.setupEveHistory();
+  }
+
+  /**
+   * Eve temperature history (src/eve-history.ts). Guarded three ways, all
+   * load-bearing:
+   *
+   *  - `eveHistory: false` opts out. Default ON — history is only useful if it
+   *    was already being collected when someone first looks, and the service is
+   *    invisible to the Apple Home app, so the cost of the default is one small
+   *    file per unit and a 10-minute timer.
+   *  - The api-shape check keeps every test harness working: the fakes supply
+   *    `api: { updatePlatformAccessories }` with no `hap` and no `user`, and a
+   *    string-keyed fake Service map that real hap subclasses cannot join.
+   *  - The try/catch is the platform-constructor rule (CLAUDE.md): this runs
+   *    during construction, nothing above catches, and a plugin must be idle or
+   *    fatal — never fatal over a temperature graph.
+   */
+  private setupEveHistory(): void {
+    if (this.platform.kumoConfig.eveHistory === false) {
+      return;
+    }
+    const api = this.platform.api as unknown as {
+      hap?: unknown;
+      user?: { storagePath?: () => string };
+    };
+    if (!api?.hap || typeof api.user?.storagePath !== 'function') {
+      return;
+    }
+    try {
+      const filePath = join(api.user.storagePath(), 'kumo-eve-history', `${this.deviceSerial}.json`);
+      const store = new EveHistoryStore({ filePath, log: this.platform.log });
+      store.load();
+      attachEveHistory(api.hap as never, this.accessory, store);
+      this.eveFeed = new EveHistoryFeed(store);
+      this.eveFeed.start();
+      this.platform.log.debug(
+        `[EVE] ${this.accessory.displayName}: history on (${store.size} entries carried over)`,
+      );
+    } catch (e) {
+      this.platform.log.warn(
+        `[EVE] ${this.accessory.displayName}: history disabled — ${(e as Error).message}`,
+      );
+    }
   }
 
   /**
@@ -1284,6 +1332,10 @@ export class KumoThermostatAccessory {
 
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
+      // Every transport converges here, so this is the one line that feeds the
+      // Eve history — the feed averages per 10-minute interval, so the 15s local
+      // poll cadence costs nothing downstream.
+      this.eveFeed?.pushSample(status.roomTemp, status.humidity);
       // Both setpoints, not one "target": on HeaterCooler each threshold is the
       // setpoint for its own mode and the band is live in AUTO, so there is no
       // single target temperature to name.
