@@ -20,6 +20,7 @@ export interface FakeCharacteristic {
   onGet(handler?: unknown): FakeCharacteristic;
   onSet(handler?: unknown): FakeCharacteristic;
   setProps(props: Record<string, unknown>): FakeCharacteristic;
+  updateValue(value: unknown): FakeCharacteristic;
 }
 
 /** A stand-in for a HAP Service. `type` is the name string from `Service` below. */
@@ -126,6 +127,10 @@ export function makeCharacteristic(): FakeCharacteristic {
     },
     setProps(props: Record<string, unknown>) {
       ch.props = props;
+      return ch;
+    },
+    updateValue(value: unknown) {
+      ch.value = value;
       return ch;
     },
   };

@@ -1,4 +1,4 @@
-import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
+import { Service, PlatformAccessory, CharacteristicValue, Characteristic, WithUUID } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI, redactPayload } from './kumo-api';
 import {
@@ -241,12 +241,39 @@ export class KumoThermostatAccessory {
     // Mitsubishi app. Note HAP applies minStep only on the outbound path, so the
     // quantizer — not this prop — is what actually holds the grid.
     const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.1 };
-    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+
+    // Give each threshold an in-range value BEFORE narrowing its range.
+    //
+    // HAP starts a brand-new HeatingThresholdTemperature at 0 — its own default
+    // range begins there — which is below the minimum declared on the next line.
+    // setProps re-validates the current value, so it logs
+    //   "characteristic was supplied illegal value: number 0 exceeded minimum of 10"
+    // and clamps. The clamp makes it harmless; the line in the log does not read
+    // that way, and it fires once per unit on the first start after that unit is
+    // added. No cached install ever showed it, because Homebridge persists
+    // characteristic values in cachedAccessories and a returning unit comes back
+    // with a real setpoint — which is why this survived every upgrade test and
+    // surfaced only when three units were registered from scratch at once.
+    // CoolingThresholdTemperature happens to default to 10 and never tripped it;
+    // it is seeded the same way so the pair cannot drift apart if the props move.
+    //
+    // A unit that already has a usable value keeps it, and in every case the first
+    // status read replaces this within seconds.
+    const seedThreshold = (id: WithUUID<new () => Characteristic>): Characteristic => {
+      const characteristic = this.service.getCharacteristic(id);
+      if (typeof characteristic.value !== 'number'
+        || characteristic.value < wideThresholdProps.minValue) {
+        characteristic.updateValue(wideThresholdProps.minValue);
+      }
+      return characteristic;
+    };
+
+    seedThreshold(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps(wideThresholdProps)
       .onGet(this.getHeatingThresholdTemperature.bind(this))
       .onSet(this.setHeatingThresholdTemperature.bind(this));
 
-    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
+    seedThreshold(this.platform.Characteristic.CoolingThresholdTemperature)
       .setProps(wideThresholdProps)
       .onGet(this.getCoolingThresholdTemperature.bind(this))
       .onSet(this.setCoolingThresholdTemperature.bind(this));
