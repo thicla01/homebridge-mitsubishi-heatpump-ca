@@ -2544,6 +2544,28 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    // HomeKit re-asserting the value the unit already holds is not a change, and it
+    // arrives constantly. The Homebridge UI's AUTO control is a RANGE slider bound
+    // to both handles at once, so it writes spHeat AND spCool on every adjustment
+    // of either — and it feeds our echo back into its own model, which writes them
+    // again. Measured 2026-08-22 against three simulated units: one drag of the
+    // cooling handle produced 14 commands, half of them re-asserting an spHeat that
+    // had not moved, still arriving in pairs every two seconds after the user had
+    // stopped touching it.
+    //
+    // Nothing is echoed either, deliberately: HomeKit already holds this exact
+    // value — it is the one it just sent — so an update would only re-enter the
+    // loop we are leaving. A value that differs, in either direction, still writes.
+    // The comparison is against the cached device state, which a local poll
+    // refreshes every 15s, so a setpoint changed on the wall remote is seen and a
+    // matching HomeKit write is not mistaken for a no-op.
+    if (this.currentStatus && this.currentStatus[field] === temp) {
+      this.platform.log.debug(
+        `[${label}] ${this.accessory.displayName}: already at ${temp}°C — nothing to send`,
+      );
+      return;
+    }
+
     const commands: { spHeat?: number; spCool?: number } = {};
     commands[field] = temp;
 

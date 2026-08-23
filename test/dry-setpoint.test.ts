@@ -137,7 +137,11 @@ test('the cooling threshold writes spCool in dry, cool and heat alike', async ()
   // no mode-dispatch `else` for dry to fall through any more.
   for (const operationMode of ['dry', 'cool', 'heat']) {
     const { handler, sendCommandCalls } = makeHarness();
-    handler.updateFromZone(zone({ operationMode }));
+    // spCool starts away from 25: the shared fixture sits AT 25, and a threshold
+    // write matching the current value is deliberately not sent (see
+    // threshold-redundant-write.test.ts). This test is about which FIELD the
+    // cooling handle routes to, so it needs a write that actually travels.
+    handler.updateFromZone(zone({ operationMode, spCool: 22 }));
 
     await handler.setCoolingThresholdTemperature(25); // 25°C = 77°F exactly, unchanged
 

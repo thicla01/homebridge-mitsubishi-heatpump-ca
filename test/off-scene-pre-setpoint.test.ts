@@ -172,7 +172,16 @@ test('a drag sends only its final value', async () => {
 
 test('the two AUTO handles do not supersede each other', async () => {
   const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone({ power: 1, operationMode: 'auto', spAuto: null }));
+  // The band starts AWAY from the two values written below, so both writes are real
+  // changes. The shared fixture happens to sit at spHeat 20, and a threshold write
+  // that matches the current value is deliberately not sent (see
+  // threshold-redundant-write.test.ts) — which would make this test pass for the
+  // wrong reason, asserting one command where it means to assert two independent
+  // ones. 18 and 22 are exactly 64.4°F and 71.6°F; the quantized targets below are
+  // what this test cares about.
+  handler.updateFromZone(zone({
+    power: 1, operationMode: 'auto', spAuto: null, spHeat: 18, spCool: 22,
+  }));
 
   await Promise.all([
     handler.setHeatingThresholdTemperature(20),
