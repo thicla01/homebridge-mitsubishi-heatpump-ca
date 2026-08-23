@@ -58,7 +58,8 @@ printed block survives a restart of the simulator. Add the block to `config.json
 its own `_bridge` so the fake units stay off the child bridge carrying the real ones;
 the simulated serials cannot collide with a real one.
 
-Useful flags: `--humidity` (declares a paired sensor, which is what makes the client
+`--config-only` prints the block and exits without binding anything, for scripting the
+config edit. Useful flags: `--humidity` (declares a paired sensor, which is what makes the client
 spend a request on the sensor leaves), `--strict` (rejects two overlapping requests to
 one unit, the way an adapter that tolerates a single connection does), `--bind` (listen
 on the LAN address to drive a Homebridge on another machine), and `--fault i=KIND` with

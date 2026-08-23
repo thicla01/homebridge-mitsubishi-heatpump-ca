@@ -34,6 +34,10 @@
 //                    address to drive a Homebridge on another machine — which is
 //                    also the honest way to rehearse the "is it reachable from
 //                    the Homebridge host?" question the config form asks.
+//   --config-only    print the platform block as JSON and exit, serving nothing.
+//                    For scripting the config edit: the credentials are derived
+//                    from the unit index, so the block matches what a later run
+//                    with the same --units/--port/--bind will actually serve.
 //   --humidity       report a humidity sensor (exercises the sensor lookup)
 //   --strict         reject overlapping requests to one unit with
 //                    `serializer_error`, like an adapter that tolerates a single
@@ -291,6 +295,32 @@ function serve(u) {
 
 // ---- start ----------------------------------------------------------------
 
+const platformBlock = {
+  platform: 'KumoV3',
+  name: 'Kumo simulator',
+  localOnly: true,
+  localControl: true,
+  localPollInterval: 15,
+  debug: true,
+  localDevices: units.map((u) => ({
+    deviceSerial: u.serial,
+    name: u.name,
+    ip: `${BIND === '0.0.0.0' ? '<this machine\u2019s LAN address>' : BIND}:${u.port}`,
+    password: u.password,
+    cryptoSerial: u.cryptoSerial,
+    hasModeHeat: true,
+    hasModeDry: true,
+    hasModeVent: true,
+    usesSetPointInDryMode: true,
+  })),
+};
+
+if (has('config-only')) {
+  // Nothing is bound in this mode: the caller wants the block, not the servers.
+  console.log(JSON.stringify(platformBlock, null, 2));
+  process.exit(0);
+}
+
 try {
   await Promise.all(units.map(serve));
 } catch (err) {
@@ -302,26 +332,6 @@ try {
   );
   process.exit(1);
 }
-
-const platformBlock = {
-  platform: 'KumoV3',
-  name: 'Kumo simulator',
-  localOnly: true,
-  localControl: true,
-  localPollInterval: 15,
-  debug: true,
-  localDevices: units.map((u) => ({
-    deviceSerial: u.serial,
-    name: u.name,
-    ip: `${BIND === '0.0.0.0' ? '<this machine’s LAN address>' : BIND}:${u.port}`,
-    password: u.password,
-    cryptoSerial: u.cryptoSerial,
-    hasModeHeat: true,
-    hasModeDry: true,
-    hasModeVent: true,
-    usesSetPointInDryMode: true,
-  })),
-};
 
 console.log(`\n${units.length} simulated unit(s) listening on ${BIND}:${BASE_PORT}-${BASE_PORT + units.length - 1}`);
 for (const u of units) {
