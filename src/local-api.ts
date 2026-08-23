@@ -204,6 +204,55 @@ export function classifyApiError(code: string): LocalErrorKind {
   return 'malformed';
 }
 
+/**
+ * Why a status read produced nothing usable.
+ *
+ * `getStatus` collapses every failure into `null`, which is all its callers need
+ * — but the poller LOGS that null, and one string for six causes is what made a
+ * real incident unreadable: three episodes on live hardware in three days, up to
+ * four minutes of stale tile each, every one of them reported as "no usable
+ * status in the reply" (observed 2026-08-20 and 2026-08-22). The classification
+ * already existed one call down, in `requestDetailed`; it was simply discarded at
+ * the point a human would read it.
+ *
+ * `incomplete` is the one kind that is NOT a request failure: the adapter answered
+ * cleanly and the reply carried no `roomTemp`.
+ */
+export type LocalStatusError = LocalErrorKind | 'incomplete';
+
+export interface LocalStatusResult {
+  status: Partial<DeviceStatus> | null;
+  error: LocalStatusError;
+}
+
+/**
+ * A one-line, user-facing cause for a failed status read.
+ *
+ * Written for the person reading homebridge.log at the moment their tile went
+ * stale, so each one says what to suspect rather than naming an internal state.
+ */
+export function describeLocalFailure(error: LocalStatusError): string {
+  switch (error) {
+    case 'transport':
+      return 'no answer — the unit is unreachable, or it closed the connection';
+    case 'auth':
+      return 'the unit rejected our credentials';
+    case 'busy':
+      return 'the unit answered "busy" (serializer_error / __no_memory) — it is '
+        + 'overloaded or wedged, not unreachable';
+    case 'malformed':
+      return 'the unit\'s reply could not be understood';
+    case 'no-creds':
+      return 'no local credentials for this unit';
+    case 'incomplete':
+      return 'the unit answered without a room temperature';
+    case 'none':
+      // Not reachable from the poller, which only asks after a null status. Kept
+      // total so a new LocalErrorKind cannot slip through as an empty string.
+      return 'no failure';
+  }
+}
+
 export interface LocalDeviceCreds {
   ip: string;
   password: string; // base64
@@ -591,11 +640,19 @@ export class LocalKumoClient {
 
   /** Read and map the unit's current status locally, or null if unreachable. */
   async getStatus(serial: string): Promise<Partial<DeviceStatus> | null> {
-    const r = await this.request(serial, STATUS_READ_BODY);
+    return (await this.getStatusDetailed(serial)).status;
+  }
+
+  /** As `getStatus`, plus WHY it produced nothing. See `LocalStatusError`. */
+  async getStatusDetailed(serial: string): Promise<LocalStatusResult> {
+    const { result: r, error } = await this.requestDetailed(serial, STATUS_READ_BODY);
     const indoorUnit = r?.indoorUnit as Record<string, unknown> | undefined;
     const status = indoorUnit?.status as Record<string, unknown> | undefined;
     if (!status || status.roomTemp === undefined) {
-      return null;
+      // A request that SUCCEEDED and still got here answered without a usable
+      // status — a different thing from every failure `error` already names, and
+      // the one case the request layer cannot see.
+      return { status: null, error: error === 'none' ? 'incomplete' : error };
     }
     const mapped = mapLocalStatus(status);
 
@@ -620,7 +677,7 @@ export class LocalKumoClient {
         }
       }
     }
-    return mapped;
+    return { status: mapped, error: 'none' };
   }
 
   /**

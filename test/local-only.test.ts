@@ -175,7 +175,7 @@ function makeKumoStub(): KumoStub {
 }
 
 interface LocalClientStub extends Pick<LocalKumoClient,
-  'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'sendCommand'> {
+  'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'getStatusDetailed' | 'sendCommand'> {
   creds: Map<string, LocalDeviceCreds>;
   statusResult: Partial<DeviceStatus> | null;
   reads: string[];
@@ -203,6 +203,15 @@ function makeLocalClientStub(over: Partial<LocalClientStub> = {}): LocalClientSt
     async getStatus(serial: string) {
       stub.reads.push(serial);
       return stub.statusResult;
+    },
+    // The poller asks for the CAUSE of a failure, not just the failure — one
+    // string for six causes made a real incident unreadable (see
+    // test/local-failure-reason.test.ts). The stub reports 'transport' for a null
+    // status because that is what an unreachable unit produces, which is what the
+    // tests here that null it out are modelling.
+    async getStatusDetailed(serial: string) {
+      const status = await stub.getStatus(serial);
+      return { status, error: status === null ? 'transport' as const : 'none' as const };
     },
     async sendCommand() {
       return true;

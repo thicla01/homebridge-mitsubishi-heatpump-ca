@@ -81,6 +81,12 @@ test('an unknown fan speed is undefined, never silently "auto"', () => {
 //
 // LocalKumoClient.request is stubbed per test so no network is touched. Bodies
 // are matched on their leaf so the assertions read like the wire protocol.
+//
+// `requestDetailed` is stubbed alongside it, delegating to the same reply table:
+// the status read goes through it (it is where the failure CAUSE comes from — see
+// test/local-failure-reason.test.ts) while the sensor and MHK2 leaves still go
+// through `request`. Stubbing only one of the two left the status read reaching
+// the real network and timing out.
 
 /** A canned reply, or a thunk when a test needs to observe that it was asked. */
 type Reply = Record<string, unknown> | (() => Record<string, unknown>);
@@ -98,6 +104,10 @@ function makeClient(replies: Array<[string, Reply]>) {
       }
     }
     return null;
+  };
+  client.requestDetailed = async (serial, body) => {
+    const result = await client.request(serial, body);
+    return { result, error: result === null ? 'transport' : 'none' };
   };
   return { client, asked };
 }

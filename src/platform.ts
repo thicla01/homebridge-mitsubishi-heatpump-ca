@@ -18,7 +18,9 @@ import {
 } from './settings';
 import { KumoAPI } from './kumo-api';
 import { KumoThermostatAccessory } from './accessory';
-import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
+import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
+  describeLocalFailure,
+} from './local-api';
 import { KumoV2Client, V2Inventory, v2Endpoint } from './kumo-v2';
 import { MirrorController } from './mirror';
 
@@ -1623,17 +1625,23 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         continue;
       }
       try {
-        const status = await this.localClient.getStatus(serial);
+        const { status, error } = await this.localClient.getStatusDetailed(serial);
         if (status) {
           handler.updateFromLocal(status);
           this.noteLocalPollSuccess(serial);
         } else {
           // A null status is not an exception: the adapter answers HTTP 200 with
-          // `{"_api_error": ...}` to a bad credential, and getStatus returns null
-          // for a body with no roomTemp. Silence here is what made a wrong
+          // `{"_api_error": ...}` to a bad credential, and a read returns nothing
+          // usable for a body with no roomTemp. Silence here is what made a wrong
           // cryptoSerial or a moved DHCP lease invisible for the life of the
           // process — see noteLocalPollFailure.
-          this.noteLocalPollFailure(serial, 'no usable status in the reply');
+          //
+          // The CAUSE is named, not just the failure. One string for six causes is
+          // what made three real episodes unreadable — up to four minutes of stale
+          // tile each, all logged identically — when the classification already
+          // existed one call down and was thrown away here. "unreachable" and
+          // "wedged" call for opposite responses from the person reading the log.
+          this.noteLocalPollFailure(serial, describeLocalFailure(error));
         }
       } catch (error) {
         this.noteLocalPollFailure(serial, (error as Error).message);
