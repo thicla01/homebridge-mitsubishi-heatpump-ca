@@ -1,6 +1,6 @@
 {
   "name": "homebridge-mitsubishi-heatpump-ca",
-  "version": "2.3.0-ca.14",
+  "version": "2.3.0-ca.15",
   "description": "Homebridge plugin for Mitsubishi ductless heat pumps (MLZ/MSZ) on Canadian accounts, which the Comfort v3 API cannot serve: one v2 cloud sign-in for credentials, then LAN-only control. US accounts keep using v3.",
   "author": "thicla01",
   "main": "dist/index.js",
