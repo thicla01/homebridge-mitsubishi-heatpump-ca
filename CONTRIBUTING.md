@@ -119,26 +119,38 @@ this targets run 24.
 
 ## Cutting a release
 
-The fork versions as `2.3.0-ca.N` and is **not published to npm** — install is from
-source or an `npm pack` tarball. Do not publish a GitHub Release expecting
-`.github/workflows/publish.yml` to do the right thing: it is inherited from upstream,
-triggers on release publish, and its already-published guard still queries the
-pre-rename name (`npm view "homebridge-mitsubishi-heatpump@$VERSION"`), so it would
-attempt an unintended npm publish of the `-ca` package.
+The fork versions as plain `X.Y.Z` from **2.3.1** onward and is published to npm as
+`homebridge-mitsubishi-heatpump-ca`. The `2.3.0-ca.N` numbering was private to the
+period when Canadian support was being driven on real hardware; it ended at
+`2.3.0-ca.15`, and there is no plain 2.3.0 (see the CHANGELOG preamble).
 
-1. `npm version 2.3.0-ca.N --no-git-tag-version`, update `CHANGELOG.md`, commit.
-2. `npm pack` → `homebridge-mitsubishi-heatpump-ca-2.3.0-ca.N.tgz`.
-3. Copy the tarball to the Homebridge host and install it from the Homebridge storage
-   directory. On the official Raspberry Pi image the bundled Node is **not on `PATH`**,
-   so name it explicitly:
+1. `npm version X.Y.Z --no-git-tag-version`, update `CHANGELOG.md`, commit, push.
+2. Create a GitHub Release on the `vX.Y.Z` tag. `.github/workflows/publish.yml` does
+   the rest — see [Publishing to npm](#publishing-to-npm).
 
-   ```bash
-   sudo env PATH=/opt/homebridge/bin:/usr/bin:/bin /opt/homebridge/bin/npm install ./homebridge-mitsubishi-heatpump-ca-2.3.0-ca.N.tgz
-   ```
+**Never publish a plain version lower than one already on `latest`.** `npm publish`
+takes `latest` by default regardless of ordering, so backfilling a 2.3.0 after 2.3.1
+exists would drag `latest` *backwards* and every Homebridge UI would offer the older
+build as the current one. If an old version ever has to go up, publish it under a
+different dist-tag.
 
-4. Restart the right thing: plugin **code** changes need only a child-bridge restart;
-   plugin **config** changes need a **full Homebridge restart**, because a child bridge
-   receives its configuration from the parent process.
+To install a build that is not released — a fix under test, say — skip the registry:
+
+```bash
+npm pack   # -> homebridge-mitsubishi-heatpump-ca-X.Y.Z.tgz
+```
+
+Copy the tarball to the Homebridge host and install it from the Homebridge storage
+directory. On the official Raspberry Pi image the bundled Node is **not on `PATH`**, so
+name it explicitly:
+
+```bash
+sudo env PATH=/opt/homebridge/bin:/usr/bin:/bin /opt/homebridge/bin/npm install ./homebridge-mitsubishi-heatpump-ca-X.Y.Z.tgz
+```
+
+Then restart the right thing: plugin **code** changes need only a child-bridge restart;
+plugin **config** changes need a **full Homebridge restart**, because a child bridge
+receives its configuration from the parent process.
 
 One-time note: a host that still has the pre-rename package must
 `npm uninstall homebridge-mitsubishi-heatpump` first — both packages register the
@@ -146,38 +158,39 @@ One-time note: a host that still has the pre-rename package must
 
 ## Publishing to npm
 
-Not published yet. When it is, the first release is the awkward one and the rest are
-automatic.
+Publishing is: bump the version, update `CHANGELOG.md`, push, and create a GitHub
+Release on the `vX.Y.Z` tag. The workflow builds, runs the suite, checks that the tag
+matches `package.json`, and publishes with provenance.
 
-**Once, by hand.** npm's Trusted Publishing (OIDC) is what `.github/workflows/publish.yml`
-uses — no `NPM_TOKEN` secret anywhere — but a trusted publisher can only be configured for
-a package that already exists. So the first version goes up from a logged-in machine:
+**Setup, already done, do not undo it.** npm's Trusted Publishing (OIDC) is what
+`.github/workflows/publish.yml` uses — there is no `NPM_TOKEN` secret anywhere. A
+trusted publisher can only be configured for a package that already exists, which is
+why `2.3.0-ca.13` went up by hand from a logged-in machine before the publisher was
+configured on npmjs.com (Settings → Access): GitHub user `thicla01`, repository
+`homebridge-mitsubishi-heatpump-ca`, workflow `publish.yml`, environment blank.
+`package.json`'s `repository.url` must keep matching that repo, or OIDC refuses. Do not
+add `registry-url` or `NODE_AUTH_TOKEN` to `setup-node` — they make npm expect a token
+and break OIDC.
+
+**Dist-tags.** The workflow routes by version string: anything containing `-` goes to
+`beta`, a plain version takes `latest`. That rule is what keeps a prerelease out of the
+Homebridge UI, which installs `latest`. The tags are not managed by any workflow beyond
+that, so after a release that changes the situation, check them by hand:
 
 ```bash
-npm login                      # 2FA strongly recommended on the account
-npm test                       # prepublishOnly runs this too; run it first anyway
-npm publish --access public --tag beta
+npm view homebridge-mitsubishi-heatpump-ca dist-tags
 ```
 
-`--tag beta` matters while the version carries a prerelease suffix. `2.3.0-ca.13` under
-`latest` would be a version `npm install <pkg>` refuses to resolve to, and the Homebridge
-UI installs `latest` — so a prerelease published as `latest` is worse than not publishing.
-The workflow applies the same rule automatically: any version containing `-` goes to
-`beta`, a plain `2.3.0` goes to `latest`.
+A `beta` left pointing at something older than `latest` is worse than no `beta` at all —
+it hands a tester an older build than a plain install would. Retire or repoint it:
 
-**Then, on npmjs.com**, configure the trusted publisher for the package (Settings →
-Access): GitHub user `thicla01`, repository `homebridge-mitsubishi-heatpump-ca`, workflow
-`publish.yml`, environment blank. `package.json`'s `repository.url` must match that repo,
-or OIDC will refuse.
+```bash
+npm dist-tag rm homebridge-mitsubishi-heatpump-ca beta
+```
 
-**After that**, publishing is: bump the version, update `CHANGELOG.md`, push, and create a
-GitHub Release on the `vX.Y.Z` tag. The workflow builds, runs the suite, and publishes with
-provenance. Do not add `registry-url` or `NODE_AUTH_TOKEN` to `setup-node` — they make npm
-expect a token and break OIDC.
-
-**Before the first publish**, be honest about scope: this plugin has been verified hard,
-but on one unit in one home. Multi-zone, US/v3 accounts and local-only mode are exercised
-by tests and not by hardware here. That is an argument for `beta`, not against publishing.
+**Be honest about scope in the release notes.** This plugin has been verified hard, but
+on one unit in one home. Multi-unit behaviour is exercised by `tools/kumo-adapter-sim.mjs`
+and by tests; US/v3 accounts are exercised by neither hardware nor a real account here.
 
 ## Merging upstream
 

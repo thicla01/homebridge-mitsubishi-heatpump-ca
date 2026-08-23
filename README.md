@@ -52,8 +52,15 @@ liability for damage or loss arising from it.
 
 Requires **Node.js 20 or newer** and **Homebridge 1.6.0+, including 2.x**.
 
-**This fork is not published to npm.** Build it from source — `dist/` is not committed,
-so a build step is required either way.
+**Install from npm.** In the Homebridge UI, search for
+`homebridge-mitsubishi-heatpump-ca` and install it. From a shell:
+
+```bash
+sudo hb-service add homebridge-mitsubishi-heatpump-ca
+```
+
+**From source**, for development or to run a change that is not released yet —
+`dist/` is not committed, so this path needs a build:
 
 ```bash
 git clone https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca.git
@@ -61,7 +68,7 @@ cd homebridge-mitsubishi-heatpump-ca
 npm install && npm run build && npm link
 ```
 
-To install onto a separate Homebridge host, build a tarball and install that:
+**From a tarball**, when the Homebridge host cannot reach the npm registry:
 
 ```bash
 npm pack
@@ -119,10 +126,10 @@ controls beneath it are new. There is no way to migrate these automatically.
    > ⚠️ **Not via the Homebridge UI.** Its uninstall dialog defaults to "remove config",
    > which deletes the whole platform block *including* `_bridge.username`. Losing that
    > changes the child bridge's identity and forces you to re-pair every unit.
-3. **Install this plugin from source or a tarball**, as described under
-   [Installation](#installation) — it is not published to npm, so `hb-service add`
-   cannot install it, and naming the upstream package there would install a plugin
-   that cannot serve Canadian accounts.
+3. **Install this plugin**, as described under [Installation](#installation). Name
+   `homebridge-mitsubishi-heatpump-ca` exactly — naming the upstream
+   `homebridge-mitsubishi-heatpump` would install a plugin that cannot serve
+   Canadian accounts.
    > ⚠️ **Never have both installed at once.** Two plugins registering the `KumoV3`
    > platform makes Homebridge throw an ambiguous-platform error, which it swallows into a
    > misleading "Could not find the associated plugin" and drops your accessories.

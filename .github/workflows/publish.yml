@@ -26,6 +26,24 @@ jobs:
       - name: Upgrade npm for trusted publishing
         run: npm install -g npm@latest
 
+      # A release tagged vX.Y.Z must publish exactly X.Y.Z. Nothing else in this job
+      # reads the tag: every step below takes the version from package.json at the
+      # tagged commit, so a forgotten bump would quietly republish the previous
+      # version — and if that version still carried a prerelease suffix it would go
+      # to `beta` while the job stayed green. The tag arrives through env rather
+      # than an inline expression so its contents cannot be read as shell.
+      - name: Release tag must match package.json
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Release tag $TAG does not match package.json version $VERSION" >&2
+            exit 1
+          fi
+          echo "Tag $TAG matches package.json ($VERSION)."
+
       - name: Install dependencies
         run: npm ci
 
@@ -54,9 +72,12 @@ jobs:
 
       # Auth is handled automatically via OIDC because a trusted publisher is
       # configured for this package on npmjs.com (no NPM_TOKEN secret needed).
-      # A version carrying a prerelease suffix (2.3.0-ca.N) is published under the
-      # `beta` dist-tag, never `latest`: `npm install <pkg>` must not resolve to it,
-      # and the Homebridge UI installs `latest`. A plain 2.3.0 publishes as usual.
+      # A version carrying a prerelease suffix (e.g. 2.3.2-beta.1) is published under
+      # the `beta` dist-tag, never `latest`: `npm install <pkg>` must not resolve to
+      # it, and the Homebridge UI installs `latest`. A plain release version (2.3.1
+      # and up) publishes as usual and takes `latest`. The `-ca.N` numbering this
+      # branch was written for ended at 2.3.0-ca.15; the branch stays because the
+      # next prerelease, whatever it is called, still must not take `latest`.
       - name: Publish to npm
         if: steps.check.outputs.published == 'false'
         run: |
