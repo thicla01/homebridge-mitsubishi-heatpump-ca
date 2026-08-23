@@ -157,6 +157,20 @@ export class KumoThermostatAccessory {
   // we asked for 20.3", where 20.3 was what the poll had just overwritten. Must
   // outlast SETPOINT_RECONCILE_MS, which is the authority on what the device kept.
   private readonly setpointWriteAt: Map<string, number> = new Map();
+  /**
+   * The setpoint a write is CARRYING, from the moment HomeKit asks for it until
+   * the device confirms or the write fails.
+   *
+   * `setpointWriteAt` alone was not enough to protect a write from a poll, because
+   * it was stamped only once the command had succeeded — and the command waits
+   * SETPOINT_HOLD_MS (1.5s) before it is even sent, so the whole hold was
+   * unguarded. A poll landing in that window carried the pre-write value and was
+   * pushed to HomeKit, which is what made a handle dragged from 26 to 22 visibly
+   * jump back to 26 and then return to 22 a second later (observed 2026-08-22 on
+   * two units). `currentStatus` cannot stand in for this: it still holds the OLD
+   * value during the hold, which is exactly the value that must not win.
+   */
+  private readonly setpointPending: Map<string, number> = new Map();
   private readonly SETPOINT_POLL_SUPPRESS_MS = 4000;
   // How long after an accepted setpoint write to re-read the unit and publish what
   // it actually stored. Long enough for the adapter to apply the write and answer
@@ -1258,7 +1272,7 @@ export class KumoThermostatAccessory {
           this.setpointWriteAt.delete(field);
           continue;
         }
-        const ours = this.currentStatus?.[field];
+        const ours = this.setpointPending.get(field) ?? this.currentStatus?.[field];
         if (typeof ours === 'number' && status[field] !== ours) {
           this.platform.log.debug(
             `${this.accessory.displayName}: holding ${field}=${ours}°C over the ${source} `
@@ -2569,6 +2583,12 @@ export class KumoThermostatAccessory {
     const commands: { spHeat?: number; spCool?: number } = {};
     commands[field] = temp;
 
+    // Arm the poll guard NOW, not after the command succeeds. Everything below
+    // this line takes time — the hold alone is 1.5s — and a poll landing in that
+    // window carries the value HomeKit is in the middle of replacing.
+    this.setpointPending.set(field, temp);
+    this.setpointWriteAt.set(field, Date.now());
+
     // Hold briefly so an "AC off" dispatched alongside this handle wins
     // regardless of order (see setpointWriteGen). Keyed per field so the two
     // AUTO handles don't supersede each other.
@@ -2577,6 +2597,9 @@ export class KumoThermostatAccessory {
       return;
     }
     if (hold === 'suppressed') {
+      // The value is cached below, so currentStatus carries it from here on and
+      // the pending entry has nothing left to protect.
+      this.setpointPending.delete(field);
       this.platform.log.debug(
         `[${label}] ${this.accessory.displayName}: unit turned off while held — caching ${temp}°C without sending`,
       );
@@ -2595,6 +2618,9 @@ export class KumoThermostatAccessory {
         this.currentStatus[field] = temp;
       }
       this.setpointWriteAt.set(field, Date.now());
+      // currentStatus now carries the value, so the pending entry is redundant —
+      // and must go, or a later poll would be measured against a stale intent.
+      this.setpointPending.delete(field);
       this.service.updateCharacteristic(characteristic, temp);
       // Then confirm against the device rather than trusting our own echo.
       this.scheduleSetpointReconcile(field);
@@ -2602,6 +2628,10 @@ export class KumoThermostatAccessory {
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
+      // Nothing to protect: the device never took the value, and holding it over a
+      // poll would hide the unit's real state behind a write that failed.
+      this.setpointPending.delete(field);
+      this.setpointWriteAt.delete(field);
       // Revert the handle to the actual device state
       setTimeout(() => {
         this.service.updateCharacteristic(characteristic, this.getThresholdTemperature(field, fallback));
