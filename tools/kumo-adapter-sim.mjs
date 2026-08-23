@@ -38,6 +38,7 @@
 //                    For scripting the config edit: the credentials are derived
 //                    from the unit index, so the block matches what a later run
 //                    with the same --units/--port/--bind will actually serve.
+//   --verbose        log every request, not just writes and first contact
 //   --humidity       report a humidity sensor (exercises the sensor lookup)
 //   --strict         reject overlapping requests to one unit with
 //                    `serializer_error`, like an adapter that tolerates a single
@@ -89,6 +90,7 @@ const BASE_PORT = Number(flag('port', 8180)) || 8180;
 const BIND = flag('bind', '127.0.0.1');
 const HUMIDITY = has('humidity');
 const STRICT = has('strict');
+const VERBOSE = has('verbose');
 
 const faults = new Map();
 for (let i = 0; i < argv.length; i++) {
@@ -124,6 +126,9 @@ const units = Array.from({ length: UNITS }, (_, i) => {
     cryptoSerial,
     fault: faults.get(i) ?? '',
     inFlight: false,
+    reads: 0,
+    writes: 0,
+    greeted: false,
     // The status leaves this repo reads back. Starting cold and off is the
     // honest initial state: it is what a unit that nobody has touched reports.
     status: {
@@ -171,6 +176,21 @@ function tick(u) {
 
 setInterval(() => units.forEach(tick), 2000).unref?.();
 
+// A count every minute, printed only when something happened, so a quiet log means
+// "nothing is talking to me" rather than "I am not saying".
+setInterval(() => {
+  const busy = units.filter((u) => u.reads + u.writes > 0);
+  if (busy.length === 0) {
+    return;
+  }
+  const parts = busy.map((u) => `${u.serial}: ${u.reads} lectures/${u.writes} écritures`);
+  console.log(`  [dernière minute] ${parts.join(' | ')}`);
+  units.forEach((u) => {
+    u.reads = 0;
+    u.writes = 0;
+  });
+}, 60000).unref?.();
+
 // ---- protocol -------------------------------------------------------------
 
 const reply = (res, payload, status = 200) => {
@@ -183,6 +203,18 @@ const apiError = (res, code) => reply(res, { _api_error: code });
 function handle(u, req, res, rawBody) {
   const url = new URL(req.url ?? '/', 'http://sim');
   const token = url.searchParams.get('m') ?? '';
+
+  // Proof of wiring, without the flood. A status read every 15s per unit fills a
+  // log with nothing; the FIRST one is the line worth having, because it is what
+  // says the plugin found this unit and is talking to it. After that, only writes
+  // and a periodic count, unless --verbose asks for everything.
+  if (!u.greeted) {
+    u.greeted = true;
+    log(u, 'first contact from the plugin');
+  }
+  if (VERBOSE) {
+    log(u, `request (${rawBody.length} bytes)`);
+  }
 
   if (u.fault === 'authfail') {
     return apiError(res, 'device_authentication_error');
@@ -212,6 +244,11 @@ function handle(u, req, res, rawBody) {
   if (c.indoorUnit?.status) {
     const write = c.indoorUnit.status;
     const applied = Object.keys(write);
+    if (applied.length === 0) {
+      u.reads++;
+    } else {
+      u.writes++;
+    }
     for (const [k, v] of Object.entries(write)) {
       // A real adapter answers 200 and silently ignores a field it does not
       // know, so the simulator does too rather than validating.
