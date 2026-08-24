@@ -462,6 +462,29 @@ the outdoor unit's own sensor is reachable only over a direct CN105 serial conne
 handlers a Matter build would need for vane and swing, and losing those is the whole
 reason this plugin exists. HAP only until that changes.
 
+## Credits
+
+This plugin stands on a lot of other people's work, and the lineage deserves naming:
+
+- **[Burt Herman](https://github.com/burtherman)** wrote
+  [homebridge-mitsubishi-comfort](https://github.com/burtherman/homebridge-mitsubishi-comfort),
+  the original plugin this whole family descends from — still the first name in this
+  repository's own contributor graph, because the fork keeps the full git history.
+- **[Durmus Karatay](https://github.com/ukaratay)** forked it into
+  [homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump),
+  moving the accessory to HeaterCooler — the architecture this fork builds on directly.
+- **[Dominick Larrick](https://github.com/dlarrick)**'s
+  [pykumo](https://github.com/dlarrick/pykumo) is the reference for the adapter's local
+  LAN protocol; this plugin's request token is a port of its `_token()`.
+- **[simont77](https://github.com/simont77)**'s
+  [fakegato-history](https://github.com/simont77/fakegato-history) and
+  **[Erik Baauw](https://github.com/ebaauw)**'s protocol documentation are what made the
+  native Eve history implementation possible — the wire format is pinned against
+  fakegato's own output.
+
+Formal attribution, including the Apache-2.0 statement of changes, is in
+[`NOTICE`](NOTICE).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](https://github.com/thicla01/homebridge-mitsubishi-heatpump-ca/blob/main/LICENSE).
