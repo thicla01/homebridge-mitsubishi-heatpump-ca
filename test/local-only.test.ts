@@ -33,6 +33,7 @@ import type { PlatformConfig } from 'homebridge';
 
 import { KumoV3Platform, validatePlatformConfig } from '../dist/platform.js';
 import { KumoAPI } from '../dist/kumo-api.js';
+import { describeLocalFailure } from '../dist/local-api.js';
 import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { DeviceProfileCallback, DeviceUpdateCallback } from '../dist/kumo-api.js';
 import type { LocalDeviceCreds, LocalKumoClient } from '../dist/local-api.js';
@@ -554,6 +555,47 @@ test('the real poller feeds the units status into HomeKit', async () => {
   }
 });
 
+test('the startup reachability probe names the cause instead of blaming the network', async () => {
+  // 2026-09-10, 14:02:40. This probe announced "no answer from <unit> at <ip>" for a
+  // unit that was plainly answering and rejecting our credentials — and fourteen
+  // seconds later the poller, fixed in 2.3.2, reported the same event correctly.
+  // Two contradictory accounts of one event in one log, with the wrong one first.
+  // Same class of bug as 2.3.2's; 2.3.2 only fixed the other caller.
+  //
+  // 'auth' is the case that made it matter: it sends the reader to the network
+  // (DHCP, wifi, a powered-off unit) when the unit is right there and the secrets
+  // are wrong.
+  const warns: string[] = [];
+  const { platform } = makePlatform();
+  platform.localClient = makeLocalClientStub({
+    async getStatusDetailed() {
+      return { status: null, error: 'auth' as const };
+    },
+  }) as never;
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  try {
+    await platform.discoverDevices();
+
+    const line = warns.find((w) => /^Local control: /.test(w) && /192\.168\.6\.11/.test(w));
+    assert.ok(line, `the unreachable unit must be named with its address; got ${JSON.stringify(warns)}`);
+    assert.ok(
+      line!.includes(describeLocalFailure('auth')),
+      `the probe must say what actually went wrong, not just that something did: ${line}`,
+    );
+    assert.ok(
+      !line!.includes(describeLocalFailure('transport')),
+      'blaming the network for a credential rejection is the whole bug',
+    );
+    // And the advice has to follow the cause. "Check that the unit is powered" for a
+    // unit that just answered and rejected our token is the same wrong turn in
+    // gentler words — it is what sent a whole afternoon into the router on 09-10.
+    assert.ok(!/powered/.test(line!), `the remedy must match the cause: ${line}`);
+    assert.match(line!, /cryptoSerial/, 'which here means the credentials');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
 test('a unit that keeps failing its local polls is named in a warning, once', async () => {
   // A null status is how a wrong cryptoSerial or a moved DHCP lease actually
   // presents: the adapter answers HTTP 200 with `{"_api_error": ...}`, or a body
@@ -599,6 +641,44 @@ test('a unit that keeps failing its local polls is named in a warning, once', as
     await poll();
     await poll();
     assert.strictEqual(named().length, 2);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the same streak stops the accessory answering HomeKit, and recovery restores it', async () => {
+  // The end-to-end half of test/unreachable.test.ts: that file pins the accessory's
+  // guard and the platform's mode decision separately, and this one pins that the
+  // real poll loop actually connects them. Driven on the real handler the platform
+  // registered, not a stub — the whole failure being fixed is that the thing HomeKit
+  // talks to went on answering.
+  //
+  // In this mode the LAN is the only transport, so a frozen tile has nothing to
+  // correct it: on 2026-09-10 that was a day of confidently wrong temperature.
+  const { platform, local } = makePlatform();
+  const poll = () => platform['pollLocalDevices']();
+  try {
+    await platform.discoverDevices();
+    const handler = platform['accessoryHandlers'][0];
+
+    await poll();
+    assert.strictEqual(await handler.getCurrentTemperature(), 22,
+      'a healthy unit reads through, which is what makes the refusal below meaningful');
+
+    local.statusResult = null; // the adapter goes quiet, as it did in the field
+    await poll();
+    await poll();
+    await assert.doesNotReject(() => handler.getCurrentTemperature(),
+      'two dropped reads are routine on an adapter that takes one connection at a time');
+
+    await poll();
+    await assert.rejects(() => handler.getCurrentTemperature(),
+      'at the same threshold that warns the log, the tile must stop claiming to know');
+
+    local.statusResult = { roomTemp: 19.5, operationMode: 'cool', power: 1, spCool: 23, spHeat: 20 };
+    await poll();
+    assert.strictEqual(await handler.getCurrentTemperature(), 19.5,
+      'the unit answered again, so the tile goes back to reporting what it says');
   } finally {
     platform['cleanup']();
   }
@@ -1002,8 +1082,9 @@ test('a failed local command does NOT fall back to the cloud in local-only mode'
   // It also does not pretend to have worked. The harness never feeds a status, so
   // there is no real state to revert the characteristic to — the case where a
   // silently-resolving setter left the Home app showing the value the user set on a
-  // unit that never received it, forever — nothing in the plugin marks an accessory
-  // Not Responding, so the rejection is the only signal available.
+  // unit that never received it, forever. The read path has its own signal since
+  // 2.3.4 (test/unreachable.test.ts) but it only arms after three failed polls, so
+  // for THIS write the rejection is still the only signal available.
   await assert.rejects(() => h.handler.setActive(Characteristic.Active.INACTIVE));
 
   assert.strictEqual(h.localCommands.length, 1, 'local was attempted');

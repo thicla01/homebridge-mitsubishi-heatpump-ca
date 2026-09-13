@@ -284,8 +284,8 @@ the published minimum rather than clamping it, so that band is otherwise unaskab
 > today, this fork is the path.
 
 **[docs/configuration.md → Canadian accounts](docs/configuration.md#canadian-accounts-cloudregion-ca)**
-has the full account, including what the mode gives up (streaming, "not responding"
-detection, sensor battery).
+has the full account, including what the mode gives up (streaming, the cloud's own
+connection flag, sensor battery).
 
 #### What a healthy startup looks like
 
@@ -310,10 +310,15 @@ supplied. Two failure shapes are worth recognising:
   signs the request body, so a truncated read surfaces as an authentication failure,
   observed live on provably good credentials — so each rejected request is first retried
   once after a 250 ms pause, and any success resets the count and re-arms the warning.
-- **`Local control: no answer from <name> at <ip>`** — the unit is unreachable at that
-  address, and there is no cloud fallback in this mode. Give each unit a **DHCP
-  reservation** (or pin it with `localControlIps`); a moved lease ends control of that
-  unit until the address is corrected.
+- **`Local control: <name> at <ip> — <what went wrong>`** — the startup probe read each
+  unit once and this one gave back nothing usable. The rest of the line says which
+  failure it was: `no answer` (unreachable at that address — give each unit a **DHCP
+  reservation**, or pin it with `localControlIps`; a moved lease ends control of that unit
+  until the address is corrected), `the unit rejected our credentials`, `the unit answered
+  "busy"`, and so on. Either way there is no cloud fallback in this mode.
+  *Before 2.3.4 this line said "no answer" for every cause*, which sent people to hunt
+  their network for what was a credential problem — while the poller, forty-five seconds
+  later, named it correctly.
 
 ### Local-only mode
 
@@ -414,7 +419,7 @@ Without the cloud there is no `profile_update` and no account-level socket, so:
 |---|---|
 | **Sensor battery** | The one sensor reading genuinely gone: battery level arrives only via the cloud `sensor_update` event, and the low-battery warning goes with it. Humidity and a paired wireless sensor's finer temperature do **not** — humidity is absent from the unit's own local status, so the local poll reads the paired sensor (or an MHK2 wall thermostat, which reports humidity only) over the LAN in the same cycle, and the `HumiditySensor` service appears as usual. A unit with no sensor and no MHK2 reports no humidity at all |
 | **Setpoint limits and capabilities** | Not discovered. The per-unit fields above stand in for them, defaulting to 16–31 °C and no dry/vent. Declaring a range wider than the unit's own installer limits fails **silently** — the adapter answers HTTP 200 and ignores the value, where the cloud would have returned a 400 |
-| **"Not responding" in the Home app** | Not available. An unreachable unit shows its last known state instead of greying out; the poller's latched warning is what tells you, and a write that cannot be reverted is reported to HomeKit as a failure |
+| **"Not responding" in the Home app** | Works, from the LAN poller rather than the cloud. Three failed polls in a row — about 45 s at the default interval — mark the accessory **Not Responding**, at the same threshold that logs the latched warning, and the first reading that arrives clears it and republishes the real state. What is gone is the cloud's own connection flag, which knew whether the unit had reached *Mitsubishi*; this knows whether it answers *us*, which is the question that matters when the LAN is the only path. A write that cannot be reverted is still reported to HomeKit as a failure immediately, without waiting out the streak |
 | **Streaming** | Gone; status comes from LAN polling every `localPollInterval` seconds (default 15). In practice this is *faster* than the cloud, which lags 7–10 s |
 | **Cloud fallback** | Deliberately gone. A command the LAN refuses fails and the tile reverts, rather than quietly dialling an API that cannot authenticate. If nothing has ever been read from the unit there is no state to revert to, so the write is reported to HomeKit as a failure instead of appearing to succeed |
 

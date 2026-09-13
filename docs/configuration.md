@@ -163,7 +163,8 @@ and anything the schema does not describe as a field goes with the rewrite — s
 A pinned address is only as good as the route to it: it must be reachable **from the
 machine running Homebridge**, which is frequently not the machine you are configuring
 from. A pinned unit is never swept for, so an address that is wrong or unroutable does
-not fall back to discovery — it surfaces as `no answer from <unit>` at the next restart.
+not fall back to discovery — it surfaces at the next restart as
+`Local control: <unit> at <ip> — no answer …`.
 If the unit sits on another VLAN, confirm the route from the Homebridge host first
 (`ping <ip>`, then `nc -vz <ip> 80`); inter-VLAN routing is a router matter that no
 setting here can substitute for.
@@ -290,8 +291,11 @@ over the LAN. Nothing is declared by hand and no secret goes into `config.json`.
   is something you wrote by hand for one unit; here it is discovered, and both are true on
   ordinary hardware — so `showDrySwitch` / `showFanOnlySwitch` decide, as on the cloud path.
 - **What it gives up against a working v3 account:** streaming (status comes from the LAN
-  poll, default 15s), the cloud's "not responding" detection, and paired-sensor battery
-  readings. Indoor humidity still works — the LAN client reads it from the unit's sensor or
+  poll, default 15s), the cloud's own connection flag, and paired-sensor battery
+  readings. A unit that goes quiet is still reported: three failed polls in a row (~45s at
+  the default interval) log a warning **and** mark the accessory Not Responding in the Home
+  app, so the tile stops showing a reading the unit has stopped backing; the next successful
+  read clears it. Indoor humidity still works — the LAN client reads it from the unit's sensor or
   MHK2 in the same poll. `pollInterval`, `disablePolling`, `degradedPollInterval` and
   `streamingHealthCheckInterval` are inert and warned about.
 - **v2 is a bootstrap, not a status source.** There is no socket, no streaming and no MQTT
@@ -314,7 +318,7 @@ serves.
 
 **[README → Local-only mode](../README.md#local-only-mode)** covers where to obtain them,
 a full worked config, and what the mode gives up (indoor humidity, profile-sourced
-setpoint limits, and "not responding" detection). The per-unit fields:
+setpoint limits, and the cloud's own connection flag). The per-unit fields:
 
 | Field | Required | Description |
 |---|---|---|

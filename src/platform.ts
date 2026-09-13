@@ -1206,25 +1206,39 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (!local) {
       return;
     }
-    const reachable = await Promise.all(units.map(async (unit) => {
+    // getStatusDetailed, not getStatus: the CAUSE is what the reader needs. This
+    // probe used to say "no answer" for every failure, including a unit that was
+    // plainly answering and rejecting our credentials — observed live 2026-09-10,
+    // fourteen seconds before the poller reported the same event correctly. Two
+    // contradictory accounts of one event in one log. The poller was fixed in
+    // 2.3.2; this probe kept the old wording and the old lossy call.
+    const outcomes = await Promise.all(units.map(async (unit) => {
       try {
-        return (await local.getStatus(unit.deviceSerial)) !== null;
+        return await local.getStatusDetailed(unit.deviceSerial);
       } catch {
-        return false;
+        return { status: null, error: 'transport' as const };
       }
     }));
 
-    const ok = reachable.filter(Boolean).length;
+    const ok = outcomes.filter((o) => o.status !== null).length;
     units.forEach((unit, i) => {
-      if (!reachable[i]) {
+      if (outcomes[i].status === null) {
         // The address may have come from config, from the v2 reply, or from the LAN
         // sweep — the client is the one place that knows which one won.
         const ip = local.getIp(unit.deviceSerial) ?? unit.ip;
+        // The remedy follows the cause, which is the point of naming it. Telling
+        // someone to check that a unit is powered, when the unit just answered and
+        // rejected our token, is the same wrong turn in gentler words.
+        const remedy = outcomes[i].error === 'auth'
+          ? 'Its password and cryptoSerial must BOTH belong to the unit at that address — '
+            + 'check the address first if you have more than one unit.'
+          : 'Check that the unit is powered and at that address; a DHCP reservation avoids '
+            + 'a moved lease.';
         this.log.warn(
-          `Local control: no answer from ${unit.displayName} `
-          + `${ip ? `at ${ip}` : '(no address found on the LAN)'}. `
-          + 'Check the address (a DHCP reservation avoids this) and that the password and '
-          + 'cryptoSerial belong to THIS unit — there is no cloud fallback in this mode.',
+          `Local control: ${unit.displayName} `
+          + `${ip ? `at ${ip}` : '(no address found on the LAN)'} — `
+          + `${describeLocalFailure(outcomes[i].error)}. ${remedy} `
+          + 'There is no cloud fallback in this mode.',
         );
       }
     });
@@ -1628,7 +1642,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         const { status, error } = await this.localClient.getStatusDetailed(serial);
         if (status) {
           handler.updateFromLocal(status);
-          this.noteLocalPollSuccess(serial);
+          this.noteLocalPollSuccess(handler);
         } else {
           // A null status is not an exception: the adapter answers HTTP 200 with
           // `{"_api_error": ...}` to a bad credential, and a read returns nothing
@@ -1641,10 +1655,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           // tile each, all logged identically — when the classification already
           // existed one call down and was thrown away here. "unreachable" and
           // "wedged" call for opposite responses from the person reading the log.
-          this.noteLocalPollFailure(serial, describeLocalFailure(error));
+          this.noteLocalPollFailure(handler, describeLocalFailure(error));
         }
       } catch (error) {
-        this.noteLocalPollFailure(serial, (error as Error).message);
+        this.noteLocalPollFailure(handler, (error as Error).message);
       }
     }
   }
@@ -1657,29 +1671,46 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    * one would train the user to ignore the log. What is NOT routine is a unit that
    * has answered nothing for LOCAL_POLL_WARN_AFTER polls in a row — at the default
    * 15s interval, three quarters of a minute of a tile that is quietly frozen, and in
-   * local-only mode there is no other status source to correct it (nor does anything
-   * here mark an accessory Not Responding: the cloud's `device_status_v2` is logged
-   * and nothing more). That gets one warning, latched until the unit answers again,
-   * so it can neither flood nor be missed.
+   * local-only mode there is no other status source to correct it. That gets one
+   * warning, latched until the unit answers again, so it can neither flood nor be
+   * missed.
+   *
+   * The same threshold arms the accessory's No Response state, so the log and the
+   * Home app stop disagreeing about whether the unit is there. Only where the LAN is
+   * the sole transport, though: under the default US config the cloud keeps this
+   * accessory current while the LAN stutters, and marking it unreachable would flap
+   * No Response over a tile that is perfectly up to date.
    */
-  private noteLocalPollFailure(serial: string, reason: string): void {
+  private noteLocalPollFailure(handler: KumoThermostatAccessory, reason: string): void {
+    const serial = handler.getDeviceSerial();
     const failures = (this.localPollFailures.get(serial) || 0) + 1;
     this.localPollFailures.set(serial, failures);
     this.log.debug(`Local poll failed for ${serial} (${failures} in a row): ${reason}`);
     if (failures !== LOCAL_POLL_WARN_AFTER) {
       return; // latched: exactly one warning per outage
     }
+    if (this.v3Unavailable) {
+      handler.setUnreachable(reason);
+    }
     const ip = this.localClient?.getIp(serial);
     this.log.warn(
       `Local status for ${serial}${ip ? ` at ${ip}` : ''} has failed ${failures} polls in a row `
-      + `(last reason: ${reason}). Its HomeKit tile is showing stale data. Check that the unit is `
-      + 'powered and at that address (a DHCP reservation avoids a moved lease), and that its '
-      + 'password and cryptoSerial belong to THIS unit.',
+      + `(last reason: ${reason}). ${this.v3Unavailable
+        ? 'Its HomeKit tile now reads Not Responding rather than repeating stale data.'
+        : 'Its HomeKit tile is showing stale data until a cloud update corrects it.'} `
+      + 'Check that the unit is powered and at that address (a DHCP reservation avoids a '
+      + 'moved lease), and that its password and cryptoSerial belong to THIS unit.',
     );
   }
 
   /** Note a local poll that worked, and report recovery if we had warned. */
-  private noteLocalPollSuccess(serial: string): void {
+  private noteLocalPollSuccess(handler: KumoThermostatAccessory): void {
+    const serial = handler.getDeviceSerial();
+    // Cleared here as well as at the accessory's commit point. The commit is what
+    // normally lifts it, but processZoneUpdate legitimately drops an update inside
+    // the post-write hold window — and a unit that just answered is not unreachable,
+    // whether or not we kept what it said.
+    handler.clearUnreachable();
     const failures = this.localPollFailures.get(serial) || 0;
     if (failures >= LOCAL_POLL_WARN_AFTER) {
       this.log.info(`Local status for ${serial} recovered after ${failures} failed poll(s)`);

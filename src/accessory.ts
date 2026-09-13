@@ -58,6 +58,11 @@ export class KumoThermostatAccessory {
   private deviceSerial: string;
   private siteId: string;
   private currentStatus: DeviceStatus | null = null;
+  // Non-null while the platform has given up on reaching this unit. It qualifies
+  // currentStatus rather than replacing it: the cached status is kept (the Eve
+  // history and the mirror still want the last real reading), it just stops being
+  // offered to HomeKit as current. See failIfUnreachable.
+  private unreachableReason: string | null = null;
   private hasHumiditySensor: boolean = false;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
@@ -790,6 +795,7 @@ export class KumoThermostatAccessory {
   }
 
   async getFanOnlyOn(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.isFanOnlyActive(this.currentStatus);
   }
 
@@ -898,6 +904,7 @@ export class KumoThermostatAccessory {
   }
 
   async getDryOn(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.isDryActive(this.currentStatus);
   }
 
@@ -1330,6 +1337,12 @@ export class KumoThermostatAccessory {
         }
       }
 
+      // A usable status from ANY transport ends the outage — the unit is
+      // demonstrably talking to us again. Cleared here rather than only in the
+      // poller so the flag lifts on the very line that refills the cache; the
+      // characteristic pushes below then republish the real state, which is what
+      // actually clears No Response in the Home app.
+      this.unreachableReason = null;
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
       // Every transport converges here, so this is the one line that feeds the
@@ -1586,20 +1599,79 @@ export class KumoThermostatAccessory {
    * state to push, so resolving quietly left the Home app displaying whatever the
    * user just set on a unit that never received it. Indefinitely, in local-only
    * mode: a unit that never answers (wrong cryptoSerial, moved DHCP lease) never
-   * fills the cache either, and nothing in the plugin marks an accessory Not
-   * Responding (the cloud's `device_status_v2` is logged and nothing more), so
-   * rejecting the setter is the only signal the Home app can get.
-   *
-   * `HapStatusError` is read off the live `api.hap` rather than imported: the
-   * plugin has no runtime dependency on hap-nodejs (Homebridge injects it) and the
-   * accessory is also built by tests against a minimal fake. Any rejection makes
-   * HAP answer the controller with a communication failure; the typed error only
-   * names the status explicitly.
+   * fills the cache either, so rejecting the setter is the only signal the Home app
+   * gets for THAT write. The read path has its own signal since 2.3.4
+   * (failIfUnreachable), but it is on a ~45s fuse and a write that just failed
+   * should not have to wait it out.
    */
   private failIfNothingToRevert(action: string): void {
     if (this.currentStatus) {
       return;
     }
+    this.throwCommunicationFailure(
+      `${this.accessory.displayName}: ${action} failed and the unit's state is unknown`,
+    );
+  }
+
+  /**
+   * Refuse every read while the unit is known to be out of contact.
+   *
+   * A getter answering from `currentStatus` cannot distinguish "this is the unit's
+   * state" from "this is the last thing the unit said, hours ago", and it presents
+   * both identically. On 2026-09-10 the adapter stopped answering at 14:02:40; the
+   * log said so within forty-five seconds, and the tile went on displaying that
+   * afternoon's temperature for the rest of the day without a hint that it had
+   * stopped being true. A frozen number is worse than no number: nobody checks a
+   * reading that looks fine.
+   *
+   * This weighs more here than upstream. Under `cloudRegion: "ca"` the LAN is the
+   * only transport, so no second source ever arrives to correct the tile — which is
+   * why the platform arms this in `v3Unavailable` modes only
+   * (`platform.ts:noteLocalPollFailure`). Where the cloud still feeds updates a LAN
+   * stutter is not an outage, and flapping No Response over a current tile would be
+   * its own lie.
+   *
+   * Every `get*` handler calls this first, display units included: HomeKit marks the
+   * whole accessory Not Responding on any failed read, so exempting the one getter
+   * that reads config instead of device state would buy nothing and leave a hole for
+   * the next getter to fall into. `test/unreachable.test.ts` enumerates the handlers
+   * off the prototype and pins that none is missed.
+   */
+  private failIfUnreachable(): void {
+    if (!this.unreachableReason) {
+      return;
+    }
+    this.throwCommunicationFailure(
+      `${this.accessory.displayName} is not responding: ${this.unreachableReason}`,
+    );
+  }
+
+  /**
+   * Mark the unit out of contact. Called by the platform, not from here: the
+   * accessory sees single reads, and one failed read is routine (the adapter takes
+   * about one connection at a time). Only the poller's consecutive-failure streak
+   * can tell a stutter from an outage.
+   */
+  public setUnreachable(reason: string): void {
+    this.unreachableReason = reason;
+  }
+
+  /** Evidence of contact, from any transport. Idempotent. */
+  public clearUnreachable(): void {
+    this.unreachableReason = null;
+  }
+
+  /**
+   * Throw what makes HomeKit answer "No Response", with a readable fallback.
+   *
+   * `HapStatusError` is read off the live `api.hap` rather than imported: the
+   * plugin has no runtime dependency on hap-nodejs (Homebridge injects it) and the
+   * accessory is also built by tests against a minimal fake. Any rejection makes
+   * HAP answer the controller with a communication failure; the typed error only
+   * names the status explicitly, so the fallback is a less precise path rather than
+   * a degraded one.
+   */
+  private throwCommunicationFailure(message: string): never {
     const hap = (this.platform.api as {
       hap?: {
         HapStatusError?: new (status: number) => Error;
@@ -1610,14 +1682,13 @@ export class KumoThermostatAccessory {
     if (hap?.HapStatusError && typeof status === 'number') {
       throw new hap.HapStatusError(status);
     }
-    throw new Error(
-      `${this.accessory.displayName}: ${action} failed and the unit's state is unknown`,
-    );
+    throw new Error(message);
   }
 
   // ---- HeaterCooler: Active (on/off) --------------------------------------
 
   async getActive(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.Active.INACTIVE;
     }
@@ -1727,6 +1798,7 @@ export class KumoThermostatAccessory {
   // ---- HeaterCooler: mode --------------------------------------------------
 
   async getCurrentHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.CurrentHeaterCoolerState.INACTIVE;
     }
@@ -1734,6 +1806,7 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.TargetHeaterCoolerState.AUTO;
     }
@@ -1961,6 +2034,7 @@ export class KumoThermostatAccessory {
   }
 
   async getFanActive(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     if (!this.currentStatus) {
       return this.platform.Characteristic.Active.INACTIVE;
     }
@@ -2029,6 +2103,7 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentFanState(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const C = this.platform.Characteristic.CurrentFanState;
     if (!this.currentStatus ||
         this.mapToActive(this.currentStatus) === this.platform.Characteristic.Active.INACTIVE) {
@@ -2039,6 +2114,7 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetFanState(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const C = this.platform.Characteristic.TargetFanState;
     return this.currentStatus?.fanSpeed === 'auto' ? C.AUTO : C.MANUAL;
   }
@@ -2085,6 +2161,7 @@ export class KumoThermostatAccessory {
   }
 
   async getRotationSpeed(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.fanSpeedToRotation(this.currentStatus?.fanSpeed ?? 'auto');
   }
 
@@ -2177,6 +2254,7 @@ export class KumoThermostatAccessory {
   // ---- Display units -------------------------------------------------------
 
   async getTemperatureDisplayUnits(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const C = this.platform.Characteristic.TemperatureDisplayUnits;
     return this.accessory.context.displayUnits === 'C' ? C.CELSIUS : C.FAHRENHEIT;
   }
@@ -2272,6 +2350,7 @@ export class KumoThermostatAccessory {
   }
 
   async getSwingMode(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const C = this.platform.Characteristic.SwingMode;
     return this.currentStatus?.airDirection === 'swing' ? C.SWING_ENABLED : C.SWING_DISABLED;
   }
@@ -2289,11 +2368,13 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentSlatState(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const C = this.platform.Characteristic.CurrentSlatState;
     return this.currentStatus?.airDirection === 'swing' ? C.SWINGING : C.FIXED;
   }
 
   async getTargetTiltAngle(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.vaneToTilt(this.currentStatus?.airDirection ?? '') ?? 0;
   }
 
@@ -2374,6 +2455,7 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentTemperature(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
       // A sensor_update can land before the first device_update, and a real
@@ -2413,10 +2495,12 @@ export class KumoThermostatAccessory {
   // low/heat bound, spCool the high/cool bound (these units have no spAuto).
 
   async getHeatingThresholdTemperature(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.getThresholdTemperature('spHeat', 20);
   }
 
   async getCoolingThresholdTemperature(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     return this.getThresholdTemperature('spCool', 24);
   }
 
@@ -2872,6 +2956,7 @@ export class KumoThermostatAccessory {
    * returned anyway whenever the fetch came back empty.
    */
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
+    this.failIfUnreachable();
     const humidity = this.currentStatus?.humidity || 0;
     this.platform.log.debug('Get CurrentRelativeHumidity:', humidity);
     return humidity;
