@@ -193,9 +193,14 @@ before Matter is viable. Recover it if the question comes up again:
   a regression turns off someone's heat. CI runs the same on Node 20.0 / 22 / 24
   (`.github/workflows/test.yml`).
 - Add the regression test with the fix, in the same style as its neighbours.
-- This fork is **not published to npm** — the package is renamed
-  `homebridge-mitsubishi-heatpump-ca` and installs from source or an `npm pack` tarball;
-  the release path is in `CONTRIBUTING.md`. The inherited
-  `.github/workflows/publish.yml` still checks the pre-rename npm name
-  (`npm view "homebridge-mitsubishi-heatpump@..."`), so its already-published guard can
-  never fire — do not cut a release through it.
+- This fork **is published to npm** as `homebridge-mitsubishi-heatpump-ca`, and the
+  release path in `CONTRIBUTING.md` is the one to use: push, then create a GitHub Release
+  on the `vX.Y.Z` tag, which is what triggers `.github/workflows/publish.yml` (OIDC
+  trusted publishing, no token). That workflow's already-published guard was inherited
+  asking about the *pre-rename* package and so could never fire; it reads the name from
+  `package.json` since `16d7c11` and works.
+- **`origin` is UPSTREAM (`ukaratay/homebridge-mitsubishi-heatpump`); this fork's own
+  repository is the `fork` remote.** `git push origin main` would aim dozens of commits
+  at someone else's project, and `gh` resolves `--repo` from `origin` unless told
+  otherwise — pass `--repo thicla01/homebridge-mitsubishi-heatpump-ca` explicitly. Any
+  "N commits ahead" measured against `origin` is meaningless here.
