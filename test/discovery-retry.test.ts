@@ -48,6 +48,16 @@ interface Spies {
 class FakePlatformAccessory {
   context: Record<string, unknown> = {};
   constructor(public displayName: string, public UUID: string) {}
+
+  /**
+   * No services: this file's accessories are never configured as heat pumps, and
+   * a real PlatformAccessory answers null for a service it does not have. Present
+   * at all because the platform now asks — silencing a handler-less tile starts by
+   * looking for its HeaterCooler (platform.ts:markUnconfigured).
+   */
+  getService(): null {
+    return null;
+  }
 }
 
 function makeApi(spies: Spies) {

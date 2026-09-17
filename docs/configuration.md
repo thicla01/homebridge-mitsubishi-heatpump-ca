@@ -295,7 +295,10 @@ over the LAN. Nothing is declared by hand and no secret goes into `config.json`.
   readings. A unit that goes quiet is still reported: three failed polls in a row (~45s at
   the default interval) log a warning **and** mark the accessory Not Responding in the Home
   app, so the tile stops showing a reading the unit has stopped backing; the next successful
-  read clears it. Indoor humidity still works — the LAN client reads it from the unit's sensor or
+  read clears it. So does a unit the reply lists but returns no secrets for: its accessory is
+  kept (unregistering it would cost the room assignment, the name and every automation) and
+  reads Not Responding until the secrets come back, rather than serving last run's values.
+  Indoor humidity still works — the LAN client reads it from the unit's sensor or
   MHK2 in the same poll. `pollInterval`, `disablePolling`, `degradedPollInterval` and
   `streamingHealthCheckInterval` are inert and warned about.
 - **v2 is a bootstrap, not a status source.** There is no socket, no streaming and no MQTT

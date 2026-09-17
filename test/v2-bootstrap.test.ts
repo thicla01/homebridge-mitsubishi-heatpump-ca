@@ -27,6 +27,7 @@ import { KumoAPI } from '../dist/kumo-api.js';
 import { KumoV3Platform, validatePlatformConfig } from '../dist/platform.js';
 import { KumoThermostatAccessory } from '../dist/accessory.js';
 import { parseV2Login } from '../dist/kumo-v2.js';
+import { UNCONFIGURED_GUARD_CHARACTERISTICS } from '../dist/no-response.js';
 import type { V2Inventory, V2LoginOutcome } from '../dist/kumo-v2.js';
 import type { DeviceProfileCallback, DeviceUpdateCallback } from '../dist/kumo-api.js';
 import type { LocalDeviceCreds } from '../dist/local-api.js';
@@ -692,6 +693,47 @@ test('a unit whose secrets came back empty KEEPS its cached accessory', async ()
     assert.deepStrictEqual(
       platform['accessoryHandlers'].map((h: KumoThermostatAccessory) => h.getDeviceSerial()), [SERIAL_A],
       'only the credentialed unit gets a handler',
+    );
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('and that kept accessory stops responding rather than serving a number nobody backs', async () => {
+  // The other half of the retention rule, and the reason this whole mechanism was
+  // written. Keeping the accessory is right — the alternative destroys the room,
+  // the name and the automations — but with no handler behind it HAP goes on
+  // serving the values it persisted, so the tile shows a plausible temperature and
+  // swallows every command. Not for a poll interval: INDEFINITELY, until the
+  // secrets come back or someone restarts.
+  //
+  // The warning logged beside this has promised "it will stop responding" since
+  // long before anything implemented it.
+  const inventory = parseV2Login(makeV2Reply({ noSecrets: [SERIAL_B] }));
+  const { platform } = makePlatform({}, { outcome: { fatal: false, inventory } });
+  try {
+    restoreFromCache(platform, 'Salon', SERIAL_A);
+    restoreFromCache(platform, 'Chambre', SERIAL_B);
+    // A cached accessory comes back carrying the services it was configured with
+    // last run — which is exactly what lets a dead tile look alive.
+    const cached = (uuid: string) =>
+      platform.accessories.find((a) => a.UUID === uuid) as unknown as FakeAccessory;
+    cached(`uuid-${SERIAL_B}`).addService(Service.HeaterCooler);
+
+    await platform.discoverDevices();
+
+    const chambre = cached(`uuid-${SERIAL_B}`).getService(Service.HeaterCooler)!;
+    for (const name of UNCONFIGURED_GUARD_CHARACTERISTICS) {
+      const handler = chambre.getCharacteristic(Characteristic[name]).getHandler;
+      assert.ok(handler, `${name} answers nothing at all, so HAP serves its stale value`);
+      assert.throws(() => handler!(), `${name} still claims to know this unit's state`);
+    }
+
+    // The control: the credentialed half must be untouched by any of this.
+    const salon = cached(`uuid-${SERIAL_A}`).getService(Service.HeaterCooler)!;
+    assert.doesNotThrow(
+      () => salon.getCharacteristic(Characteristic.Active).getHandler!(),
+      'silencing the uncredentialed unit must not silence the one that works',
     );
   } finally {
     platform['cleanup']();

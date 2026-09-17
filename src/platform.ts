@@ -6,6 +6,7 @@ import {
   PlatformConfig,
   Service,
   Characteristic,
+  WithUUID,
 } from 'homebridge';
 
 import * as os from 'os';
@@ -23,6 +24,7 @@ import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
 } from './local-api';
 import { KumoV2Client, V2Inventory, v2Endpoint } from './kumo-v2';
 import { MirrorController } from './mirror';
+import { throwCommunicationFailure, UNCONFIGURED_GUARD_CHARACTERISTICS } from './no-response';
 
 /** Stand-in siteId for units declared in config; local-only mode has no site. */
 const LOCAL_ONLY_SITE_ID = 'local-only';
@@ -571,12 +573,77 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   }
 
   /**
+   * Silence a published accessory that has no handler behind it.
+   *
+   * A cached accessory is republished by Homebridge before this plugin has decided
+   * anything, and it keeps serving the characteristic values HAP persisted for it.
+   * Until `setupLocalUnits` builds a KumoThermostatAccessory for it, nothing is
+   * bound: reads answer with last week's temperature and writes land nowhere. The
+   * tile looks alive and is inert.
+   *
+   * Two ways in, and they differ only in how long they last. A unit whose local
+   * secrets came back empty is kept on purpose — unregistering it would take its
+   * room, its name and every automation that references it with it — and stays
+   * uncontrollable **indefinitely**. A restart that lands while the Kumo cloud is
+   * unreachable leaves every unit in this state for one retry cycle (30s to 5min),
+   * then heals itself. The first case is why this exists; the retry-window warning
+   * in setupLocalUnits has promised "it will stop responding" since before anything
+   * made it true.
+   *
+   * Placeholders are never removed. hap-nodejs's `onGet` assigns rather than
+   * appends, so constructing the real handler replaces every one of them — see
+   * UNCONFIGURED_GUARD_CHARACTERISTICS for why that is a guarantee and not a hope.
+   *
+   * `getCharacteristic` adds an optional characteristic as a side effect of the
+   * lookup. That is harmless here and only here: every name in the list is one the
+   * real constructor adds to this same service anyway, so nothing is published that
+   * would not have been.
+   */
+  private markUnconfigured(accessory: PlatformAccessory, reason: string): void {
+    // Wrapped because of WHERE this runs. scheduleDiscoveryRetry is reached from
+    // didFinishLaunching and from a bare setTimeout, and nothing above either one
+    // catches — an escape here takes down every other plugin in the install (see
+    // "Never throw from the platform constructor" in CLAUDE.md). What is being
+    // traded away is cosmetic by comparison: at worst a tile keeps lying, which is
+    // the situation this method improves on rather than one it creates.
+    try {
+      const service = accessory.getService(this.Service.HeaterCooler);
+      if (!service) {
+        return; // never configured as a heat pump; nothing of ours to silence
+      }
+      const chars = this.Characteristic as unknown as Record<string, WithUUID<new () => Characteristic>>;
+      for (const name of UNCONFIGURED_GUARD_CHARACTERISTICS) {
+        const characteristic = chars[name];
+        if (!characteristic) {
+          continue; // a HAP that no longer defines it; not worth failing startup over
+        }
+        service.getCharacteristic(characteristic).onGet(() => {
+          throwCommunicationFailure(this.api, `${accessory.displayName}: ${reason}`);
+        });
+      }
+    } catch (error) {
+      this.log.debug(`Could not mark ${accessory.displayName} unconfigured: ${(error as Error).message}`);
+    }
+  }
+
+  /**
    * Re-run discovery after a transient failure (e.g. a DNS/login blip at startup).
    * Without this, a single failed login left the plugin idle until a manual restart.
    * Backoff grows 30s -> 5min and then retries indefinitely, so the plugin recovers
    * on its own whenever connectivity returns.
    */
   private scheduleDiscoveryRetry(): void {
+    // Before the early return, not after: the point is that every restart which
+    // fails to reach the cloud leaves its cached tiles saying nothing rather than
+    // saying yesterday. Idempotent, so a second failure re-marking costs nothing.
+    for (const accessory of this.accessories) {
+      const serial = accessory.context.device?.deviceSerial;
+      if (serial && this.accessoryHandlers.some(handler => handler.getDeviceSerial() === serial)) {
+        continue; // already live; discovery failed for some OTHER unit
+      }
+      this.markUnconfigured(accessory, 'no inventory yet — the plugin has not reached the cloud');
+    }
+
     if (this.discoveryRetryTimer) {
       return; // a retry is already queued
     }
@@ -1126,12 +1193,20 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         continue;
       }
       const uuid = this.api.hap.uuid.generate(serial);
-      if (!keepUuids.has(uuid) && this.accessories.some(accessory => accessory.UUID === uuid)) {
+      const orphan = keepUuids.has(uuid)
+        ? undefined
+        : this.accessories.find(accessory => accessory.UUID === uuid);
+      if (orphan) {
         this.log.warn(
           `Local control: keeping ${serial}'s existing HomeKit accessory even though it cannot be `
           + 'controlled right now — it will stop responding rather than lose its room, its name '
           + 'and its automations. It recovers by itself once the credentials come back.',
         );
+        // What makes the sentence above true. It has been in this warning since
+        // before anything implemented it: with no handler the tile went on serving
+        // HAP's persisted values, so "it will stop responding" described an
+        // intention rather than the code.
+        this.markUnconfigured(orphan, 'no local credentials came back for this unit');
       }
       keepUuids.add(uuid);
     }

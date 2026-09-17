@@ -8,6 +8,7 @@ import {
 import { cToF, quantizeSetpointInRange, quantizeSetpointInRangeCelsius } from './temperature';
 import { join } from 'path';
 import { EveHistoryStore, EveHistoryFeed, attachEveHistory } from './eve-history';
+import { throwCommunicationFailure } from './no-response';
 
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
@@ -1661,28 +1662,9 @@ export class KumoThermostatAccessory {
     this.unreachableReason = null;
   }
 
-  /**
-   * Throw what makes HomeKit answer "No Response", with a readable fallback.
-   *
-   * `HapStatusError` is read off the live `api.hap` rather than imported: the
-   * plugin has no runtime dependency on hap-nodejs (Homebridge injects it) and the
-   * accessory is also built by tests against a minimal fake. Any rejection makes
-   * HAP answer the controller with a communication failure; the typed error only
-   * names the status explicitly, so the fallback is a less precise path rather than
-   * a degraded one.
-   */
+  /** See `no-response.ts` — the platform silences handler-less accessories the same way. */
   private throwCommunicationFailure(message: string): never {
-    const hap = (this.platform.api as {
-      hap?: {
-        HapStatusError?: new (status: number) => Error;
-        HAPStatus?: { SERVICE_COMMUNICATION_FAILURE: number };
-      };
-    }).hap;
-    const status = hap?.HAPStatus?.SERVICE_COMMUNICATION_FAILURE;
-    if (hap?.HapStatusError && typeof status === 'number') {
-      throw new hap.HapStatusError(status);
-    }
-    throw new Error(message);
+    throwCommunicationFailure(this.platform.api, message);
   }
 
   // ---- HeaterCooler: Active (on/off) --------------------------------------

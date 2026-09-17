@@ -17,6 +17,18 @@ import { Characteristic as HapCharacteristic } from '@homebridge/hap-nodejs';
 export interface FakeCharacteristic {
   value: unknown;
   props?: Record<string, unknown>;
+  /**
+   * The handler the last `onGet` installed, or undefined if none ever was.
+   *
+   * Recorded because hap-nodejs's `onGet` ASSIGNS (`this.getHandler = handler`)
+   * rather than appends, and the platform leans on that: a placeholder that makes
+   * a handler-less tile answer "No Response" is replaced, not removed, when the
+   * real accessory is constructed. A placeholder that outlived its replacement
+   * would be permanent No Response — worse than the stale tile it improves on — so
+   * `test/unconfigured-accessory.test.ts` calls what is stored here to prove the
+   * replacement really happens rather than inferring it from the source.
+   */
+  getHandler?: () => unknown;
   onGet(handler?: unknown): FakeCharacteristic;
   onSet(handler?: unknown): FakeCharacteristic;
   setProps(props: Record<string, unknown>): FakeCharacteristic;
@@ -119,7 +131,10 @@ export function makeLog(): FakeLog {
 export function makeCharacteristic(): FakeCharacteristic {
   const ch: FakeCharacteristic = {
     value: undefined,
-    onGet() {
+    onGet(handler?: unknown) {
+      if (typeof handler === 'function') {
+        ch.getHandler = handler as () => unknown;
+      }
       return ch;
     },
     onSet() {
