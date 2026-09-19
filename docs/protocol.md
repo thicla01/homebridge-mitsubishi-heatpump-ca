@@ -27,7 +27,7 @@ carry `Authorization: Bearer <token>` and `X-App-Version` (`APP_VERSION`, curren
 | `POST /refresh` | Renew the access token |
 | `GET /sites` | Discover sites |
 | `GET /sites/{siteId}/zones` | Primary poll. Zone state plus the nested `adapter` object |
-| `GET /devices/{serial}/status` | Read `cryptoSerial`, and only that. Connection state comes from the zones payload, not from here |
+| `GET /devices/{serial}/status` | Read `cryptoSerial`, and only that — the neighbouring `cryptoKeySet` is left alone, see below. Connection state comes from the zones payload, not from here |
 | `POST /devices/send-command` | `{ deviceSerial, commands }` |
 
 That is the complete set. Two more exist but are not called: `GET /devices/{serial}`, and
@@ -104,6 +104,33 @@ out (`gatherLocalCreds`, `src/platform.ts`; `requestAdapterStatus`, `src/kumo-ap
 The adapter does not validate writes: `vaneDir: "notARealVane"` returns HTTP 200 and is
 silently ignored, so every fan-speed and vane value is checked against a known vocabulary
 before it is sent (`src/settings.ts`).
+
+**Nor does the unit enforce an AUTO deadband.** The vendor app's own controls keep `spHeat`
+and `spCool` at least **1.5 °C** apart, and they do it by pushing the *other* edge — one way
+only. Raising `spHeat` from 22 to 22.5 against an `spCool` of 23.5 pushed `spCool` to 24;
+lowering `spHeat` back to 22 left `spCool` at 24. The app does not remember where the other
+edge was, so a nudge on one edge has to be undone on both. The unit enforces nothing. Measured 2026-09-27 on a GX15 over the LAN: a drag in the Home app sent `spCool`
+22.5 against an `spHeat` of 22.0 — a 0.5° band, the narrowest the 0.5° grid allows — and the
+adapter accepted it, then 23.0. The tile, which follows the LAN reading once the 4 s
+post-write hold lapses, showed exactly those values. The Home app allows the narrow band as
+well, so nothing between HomeKit and the compressor enforces the vendor's minimum.
+
+The vendor app does not re-impose the minimum on what the unit reports — it displayed the
+unit's 1° band as is — but it **lags** the unit: for several minutes, and across an app
+restart, it went on showing an earlier `spCool` of 23.5 after the unit had moved on to 23.
+The other direction is prompt: a band set in the vendor app reaches the unit through the
+cloud and shows up on the tile at the next LAN poll, within one 15 s cycle — verified the same
+day. So the lag is in what the app displays, not in what it sends. When the two disagree,
+the LAN reading is the unit's actual state.
+
+This plugin forwards whatever HomeKit sends, one edge at a time. That independence is
+deliberate — it is what fixed upstream's AUTO band collapse (PR #23; see
+`accessory.ts`, the note above the threshold getters) — and it is why mirroring the vendor
+rule is not a one-liner. A scene sets both edges in one concurrent burst, so an edge
+clamped against the other's *cached* value would be clamped against a stale one: a scene
+moving 21/22.5 to 23/24.5 would see the heating edge measured against the old 22.5 and
+forced down to 21. What a sub-1.5° band does to the unit's own control loop is unmeasured;
+the likely cost is more frequent heat/cool changeover in the shoulder seasons.
 
 ### Payloads
 
@@ -183,6 +210,59 @@ around 2026-07-31**. See [README → Local LAN control](../README.md#local-lan-c
 Both are per-unit and stable, so they can come from elsewhere: the **v2 cloud** below
 serves them still (`localCredentialSource: "v2"`, or implied by `cloudRegion: "ca"`), and
 `localOnly` reads them from `localDevices` in the config and skips every cloud entirely.
+
+**Both ends hold the same value, and which way it got there is unknown.** The adapter
+must know both secrets — it recomputes the token to verify every request — and the cloud
+plainly knows them too, since it serves them. Nothing observed so far distinguishes "the
+module generates them and uploads them" from "the cloud generates them and pushes them
+during provisioning"; every measurement below fits either. Two weak hints lean toward a
+scheme defined vendor-side rather than produced by the device: `W_PARAM` is a single
+32-byte constant shared by **every** unit (hardcoded here and in pykumo, and it works for
+everyone), and `cryptoKeySet` reads as a named key *family* rather than a per-device
+value — see below.
+
+Worth stating because it is tempting to reason from: if the secrets originated in the
+module, one might hope to read them back out of it over BLE or CN105. Nobody has. The
+practical position is the same under either model — the cloud is the only counter, which
+is what `exportLocalSecrets` exists for.
+
+They belong to the **Wi-Fi adapter**, not to the indoor unit. On a model with an
+integrated module that is still a separate board (CN110 here, distinct from the CN105
+interface port); replacing it starts from nothing.
+
+"Stable" is now measured rather than assumed, which matters to anyone keeping a copy
+(`exportLocalSecrets`). On [pykumo #78](https://github.com/dlarrick/pykumo/issues/78) a v2
+reply fetched 2026-09-12 matched a capture taken the day before the 2026-07-31 cutoff
+**byte for byte** across four units, then authenticated live; and a credential restored
+from a backup still authenticated weeks after. The secrets were **withheld from the API,
+not rotated**.
+
+What is NOT known is what a full re-pairing does. Nobody has measured it, and it is the
+only moment at which the two ends could come to hold the same value (the `⌐3` Bluetooth
+provisioning session), so it is the one plausible trigger. Two cheap hardware-derivation
+hypotheses were tested against a real unit on 2026-09-19 and **both failed**: the
+cryptoSerial is neither the adapter's serial number in ASCII (its hex digits spread across
+`0`-`e`, where ASCII of an alphanumeric serial would cluster on `3`/`4`/`5`) nor the
+module's MAC. It is an assigned value. Treat a re-pairing as invalidating any stored copy.
+
+### `cryptoKeySet`
+
+`GET /devices/{serial}/status` returns a `cryptoKeySet` immediately after the
+`cryptoSerial`, and the v2 zone entry carries one too (both observed; the field is part of
+the shape `test/v2-fixture.ts` was built from, though every VALUE in that file is
+invented). Nothing here reads it.
+
+Its meaning is undocumented anywhere. A GitHub-wide search returns only false positives,
+and pykumo's own `Cloud_api_v3.md` — the one place the field appears in writing — prints it
+literally as `"F"` while redacting the `cryptoSerial` beside it, so its author evidently
+treats it as non-secret. Two observations seventeen months and two backends apart both show
+`"F"`.
+
+Worth recording rather than acting on: a named key *set* is the vocabulary of a value
+**selected from a family**, not derived from hardware, which agrees with the two failed
+derivation tests above. If the letter is the same for everyone it is a scheme identifier
+rather than a per-device marker — and therefore *not* a canary that would reveal a
+regenerated secret, which is the thing that would actually be useful.
 
 ### Wire format
 
@@ -297,8 +377,9 @@ The reply is an **array**; `root[2]` is the payload, plus one boolean from `root
 `root[2].zoneTable` is `{}` in the live capture and the units sit in
 `root[2].children[0].zoneTable`, so the walk recurses `children` at every level rather than
 indexing a fixed depth. Per unit: `serial`, `label`, `mac`, `port` (80), sometimes
-`address` (the LAN IP), `password`, `cryptoSerial`, `unitType` (`headless` is a Kumo
-Station, not a thermostat), plus three blocks:
+`address` (the LAN IP), `password`, `cryptoSerial`, `cryptoKeySet` (unread — see
+[`cryptoKeySet`](#cryptokeyset)), `unitType` (`headless` is a Kumo Station, not a
+thermostat), plus three blocks:
 
 - `reportedProfile` — the capability profile, snake_case: `fan_speed_stages`,
   `has_auto_fan_speed`, `has_dry_function`, `display_setting_temp_of_dry`,
