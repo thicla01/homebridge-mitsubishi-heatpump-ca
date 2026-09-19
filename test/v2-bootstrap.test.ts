@@ -666,6 +666,129 @@ test('a refused v2 sign-in stops the credential retry too', async () => {
   }
 });
 
+// ---- keeping your own secrets --------------------------------------------
+//
+// The two per-unit secrets exist only in a cloud reply. v3 stopped serving them
+// around 2026-07-31 and the legacy v2 login is the last source; `mesca-prod`
+// presumably follows `geo-c` whenever Canada is migrated. This plugin never
+// persists them, so losing the source means losing local control at the next
+// restart — on an adapter that would still accept the very same key, since the
+// secrets were WITHHELD, not rotated (pykumo #78: a backed-up credential still
+// authenticated weeks later, and a fresh v2 reply matched a pre-cutoff capture
+// byte for byte). Hence one explicit, opt-in way to keep your own.
+
+/** Capture every level: the promise being guarded is "not even with Debug Mode on". */
+function captureLog(platform: KumoV3Platform): string[] {
+  const lines: string[] = [];
+  const sink = (...args: unknown[]) => lines.push(args.join(' '));
+  platform.log.info = sink;
+  platform.log.warn = sink;
+  platform.log.error = sink;
+  platform.log.debug = sink;
+  return lines;
+}
+
+test('no secret reaches the log at any level unless it was explicitly asked for', async () => {
+  // The standing promise, and the control for the export below. Both secrets pass
+  // through discovery on every start; the default must be that none of it is
+  // written down anywhere a screenshot or a pasted log would carry it.
+  const { platform } = makePlatform();
+  const lines = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+
+    const all = lines.join('\n');
+    for (const secret of [
+      SENTINELS.passwordA, SENTINELS.passwordB,
+      SENTINELS.cryptoSerialA, SENTINELS.cryptoSerialB,
+    ]) {
+      assert.ok(!all.includes(secret), `a secret reached the log: ${secret.slice(0, 12)}…`);
+    }
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('exportLocalSecrets prints a paste-ready localDevices block', async () => {
+  // Paste-ready rather than six loose values on purpose: this gets used at an
+  // awkward moment, and a mistyped cryptoSerial fails as an authentication error
+  // that reads like a network problem.
+  const { platform } = makePlatform({ exportLocalSecrets: true });
+  const lines = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+
+    const block = lines.find((l) => l.startsWith('"localDevices":'));
+    assert.ok(block, `no block was printed; got ${JSON.stringify(lines)}`);
+
+    const entries = JSON.parse(block!.slice('"localDevices":'.length)) as Array<
+      Record<string, unknown>
+    >;
+    const a = entries.find((e) => e.deviceSerial === SERIAL_A);
+    assert.ok(a, 'the first unit is in the block');
+    assert.strictEqual(a!.password, SENTINELS.passwordA);
+    assert.strictEqual(a!.cryptoSerial, SENTINELS.cryptoSerialA);
+
+    // The second unit is the one whose v2 tree carries an address, so it is the one
+    // that pins that the address travels into the block.
+    const b = entries.find((e) => e.deviceSerial === SERIAL_B);
+    assert.ok(b, 'the second unit too');
+    assert.strictEqual(b!.ip, ADDRESS_B, 'the block is useless without the address');
+
+    // The capability profile is the thing the v2 bootstrap buys, and the thing
+    // localOnly cannot discover. Carrying it across is what keeps the Dry/Fan tiles
+    // and the real setpoint floor after the fallback.
+    for (const key of ['hasModeDry', 'hasModeVent', 'minSetPoint', 'maxSetPoint']) {
+      assert.ok(key in a!, `${key} must survive the switch to localOnly`);
+    }
+    assert.ok(typeof a!.minSetPoint === 'number' && typeof a!.maxSetPoint === 'number');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a unit with no known address is flagged, not given an empty one', async () => {
+  // The first fixture unit deliberately has no address in the v2 tree — that is a
+  // real shape, not a test convenience. An empty string would paste as a config that
+  // looks complete and fails later as an obscure connection error.
+  const { platform } = makePlatform({ exportLocalSecrets: true });
+  const lines = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+
+    const block = lines.find((l) => l.startsWith('"localDevices":'))!;
+    const entries = JSON.parse(block.slice('"localDevices":'.length)) as Array<
+      Record<string, unknown>
+    >;
+    const a = entries.find((e) => e.deviceSerial === SERIAL_A)!;
+    assert.notStrictEqual(a.ip, '', 'an empty address reads as "nothing to do here"');
+    assert.match(String(a.ip), /FILL IN/i, 'it has to read as unfinished');
+
+    // And said in prose as well: a value inside a JSON block is easy to skim past.
+    const prose = lines.filter((l) => !l.startsWith('"localDevices":')).join('\n');
+    assert.match(prose, new RegExp(SERIAL_A), 'the unit is named outside the block too');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the export says to turn it off, and that the log now holds the secrets', async () => {
+  // Both halves matter. A one-time switch nobody is told to flip back is a
+  // permanent one, and a user who does not know the log kept a copy cannot decide
+  // what to do about it.
+  const { platform } = makePlatform({ exportLocalSecrets: true });
+  const lines = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+
+    const prose = lines.filter((l) => !l.startsWith('"localDevices":')).join('\n');
+    assert.match(prose, /exportLocalSecrets back to false/, 'tells the user to disarm it');
+    assert.match(prose, /log file keeps/, 'and that homebridge.log now holds them');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
 // ---- a degraded reply must not cost the user their accessories -----------
 
 test('a unit whose secrets came back empty KEEPS its cached accessory', async () => {

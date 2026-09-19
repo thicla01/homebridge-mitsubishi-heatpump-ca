@@ -325,6 +325,28 @@ export interface KumoConfig {
    * backup this plugin would never use.
    */
   eveHistory?: boolean;
+  /**
+   * Print each unit's LAN secrets to the log once, then turn this back off.
+   *
+   * The two per-unit secrets (`password`, `cryptoSerial`) exist only in the cloud's
+   * reply. The v3 API stopped serving them around 2026-07-31 and the legacy v2 login
+   * is the one source left; nobody knows how long it stays up, and Canada's
+   * `mesca-prod` presumably follows `geo-c` whenever this market is migrated.
+   *
+   * They are NOT rotated, only withheld — independently confirmed on pykumo #78 by a
+   * user whose backed-up credentials still authenticated weeks after the cutoff, and
+   * by a v2 reply matching a capture taken the day before it byte for byte. So a copy
+   * taken today keeps working after the source disappears, and `localDevices` +
+   * `localOnly` will accept it with no cloud at all. This plugin otherwise never
+   * persists them: they live in a Map that touches neither the logs nor
+   * accessory.context, so without this there is no way to keep your own secrets.
+   *
+   * The export prints a ready-to-paste `localDevices` block. Two things to know:
+   * homebridge.log keeps what is printed to it, so move the values somewhere durable
+   * (a password manager) and do not leave this on; and nothing is echoed for a unit
+   * you declared by hand, since you already hold those.
+   */
+  exportLocalSecrets?: boolean;
   // Device mirroring (opt-in). Each pair makes `target` follow `source`: whenever
   // the source's commanded state changes (via any control path — wall thermostat,
   // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;

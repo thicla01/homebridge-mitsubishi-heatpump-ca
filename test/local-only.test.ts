@@ -684,6 +684,31 @@ test('the same streak stops the accessory answering HomeKit, and recovery restor
   }
 });
 
+test('exportLocalSecrets echoes nothing back for units you declared yourself', async () => {
+  // The export exists to rescue secrets you cannot otherwise see. In this mode you
+  // typed them into config.json, so reprinting them into homebridge.log adds a
+  // second copy in a file that rotates and gets pasted into issues, and tells you
+  // nothing you did not already have.
+  const lines: string[] = [];
+  const sink = (...args: unknown[]) => lines.push(args.join(' '));
+  const { platform } = makePlatform({ exportLocalSecrets: true });
+  platform.log.info = sink;
+  platform.log.warn = sink;
+  platform.log.error = sink;
+  platform.log.debug = sink;
+  try {
+    await platform.discoverDevices();
+
+    const all = lines.join('\n');
+    assert.ok(!all.includes(DEVICE.password), 'the password you supplied is not echoed back');
+    assert.ok(!all.includes(DEVICE.cryptoSerial), 'nor the cryptoSerial');
+    assert.ok(!lines.some((l) => l.startsWith('"localDevices":')), 'and no block is printed');
+    assert.match(all, /nothing to export/, 'but it says why, so the switch does not look broken');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
 // ---- no cloud, on any path ----------------------------------------------
 
 test('discovery makes no cloud call whatsoever', async () => {

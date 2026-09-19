@@ -251,6 +251,47 @@ What that costs and does not cost:
 - **Verification status:** the Canadian reply was mapped live on 2026-08-18. The US host
   is inherited from Home Assistant's implementation and is *not* re-verified here.
 
+### Keeping your own copy (`exportLocalSecrets`)
+
+"Nothing is cached to disk" has a sharp edge: the cloud is the only place those secrets
+exist, and there is exactly one endpoint left serving them. Nobody knows how long that
+lasts — `mesca-prod` presumably follows `geo-c` whenever Canada is migrated — and when it
+stops, local control ends at the **next restart**, on an adapter that would still accept
+the very same key.
+
+It would, because the secrets were **withheld, not rotated**. Two independent
+confirmations on [pykumo #78](https://github.com/dlarrick/pykumo/issues/78): a credential
+restored from a backup still authenticated weeks after the July cutoff, and a v2 reply
+fetched on 2026-09-12 matched a capture taken the day before the cutoff byte for byte,
+then authenticated live against three adapters. **A copy taken today keeps working after
+the source disappears.**
+
+So there is one opt-in way to take one:
+
+```json
+{ "exportLocalSecrets": true }
+```
+
+At the next start the log carries a ready-to-paste `localDevices` block — serials,
+addresses, both secrets, and the capability profile, which is the part `localOnly` cannot
+discover for itself. Paste it into `localDevices`, set `localOnly: true`, and the cloud
+stops mattering entirely.
+
+Three things it deliberately does:
+
+- **Prints at `warn`, all of it.** An abnormal state you must undo, where a level you had
+  filtered would hide either the secrets or the reminder to switch it off.
+- **Says nothing for a unit you declared by hand.** Those secrets came out of your own
+  `config.json`; reprinting them adds a copy and no information.
+- **Names a unit whose address is not known yet** and writes a placeholder rather than an
+  empty string, which would paste as a config that looks finished.
+
+And the part to take seriously: **`homebridge.log` keeps whatever is printed to it.** Move
+the values somewhere durable — a password manager — set the flag back to `false`, and
+treat the log as holding your secrets until it rotates away. Encrypting them in
+`config.json` would not help: the plugin has to authenticate unattended at every boot, so
+the key would have to sit on the same disk, readable by the same process.
+
 ## Canadian accounts (`cloudRegion: "ca"`)
 
 `POST /v3/login` answers **HTTP 500** for accounts served by Mitsubishi Electric Sales

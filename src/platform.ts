@@ -53,6 +53,14 @@ const LOCAL_CRED_RETRY_WAIT_MS = 10000;
 const LOCAL_POLL_WARN_AFTER = 3;
 
 /**
+ * Stands in for an address the export does not know, in exportLocalSecrets.
+ *
+ * Deliberately not an empty string and not a plausible IP: pasted unedited it must
+ * read as unfinished rather than fail later as a connection problem.
+ */
+const ADDRESS_UNKNOWN = 'FILL IN THIS UNIT\'S LAN ADDRESS';
+
+/**
  * Floor between two v2 sign-ins, far above the v3 login's 10s.
  *
  * A v2 login is a whole authentication, not a socket nudge, and it is a BOOTSTRAP:
@@ -1227,6 +1235,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
 
     await this.resolveMissingLocalIps(admitted);
+    // After the sweep, so a v2 unit whose address was not in the reply is exported
+    // with the address it was actually found at.
+    this.exportLocalSecrets(admitted);
     this.startLocalPolling();
     await this.reportLocalReachability(admitted, origin);
     return true;
@@ -1318,6 +1329,94 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
     });
     this.log.info(`✓ ${origin.summary.replace('%s', `${ok}/${units.length}`)}`);
+  }
+
+  /**
+   * Print the per-unit LAN secrets once, so the user can keep their own.
+   *
+   * The two secrets exist only in a cloud reply. v3 stopped serving them around
+   * 2026-07-31 and the legacy v2 login is the last source; `mesca-prod` presumably
+   * follows `geo-c` whenever Canada is migrated, and nobody knows when. This plugin
+   * otherwise never persists them — they live in a Map that touches neither the logs
+   * nor accessory.context — so a user who loses the source loses local control at
+   * the next restart, on an adapter that would still accept the very same key.
+   *
+   * That is worth an escape hatch because the secrets are **withheld, not rotated**:
+   * on pykumo #78 a backed-up credential still authenticated weeks after the cutoff,
+   * and a fresh v2 reply matched a capture from the day before it byte for byte. A
+   * copy taken today still works after the source is gone, and `localDevices` +
+   * `localOnly` accepts it with no cloud at all.
+   *
+   * Emitted as a paste-ready block rather than six loose values: it will be used at
+   * an awkward moment, and a mistyped cryptoSerial fails as an authentication error
+   * that reads like a network problem.
+   *
+   * Nothing is echoed for a unit whose profile was DECLARED (`source: 'config'`):
+   * those secrets came out of the user's own config.json, so reprinting them adds
+   * exposure and no information.
+   *
+   * Deliberately at `warn`, all of it. This is an abnormal state that must be turned
+   * off again, and a level the user might have filtered out would hide either the
+   * secrets or the reminder — splitting them across levels is how you get one
+   * without the other.
+   */
+  private exportLocalSecrets(units: ResolvedLocalUnit[]): void {
+    if (!this.kumoConfig.exportLocalSecrets) {
+      return;
+    }
+    const exportable = units.filter((unit) => unit.creds && unit.source !== 'config');
+    if (exportable.length === 0) {
+      this.log.warn(
+        'exportLocalSecrets is on, but there is nothing to export: every unit here was '
+        + 'declared by hand, so its secrets are already in your config.json. Turn it back off.',
+      );
+      return;
+    }
+
+    const entries = exportable.map((unit) => ({
+      deviceSerial: unit.deviceSerial,
+      name: unit.displayName,
+      // A v2 reply does not always carry an address, and the LAN sweep may not have
+      // found one either. An empty string here would paste as a config that looks
+      // complete and fails later as an obscure connection error, so say so in the
+      // value itself — and again in prose below, since a value inside a JSON block
+      // is easy to skim past.
+      ip: this.localClient?.getIp(unit.deviceSerial) ?? unit.ip ?? ADDRESS_UNKNOWN,
+      password: unit.creds!.password,
+      cryptoSerial: unit.creds!.cryptoSerial,
+      hasModeDry: unit.profile.hasModeDry,
+      hasModeVent: unit.profile.hasModeVent,
+      // One range where the profile knows three. localDevices declares a single
+      // floor and ceiling for every mode, so the widest pair is carried: asking for
+      // a setpoint the unit ignores is a lesser failure than being unable to ask for
+      // a valid one — publishing the 16°C cooling floor as the heating floor is what
+      // makes "hold 10°C while away" unaskable (docs/configuration.md).
+      minSetPoint: Math.min(...Object.values(unit.profile.minimumSetPoints)),
+      maxSetPoint: Math.max(...Object.values(unit.profile.maximumSetPoints)),
+    }));
+
+    this.log.warn(
+      `exportLocalSecrets: here are the LAN secrets for ${entries.length} unit(s). They are the `
+      + 'only copy you will get — the v3 cloud stopped serving them in July 2026 and the legacy '
+      + 'login that still does may not last. They are not rotated, so this copy keeps working '
+      + 'after the source disappears. Paste it into localDevices with localOnly: true to run '
+      + 'with no cloud at all.',
+    );
+    this.log.warn(`"localDevices": ${JSON.stringify(entries, null, 2)}`);
+    const addressless = entries.filter((entry) => entry.ip === ADDRESS_UNKNOWN);
+    if (addressless.length > 0) {
+      this.log.warn(
+        `exportLocalSecrets: ${addressless.length} unit(s) have no address yet `
+        + `(${addressless.map((entry) => entry.deviceSerial).join(', ')}) — the secrets above are `
+        + 'still the ones you need, but fill the address in before using the block. A DHCP '
+        + 'reservation, or the address the unit already answers on.',
+      );
+    }
+    this.log.warn(
+      'exportLocalSecrets: copy those values somewhere durable (a password manager), then set '
+      + 'exportLocalSecrets back to false. This log file keeps what was just written to it, so '
+      + 'treat homebridge.log as holding your secrets until it rotates away.',
+    );
   }
 
   /**

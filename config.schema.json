@@ -314,6 +314,12 @@
             }
           }
         }
+      },
+      "exportLocalSecrets": {
+        "title": "Export LAN secrets to the log (one-time)",
+        "type": "boolean",
+        "default": false,
+        "description": "Print each unit’s per-device LAN secrets (password, cryptoSerial) to the Homebridge log once, as a ready-to-paste Local-only Mode block, then switch this back off. These secrets come only from the Kumo cloud, and the v3 API stopped serving them in July 2026 — the legacy login this plugin falls back to is the last source, with no guarantee it stays up. They are not rotated, so a copy taken today keeps working afterwards. The log retains whatever is printed to it: move the values to a password manager and do not leave this enabled. Nothing is printed for units you declared by hand in Local-only Mode."
       }
     }
   },
@@ -417,7 +423,8 @@
             "localControlIps[].deviceSerial",
             "localControlIps[].ip"
           ]
-        }
+        },
+        "exportLocalSecrets"
       ]
     },
     {

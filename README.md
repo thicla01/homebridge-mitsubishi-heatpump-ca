@@ -234,6 +234,16 @@ not also need `localControl`). Nothing is written back to `config.json`, no secr
 none of it is ever logged, `debug` included. A rejected sign-in is reported once and not
 retried, so a wrong password cannot be re-posted in a loop.
 
+**Keep your own copy.** That endpoint is the last one serving these secrets, and nobody
+knows how long it lasts. They are **withheld, not rotated** — a backed-up credential still
+authenticated weeks after the July 2026 cutoff, and a v2 reply fetched on 2026-09-12
+matched a pre-cutoff capture byte for byte
+([pykumo #78](https://github.com/dlarrick/pykumo/issues/78)) — so a copy taken today keeps
+working after the source is gone. `"exportLocalSecrets": true` prints a ready-to-paste
+`localDevices` block once; move it to a password manager, switch the flag back off, and
+remember the log now holds it too. See
+[docs/configuration.md → Keeping your own copy](docs/configuration.md#keeping-your-own-copy-exportlocalsecrets).
+
 ### Canadian accounts
 
 **Why this fork exists.** Mitsubishi is replacing the *kumo cloud* app with the *Comfort*
