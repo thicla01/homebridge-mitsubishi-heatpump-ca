@@ -123,14 +123,24 @@ cloud and shows up on the tile at the next LAN poll, within one 15 s cycle — v
 day. So the lag is in what the app displays, not in what it sends. When the two disagree,
 the LAN reading is the unit's actual state.
 
-This plugin forwards whatever HomeKit sends, one edge at a time. That independence is
-deliberate — it is what fixed upstream's AUTO band collapse (PR #23; see
-`accessory.ts`, the note above the threshold getters) — and it is why mirroring the vendor
-rule is not a one-liner. A scene sets both edges in one concurrent burst, so an edge
-clamped against the other's *cached* value would be clamped against a stale one: a scene
-moving 21/22.5 to 23/24.5 would see the heating edge measured against the old 22.5 and
-forced down to 21. What a sub-1.5° band does to the unit's own control loop is unmeasured;
-the likely cost is more frequent heat/cool changeover in the shoulder seasons.
+**Since 2.3.7 this plugin keeps the vendor's minimum in AUTO**, the vendor's way: an edge
+moved into the band pushes the other one away, one way only (`temperature.ts:
+enforceAutoBand`). Two departures from the app, both deliberate. When a scene or a Shortcut
+moves both edges at once — which the app cannot do — heating is protected and cooling
+yields. And outside AUTO nothing is pushed: the other edge is invisible in the
+single-setpoint modes, so a push there would rewrite a setting the user cannot see (a dry
+target of 23.9 against heating at 23 would have moved heating to 22.3). The price of that
+second choice: a band left narrow or inverted from a single-setpoint mode is not corrected
+on entering AUTO, only the first time an edge moves there.
+
+The subtle part is concurrency, and it is why this was not a one-liner. A scene sets both
+edges in one concurrent burst, so an edge measured against the other's *cached* value is
+measured against a stale one: moving 21/22.5 to 23/26, the heating writer would push
+cooling to 24.5 from the old 22.5, and if that landed last the scene would end at 23/24.5 —
+the upstream AUTO band collapse (PR #23) by another road. The decision is therefore taken
+after the 1.5 s write hold, against the other edge's *pending* value, which every writer
+registers before its first await (`accessory.ts:keepAutoBand`). What a sub-1.5° band does
+to the unit's own control loop remains unmeasured.
 
 ### Payloads
 

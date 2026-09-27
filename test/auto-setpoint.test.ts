@@ -196,6 +196,10 @@ test('the AUTO band cannot collapse: no single control writes both edges', async
   assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands),
     [{ spHeat: 21.2 }, { spCool: 25 }],
     'a concurrent two-handle burst sends both edges, each with its own value');
+  // In a burst that keeps the band wide, that is. Since 2.3.7 a lone edge moved INTO
+  // the vendor's 1.5 °C minimum does write both edges in one command
+  // (test/auto-band.test.ts) — but as two DISTINCT values held 1.5 apart, which
+  // widens the band. The collapse was the opposite: one value driving both edges.
   for (const call of sendCommandCalls) {
     assert.strictEqual(Object.keys(call.commands).length, 1,
       'every setpoint command touches exactly one edge');

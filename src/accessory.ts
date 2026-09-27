@@ -5,7 +5,10 @@ import {
   DeviceStatus, DeviceProfile, Zone, Commands, MirrorState, SensorReading,
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed, normalizeCloudRegion,
 } from './settings';
-import { cToF, quantizeSetpointInRange, quantizeSetpointInRangeCelsius } from './temperature';
+import {
+  MIN_AUTO_BAND_C, cToF, enforceAutoBand, quantizeSetpointInRange,
+  quantizeSetpointInRangeCelsius, sameSetpoint,
+} from './temperature';
 import { join } from 'path';
 import { EveHistoryStore, EveHistoryFeed, attachEveHistory } from './eve-history';
 import { throwCommunicationFailure } from './no-response';
@@ -2591,9 +2594,7 @@ export class KumoThermostatAccessory {
    * transport won the race.
    */
   private quantize(field: 'spHeat' | 'spCool', temp: number): number {
-    const p = this.deviceProfile;
-    const min = p ? Math.min(p.minimumSetPoints[field === 'spHeat' ? 'heat' : 'cool'], p.minimumSetPoints.auto) : 10;
-    const max = p ? Math.max(p.maximumSetPoints[field === 'spHeat' ? 'heat' : 'cool'], p.maximumSetPoints.auto) : 35;
+    const { min, max } = this.setpointRange(field);
     // Quantize onto the grid of the unit actually being READ. The °F-anchored
     // ceiling exists to reconcile two Fahrenheit renderers that disagree; for a
     // Celsius reader it only pushes the setpoint up — 22.0 stored as 22.3 and shown
@@ -2613,6 +2614,95 @@ export class KumoThermostatAccessory {
       );
     }
     return q;
+  }
+
+  /**
+   * The range a threshold is quantized into — and, since the AUTO band rule pushes
+   * one edge on the other's behalf, the range that pushed edge must stay inside.
+   * One definition for both, or the rule could push an edge somewhere quantize()
+   * would never let the user put it.
+   */
+  private setpointRange(field: 'spHeat' | 'spCool'): { min: number; max: number } {
+    const p = this.deviceProfile;
+    const mode = field === 'spHeat' ? 'heat' : 'cool';
+    return {
+      min: p ? Math.min(p.minimumSetPoints[mode], p.minimumSetPoints.auto) : 10,
+      max: p ? Math.max(p.maximumSetPoints[mode], p.maximumSetPoints.auto) : 35,
+    };
+  }
+
+  /**
+   * Apply the vendor's minimum AUTO band to a write that is about to be sent.
+   *
+   * WHEN this runs is the entire safety argument, so it is spelled out. It runs after
+   * holdSetpointWrite, never before. Every threshold writer registers its value in
+   * setpointPending synchronously, before its first await; HomeKit dispatches a
+   * scene's characteristics concurrently; so by the time any writer is past its
+   * 1.5 s hold, every edge the same burst is changing is visible here. The decision
+   * is taken against that PENDING value of the other edge, not the cached one.
+   *
+   * Taken against the cached value instead, a scene would be clamped against a
+   * stale edge: moving 21/22.5 to 23/26, the heating writer would see cooling at the
+   * old 22.5, push it to 24.5 — and if that landed after the cooling writer's 26,
+   * the scene would end at 23/24.5. That is the upstream AUTO band collapse (PR #23)
+   * by another road, and it is pinned by test/auto-band.test.ts.
+   *
+   * "The edge that moved" falls out of the same map: a value HomeKit merely
+   * re-asserts is returned early, before registration (the redundant-write check
+   * above), so an edge present in setpointPending is one that is actually changing.
+   * The Home app sends both handles on every drag; only the dragged one is pending.
+   *
+   * Only a lone move pushes the other edge. When both moved, the other edge's writer
+   * is past its own hold too, computing the same band from the same map, and sends
+   * its own field. A cross-push there would carry the very value that writer is
+   * about to send — harmless, but a second command on an adapter that takes about
+   * one connection at a time, which is the economy 2.3.1 fought for. Pinned by the
+   * one-field-per-command assertion in test/auto-band.test.ts.
+   *
+   * AUTO only, which is where the vendor app shows a band at all. Enforcing it in
+   * every mode looked safer and is not: in the single-setpoint modes the other edge
+   * is invisible, so a push rewrites a setting the user cannot see. Setting a dry
+   * target of 23.9 against a stored heating 23 would have moved heating to 22.3 —
+   * found by test/dry-setpoint.test.ts, whose fixture is a real account's 23/25 —
+   * and the user would have met it the next winter. The price of the restriction,
+   * stated rather than hidden: a band left narrow or inverted from a single-setpoint
+   * mode (heating raised to 25 against cooling at 24) is not corrected on entering
+   * AUTO, only the first time an edge moves there.
+   *
+   * "In AUTO" is the unit's current mode. noteModeIntent records only an off, and it
+   * is not extended for this: it carries one of the hardest-won invariants in the
+   * file. So a scene that switches to AUTO and sets a narrow band in one burst may
+   * find the mode not yet applied when its thresholds clear their hold. The rule
+   * then simply does not fire — the band stays what the scene asked for, which is
+   * today's behaviour — never a wrong value.
+   */
+  private keepAutoBand(field: 'spHeat' | 'spCool', temp: number): {
+    own: number;
+    pushed?: { field: 'spHeat' | 'spCool'; value: number };
+  } {
+    if (!this.currentStatus || !this.isAutoMode(this.currentStatus.operationMode)) {
+      return { own: temp };
+    }
+    const other: 'spHeat' | 'spCool' = field === 'spHeat' ? 'spCool' : 'spHeat';
+    const otherPending = this.setpointPending.get(other);
+    const otherValue = otherPending ?? this.currentStatus[other];
+    if (typeof otherValue !== 'number' || Number.isNaN(otherValue)) {
+      return { own: temp }; // nothing to measure the band against yet
+    }
+    const moved = otherPending !== undefined ? 'both' : field;
+    const kept = enforceAutoBand(
+      field === 'spHeat'
+        ? { spHeat: temp, spCool: otherValue }
+        : { spHeat: otherValue, spCool: temp },
+      moved,
+      this.accessory.context.displayUnits === 'C',
+      this.setpointRange('spHeat'),
+      this.setpointRange('spCool'),
+    );
+    const pushed = moved !== 'both' && !sameSetpoint(kept[other], otherValue)
+      ? { field: other, value: kept[other] }
+      : undefined;
+    return { own: kept[field], pushed };
   }
 
   /**
@@ -2728,28 +2818,77 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    // The vendor's minimum AUTO band. Here, after the hold and not before, because
+    // only now is every edge of a concurrent burst visible — see keepAutoBand.
+    const { own, pushed } = this.keepAutoBand(field, temp);
+    if (!sameSetpoint(own, temp)) {
+      // Only at a range limit: the other edge had nowhere to go, so this one yields.
+      this.platform.log.info(
+        `[${label}] ${this.accessory.displayName}: ${temp}°C leaves no room for a `
+        + `${MIN_AUTO_BAND_C}°C AUTO band within the unit's range — sending ${own}°C`,
+      );
+      commands[field] = own;
+      this.setpointPending.set(field, own);
+    }
+    const pushedCharacteristic = pushed?.field === 'spHeat'
+      ? this.platform.Characteristic.HeatingThresholdTemperature
+      : this.platform.Characteristic.CoolingThresholdTemperature;
+    if (pushed) {
+      this.platform.log.info(
+        `[${label}] ${this.accessory.displayName}: keeping the ${MIN_AUTO_BAND_C}°C AUTO band — `
+        + `${pushed.field === 'spHeat' ? 'heating' : 'cooling'} edge moves to ${pushed.value}°C`,
+      );
+      commands[pushed.field] = pushed.value;
+      // Guard the pushed edge exactly as the moved one is guarded: a poll landing
+      // before the adapter applies it would otherwise snap the tile back to the old
+      // value for one cycle — the bounce 2.3.1 removed for the moved edge.
+      this.setpointPending.set(pushed.field, pushed.value);
+      this.setpointWriteAt.set(pushed.field, Date.now());
+    }
+
     const success = await this.sendDeviceCommand(commands);
 
     if (success) {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
       if (this.currentStatus) {
-        this.currentStatus[field] = temp;
+        this.currentStatus[field] = own;
       }
       this.setpointWriteAt.set(field, Date.now());
       // currentStatus now carries the value, so the pending entry is redundant —
       // and must go, or a later poll would be measured against a stale intent.
       this.setpointPending.delete(field);
-      this.service.updateCharacteristic(characteristic, temp);
+      this.service.updateCharacteristic(characteristic, own);
+      if (pushed) {
+        if (this.currentStatus) {
+          this.currentStatus[pushed.field] = pushed.value;
+        }
+        this.setpointWriteAt.set(pushed.field, Date.now());
+        this.setpointPending.delete(pushed.field);
+        // HomeKit never asked for this edge to move, so unlike the moved edge it has
+        // to be told — or the tile keeps a handle the unit no longer has.
+        this.service.updateCharacteristic(pushedCharacteristic, pushed.value);
+        // Deliberately NOT reconciled on its own. Each reconcile is a full status
+        // read over the LAN, and this one would duplicate the moved edge's, a moment
+        // later, on an adapter that takes about one connection at a time. The next
+        // regular poll confirms the pushed edge within 15 s, and setpointWriteAt
+        // keeps a lagging read off it until then. Pinned in test/auto-band.test.ts.
+      }
       // Then confirm against the device rather than trusting our own echo.
       this.scheduleSetpointReconcile(field);
       // Mirror a HomeKit-driven AUTO-handle change to any followers immediately.
       this.notifyStatusListeners();
     } else {
-      this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
+      this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${own}`);
       // Nothing to protect: the device never took the value, and holding it over a
       // poll would hide the unit's real state behind a write that failed.
       this.setpointPending.delete(field);
       this.setpointWriteAt.delete(field);
+      if (pushed) {
+        // The pushed edge rode the same command, so it failed with it. Its tile was
+        // never updated, so there is nothing to revert — only the guard to drop.
+        this.setpointPending.delete(pushed.field);
+        this.setpointWriteAt.delete(pushed.field);
+      }
       // Revert the handle to the actual device state
       setTimeout(() => {
         this.service.updateCharacteristic(characteristic, this.getThresholdTemperature(field, fallback));

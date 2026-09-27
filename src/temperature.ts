@@ -183,3 +183,118 @@ export function quantizeSetpointInRangeCelsius(c: number, min: number, max: numb
     : Math.floor(max / CELSIUS_DISPLAY_STEP + EPS) * CELSIUS_DISPLAY_STEP;
   return Math.round(stepped * 10) / 10;
 }
+
+// ---- The AUTO deadband ------------------------------------------------------
+
+/**
+ * The narrowest AUTO band the vendor app lets anyone set, in °C. Measured, not
+ * assumed: on 2026-09-27 the kumo cloud app refused to hold `spHeat` and `spCool`
+ * closer than 1.5 °C, on a Celsius account.
+ *
+ * The unit itself enforces nothing — a 0.5° band sent over the LAN was accepted and
+ * held — so without this, HomeKit (scenes, Shortcuts, other controllers) could put
+ * the unit in a state the vendor never allows, including an INVERTED band with
+ * heating above cooling. See docs/protocol.md.
+ *
+ * What the vendor app does on a Fahrenheit account is not known. Rounding the
+ * pushed edge outward (below) keeps the Celsius distance at or above 1.5 on either
+ * grid, which on the whole-°F grid means at least 3 °F.
+ */
+export const MIN_AUTO_BAND_C = 1.5;
+
+/**
+ * The grid point at or beyond `c` in `direction`, on the grid the reader sees:
+ * 0.5 °C for a Celsius account, the stored value of a whole °F otherwise.
+ *
+ * Outward, not nearest, and that is the point. The pushed edge has to land at least
+ * MIN_AUTO_BAND_C from the edge that moved, and nearest can land it short — though
+ * not from a value this plugin quantized: an on-grid °F edge plus 1.5 always rounds
+ * up to three whole degrees on (checked across the whole range). The short landing
+ * comes from an edge set somewhere else, off this grid: heating at 22.0, set in the
+ * vendor app on a Celsius account or at the IR remote, read by a Fahrenheit
+ * accessory. 22.0 + 1.5 = 23.5 is 74.3 °F; nearest stores 74 °F as 23.4, a 1.4°
+ * band. Outward takes 75 °F, 23.9.
+ */
+export function quantizeOutward(c: number, direction: 1 | -1, celsius: boolean): number {
+  if (celsius) {
+    const steps = direction === 1
+      ? Math.ceil(c / CELSIUS_DISPLAY_STEP - EPS)
+      : Math.floor(c / CELSIUS_DISPLAY_STEP + EPS);
+    return Math.round(steps * CELSIUS_DISPLAY_STEP * 10) / 10;
+  }
+  // storedC ceils each degree onto the 0.1 °C grid, so a degree's stored value can
+  // sit just past its exact conversion. Start one degree back and walk outward to
+  // the first stored value on the far side of `c`. A whole °F is 0.56 °C, so this
+  // ends within three steps; the bound only guards a NaN.
+  let f = direction === 1 ? Math.floor(cToF(c)) - 1 : Math.ceil(cToF(c)) + 1;
+  for (let i = 0; i < 8 && Number.isFinite(f); i++, f += direction) {
+    const candidate = storedC(f);
+    if (direction === 1
+      ? candidate >= c - SETPOINT_TOLERANCE_C
+      : candidate <= c + SETPOINT_TOLERANCE_C) {
+      return candidate;
+    }
+  }
+  return storedC(f);
+}
+
+export interface AutoBand {
+  spHeat: number;
+  spCool: number;
+}
+
+export interface SetpointRange {
+  min: number;
+  max: number;
+}
+
+/**
+ * Keep an AUTO band at least MIN_AUTO_BAND_C wide after an edge moved — the way the
+ * vendor app does it, which is by pushing the edge that did NOT move, and only ever
+ * away. Measured on the app: raising heating from 22 to 22.5 against cooling at 23.5
+ * pushed cooling to 24; lowering cooling into the band pushed heating down; and
+ * widening the band again never pulled the pushed edge back. A band that is already
+ * wide enough comes back untouched, which is what makes the push one-way.
+ *
+ * `moved` is the edge that changed. 'both' is a case the vendor app cannot produce —
+ * it edits one handle at a time — but HomeKit can: a scene or a Shortcut sets both
+ * edges in one burst. There the heating edge is protected and cooling yields. That
+ * tie-break is this plugin's choice, not the vendor's: heating is what a Canadian
+ * winter runs on, and it matches the one direction measured above.
+ *
+ * At a range limit the pushed edge may have nowhere to go (heating at 30 against a
+ * cooling ceiling of 31); the pushed edge then pins to its limit and the moved edge
+ * gives way instead, so the band stays valid rather than the request staying exact.
+ */
+export function enforceAutoBand(
+  band: AutoBand,
+  moved: 'spHeat' | 'spCool' | 'both',
+  celsius: boolean,
+  heatRange: SetpointRange,
+  coolRange: SetpointRange,
+): AutoBand {
+  if (band.spCool - band.spHeat >= MIN_AUTO_BAND_C - SETPOINT_TOLERANCE_C) {
+    return band;
+  }
+  const fits = (v: number, r: SetpointRange) =>
+    v >= r.min - SETPOINT_TOLERANCE_C && v <= r.max + SETPOINT_TOLERANCE_C;
+  const pin = (v: number, r: SetpointRange) => (celsius
+    ? quantizeSetpointInRangeCelsius(v, r.min, r.max)
+    : quantizeSetpointInRange(v, r.min, r.max));
+
+  if (moved === 'spCool') {
+    const heat = quantizeOutward(band.spCool - MIN_AUTO_BAND_C, -1, celsius);
+    if (fits(heat, heatRange)) {
+      return { spHeat: heat, spCool: band.spCool };
+    }
+    const floor = pin(heatRange.min, heatRange);
+    return { spHeat: floor, spCool: quantizeOutward(floor + MIN_AUTO_BAND_C, 1, celsius) };
+  }
+
+  const cool = quantizeOutward(band.spHeat + MIN_AUTO_BAND_C, 1, celsius);
+  if (fits(cool, coolRange)) {
+    return { spHeat: band.spHeat, spCool: cool };
+  }
+  const ceiling = pin(coolRange.max, coolRange);
+  return { spHeat: quantizeOutward(ceiling - MIN_AUTO_BAND_C, -1, celsius), spCool: ceiling };
+}

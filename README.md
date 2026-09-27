@@ -150,6 +150,10 @@ characteristic, and there is no state for dehumidify or fan-only. So:
 - **Setpoints are the two thresholds.** The Home app shows the heating threshold in Heat,
   the cooling threshold in Cool, and both as a band in Auto. Modes the unit's profile says
   it cannot do are removed from the picker.
+- **In Auto the band stays at least 1.5 °C wide**, the way the Mitsubishi app keeps it:
+  move one handle into the other and the other moves away — and stays there when you
+  move back. The unit itself accepts any band, so this is the only thing keeping HomeKit,
+  scenes and Shortcuts inside what the manufacturer allows.
 - **What the unit is doing is reported honestly:** heating, cooling, or **idle** when the
   compressor is in standby or the unit is in fan-only.
 - **Fan speed and fan-auto** are on a linked Fan service — five speeds at 0 / 25 / 50 /
