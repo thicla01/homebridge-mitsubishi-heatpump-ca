@@ -112,6 +112,14 @@ writes on this adapter change real state: `tempSource`, `roomTempOffset`, and
 connection each, a pause between (default 1s), and no node scanning or fuzzing. These
 adapters hold roughly one connection and degrade under back-to-back traffic.
 
+Two ways to use it beyond the default list. `--node .` asks for the root, `{"c":{}}` — a
+read is an empty leaf the adapter completes, so a *parent* asked empty may enumerate its
+children, which beats guessing node names; worth trying at every level (`.`, `adapter`,
+`adapter.status`). And bracket a run of unknown nodes with one that works —
+`indoorUnit.status` first and last — because that turns the ambiguity below into a
+decision: an adapter that answered before and after the unknowns was not busy in between,
+so the summary says to read them as absent.
+
 One finding from building it, because it shapes how to read the output: `serializer_error`
 is returned both for "busy" and for a node the adapter cannot produce. The plugin maps it
 to *busy* and is right to — it only ever asks for nodes it knows exist — but a probe

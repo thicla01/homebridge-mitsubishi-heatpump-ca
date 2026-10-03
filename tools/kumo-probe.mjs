@@ -48,7 +48,12 @@
 //   --ip HOST[:PORT]    the adapter's LAN address (warns; prefer the file)
 //   --password B64      the adapter's local password (warns)
 //   --cryptoSerial HEX  the adapter's crypto serial (warns)
-//   --node PATH         a node to read, dot-separated, repeatable. A node this
+//   --node PATH         a node to read, dot-separated, repeatable. `.` is the root,
+//                       `{"c":{}}` — a parent asked empty may enumerate its children,
+//                       which beats guessing names. Bracket a run of unknown nodes
+//                       with one that works (indoorUnit.status first and last) and the
+//                       summary will say whether the adapter stayed healthy throughout.
+//                       A node this
 //                       adapter does not have answers `serializer_error`, the same
 //                       code it uses for "busy" — see the note at that message.
 //                       Default: the
@@ -161,9 +166,15 @@ const timeoutMs = Number(flag('timeout', 6000)) || 6000;
  * read-only guarantee — there is nowhere to pass a value.
  */
 function body(path) {
+  // `.` is the root: `{"c":{}}`, asking the adapter to fill in everything it has.
+  // A read is an empty leaf the adapter completes, so a PARENT asked empty may
+  // enumerate its children — which beats guessing node names. Worth trying at
+  // every level: `.`, then `adapter`, then `adapter.status`.
   let leaf = {};
-  for (const key of path.split('.').reverse()) {
-    leaf = { [key]: leaf };
+  if (path !== '.') {
+    for (const key of path.split('.').reverse()) {
+      leaf = { [key]: leaf };
+    }
   }
   return Buffer.from(JSON.stringify({ c: leaf }), 'utf8');
 }
@@ -212,6 +223,8 @@ console.log(`Probing ${creds.ip} — read-only, ${nodes.length} node(s), ${pause
 
 let authFailures = 0;
 let anySucceeded = false;
+/** Per-node outcome, so the run can be summarised and the ambiguity resolved. */
+const outcomes = [];
 for (const [i, path] of nodes.entries()) {
   if (i > 0) {
     await new Promise((r) => setTimeout(r, pauseMs));
@@ -221,6 +234,7 @@ for (const [i, path] of nodes.entries()) {
 
   if (out.error) {
     console.log(`   no answer: ${out.error}`);
+    outcomes.push('silent');
     continue;
   }
   if (out.status !== 200) {
@@ -232,6 +246,7 @@ for (const [i, path] of nodes.entries()) {
   } catch {
     // Discovery means seeing unexpected things; show them rather than hiding them.
     console.log(`   not JSON (${out.text.length} bytes): ${out.text.slice(0, 400)}`);
+    outcomes.push('odd');
     continue;
   }
   if (parsed._api_error) {
@@ -256,18 +271,38 @@ for (const [i, path] of nodes.entries()) {
           : ' Nothing has answered yet this run, so a busy or wedged adapter is likelier — raise --pause and retry.'),
       );
     }
+    outcomes.push(code === 'serializer_error' ? 'ambiguous' : 'refused');
     continue;
   }
   if (parsed.r === undefined) {
     console.log(`   answered without an "r" node: ${JSON.stringify(parsed).slice(0, 400)}`);
+    outcomes.push('odd');
     continue;
   }
   anySucceeded = true;
+  outcomes.push('ok');
   console.log(JSON.stringify(parsed.r, null, 2).split('\n').map((l) => `   ${l}`).join('\n'));
 }
 
+const count = (kind) => outcomes.filter((o) => o === kind).length;
 console.log(
-  '\nDone. Replies can carry the unit serial, its MAC and your SSID — review before sharing.',
+  `\n${count('ok')}/${nodes.length} answered`
+  + (count('ambiguous') > 0 ? `, ${count('ambiguous')} ambiguous (serializer_error)` : '')
+  + (count('silent') > 0 ? `, ${count('silent')} silent` : '')
+  + (count('refused') > 0 ? `, ${count('refused')} refused` : '')
+  + (count('odd') > 0 ? `, ${count('odd')} unexpected` : '') + '.',
+);
+// The point of bracketing a run with a node known to work: it turns the ambiguity
+// into a decision. An adapter that answered both before and after the unknowns was
+// not busy in between, so a serializer_error in the middle means the node is absent.
+if (nodes.length > 2 && outcomes[0] === 'ok' && outcomes[outcomes.length - 1] === 'ok' && count('ambiguous') > 0) {
+  console.log(
+    'The first and last reads both answered, so the adapter was healthy throughout —'
+    + ' read the ambiguous ones above as nodes this adapter does not have.',
+  );
+}
+console.log(
+  'Replies can carry the unit serial, its MAC and your SSID — review before sharing.',
 );
 if (authFailures === nodes.length) {
   console.log('Every node was rejected: the credentials or the address are wrong for this unit.');
