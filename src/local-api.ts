@@ -53,12 +53,14 @@ export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}'
 const LOCAL_AGENT = new Agent({ keepAlive: false, maxSockets: 1 });
 
 /**
- * Pause before retrying a rejected token. Long enough for a competing local client
- * to finish its exchange — the adapter holds roughly one connection — and short
- * enough to be invisible next to a 15s poll. A genuinely wrong credential pays it
- * once per poll and still crosses the warning threshold inside a minute.
+ * Pause before the one retry a failed request gets — a rejected token or a transport
+ * failure, the two kinds requestDetailed retries. Long enough for a competing local
+ * client to finish its exchange — the adapter holds roughly one connection — and
+ * short enough to be invisible next to a 15s poll, or next to the 6s timeout a
+ * transport failure has usually just waited out. A genuinely wrong credential pays
+ * it once per poll and still crosses the warning threshold inside a minute.
  */
-const AUTH_RETRY_PAUSE_MS = 250;
+const RETRY_PAUSE_MS = 250;
 
 /** Hard cap on a local HTTP reply. A real adapter answers ~1-2KB. */
 const MAX_LOCAL_RESPONSE_BYTES = 65536;
@@ -524,8 +526,22 @@ export class LocalKumoClient {
         }
 
         if (outcome.error === 'transport') {
-          // A fresh socket IS the fix: the adapter closes idle connections and the
-          // next write on one fails.
+          // A connection that failed — refused, reset, or silent until the timeout.
+          // Worth one more try: a dropped packet or a momentary reset is transient.
+          //
+          // This used to read "a fresh socket IS the fix: the adapter closes idle
+          // connections and the next write on one fails". That cannot happen here.
+          // LOCAL_AGENT has keep-alive off — since f8dadf4, 2026-07-27, three weeks
+          // before that line was written — so no socket is ever reused and every
+          // attempt is already a fresh connection. The retry was justified by a
+          // failure that was gone before the justification existed.
+          //
+          // What CAN make a fresh connection fail is the cause already named for auth
+          // below: another client — the Kumo phone app — holding the adapter's one
+          // slot. A retry fired at once runs straight into that same occupied slot,
+          // so it gets the same pause as an auth retry. pykumo #79 reached the same
+          // place from the other side: its rate limit spaces every attempt, the retry
+          // after a timeout included.
           this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: transport failure, retrying once`);
         } else {
           // An auth rejection was long treated as permanent — "it will say the same
@@ -549,8 +565,8 @@ export class LocalKumoClient {
             `[LOCAL] ${serial} @ ${creds.ip}: credentials rejected — retrying once, `
             + 'a single rejection is not evidence of a wrong password',
           );
-          await new Promise(resolve => setTimeout(resolve, AUTH_RETRY_PAUSE_MS));
         }
+        await new Promise(resolve => setTimeout(resolve, RETRY_PAUSE_MS));
       }
       this.noteRequestOutcome(serial, creds, last);
       return { result: null, error: last };

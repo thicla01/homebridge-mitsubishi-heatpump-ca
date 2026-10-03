@@ -525,6 +525,41 @@ test('an adapter that accepts and never answers times out as transport, after on
   }
 });
 
+test('a transport failure is retried after a pause, not straight into the same occupied slot', async () => {
+  // With keep-alive off every attempt is already a fresh connection, so the only
+  // failure a retry can outlast is a transient one — and the likeliest, another
+  // client (the Kumo phone app) holding the adapter's one slot, is still there if
+  // the retry fires at once. So it waits like an auth retry does.
+  //
+  // The first attempt is cut mid-exchange, a reset, so it fails at once: what this
+  // measures is the gap the plugin itself puts between the two attempts, with no
+  // timeout in it to hide behind.
+  const arrivals: number[] = [];
+  const adapter = await startAdapter((_record, res) => {
+    arrivals.push(Date.now());
+    if (arrivals.length === 1) {
+      res.socket?.destroy();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ r: { indoorUnit: { status: { mode: 'heat', roomTemp: 21.5, spHeat: 20 } } } }));
+  });
+  try {
+    const out = await withDeadline(
+      makeClient(adapter.ip).requestDetailed(SERIAL, STATUS_READ_BODY),
+      4000,
+      'requestDetailed against an adapter that resets once',
+    );
+
+    assert.strictEqual(out.error, 'none', 'the retry recovered it');
+    assert.strictEqual(arrivals.length, 2, 'exactly one retry');
+    const gap = arrivals[1] - arrivals[0];
+    assert.ok(gap >= 240, `the retry waited for the slot to free first (gap ${gap}ms)`);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test('nothing listening on the port is a transport failure too', async () => {
   // Bind and immediately close, so the port is real, free and refusing.
   const adapter = await startAdapter(json({ r: {} }));
