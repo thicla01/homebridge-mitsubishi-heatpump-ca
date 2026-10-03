@@ -86,6 +86,40 @@ silently does nothing would make a test pass for the wrong reason. `--strict` wa
 checked by firing two raw concurrent `PUT`s (detector fires) and then two concurrent
 `LocalKumoClient` calls (detector stays quiet — the mutex holds).
 
+## Asking a real unit what it reports — the probe
+
+`tools/kumo-probe.mjs` is the other half of that division: where the simulator answers
+"do we handle N units correctly", the probe answers "what does this adapter actually
+say". `mapLocalStatus` keeps the dozen fields the plugin uses and drops the rest, so a
+raw read is the only way to see the whole tree — which is how the undocumented fields in
+`docs/protocol.md` were found.
+
+```bash
+npm run build
+node tools/kumo-probe.mjs --creds-file unit.json
+```
+
+`unit.json` is one entry of the `localDevices` block `exportLocalSecrets` prints, so a
+copy kept in a password manager feeds it unedited. `KUMO_IP` / `KUMO_PASSWORD` /
+`KUMO_CRYPTO_SERIAL` work too; the flags also work and warn, since a command line lands
+in shell history and the process list.
+
+**Read-only structurally, not by promise.** A read in this protocol is a body of nested
+empty objects that the adapter fills in, and `body()` puts `{}` at the leaf with no
+parameter — there is no code path that puts a value there. That matters because some
+writes on this adapter change real state: `tempSource`, `roomTempOffset`, and
+`runState: "reboot"`. It is also deliberately gentle — one request at a time, a fresh
+connection each, a pause between (default 1s), and no node scanning or fuzzing. These
+adapters hold roughly one connection and degrade under back-to-back traffic.
+
+One finding from building it, because it shapes how to read the output: `serializer_error`
+is returned both for "busy" and for a node the adapter cannot produce. The plugin maps it
+to *busy* and is right to — it only ever asks for nodes it knows exist — but a probe
+exploring unknown nodes sees both. The probe says so, and leans on whether anything else
+answered in the same run. Verified against the simulator, whose fall-through for an
+unimplemented node is that same code; whether real firmware agrees is exactly the kind of
+thing the probe is for.
+
 ## The `@types/node` floor
 
 `engines.node` promises `>=20.0.0`, but `devDependencies` pins `@types/node` to `^24` —
