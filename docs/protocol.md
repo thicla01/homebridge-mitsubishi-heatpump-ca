@@ -188,26 +188,62 @@ The plugin reads a subset; the rest is recorded because the vendor documents non
 `tempSource` is worth knowing: it names which thermistor regulates the unit. `sensor0`
 means a paired wireless sensor is the real thermostat, not the head unit.
 
-The LAN adapter exposes one more node this plugin does not read, recorded because it
-answers a question that keeps coming up. `{"c":{"adapter":{"status":{}}}}` returns the
-module's own state — `localNetwork.stationMode.RSSI` and `SSID`, the zone `name`,
-`runState` (`"reboot"` is what a write there would set), `uptime`, `roomTempOffset`,
-`ledDisabled`, `receiverRelay`, `userMinCoolSetPoint` / `userMaxHeatSetPoint`, and
-`serverHostname`, which on the measured unit was `geo-rev2-b.kumocloud.com` — a host that
-appears nowhere else in this document.
+### The whole local surface, enumerated
 
-The node also holds a `password`, which answers **`__invalid_api_request`**: a per-field
-refusal, not a failure of the request. **Which password is unknown.** Its neighbours are
-`SSID` and `serverHostname`, so this node reads like the surface the phone app WRITES
-during provisioning — wifi credentials, zone name, LED, offset, cloud host, the reboot
-trigger — which makes the **wifi** password at least as likely as the LAN API one. Do not
-cite it as evidence about the LAN secrets either way.
+A read is an empty leaf the adapter fills in, so a **parent asked empty enumerates its
+children**. That works one level down and not at the root: `{"c":{}}` answers
+`{"": "__invalid_api_request"}`, while `{"c":{"adapter":{}}}` and
+`{"c":{"indoorUnit":{}}}` return everything beneath them. Measured on a GX15 (firmware
+`03.07.03`, hardware `00.00.03`) on 2026-10-03 with `tools/kumo-probe.mjs`. The plugin
+reads three of these nodes; the rest is recorded so nobody has to guess again.
 
-What the probe does establish is narrower and does not depend on that: across the five
-nodes read, **neither `password` nor `cryptoSerial` came back as a usable value** — and
-`cryptoSerial` did not appear as a field at all. So the LAN secrets could not be recovered
-from the device through these nodes. Measured 2026-10-03; five nodes were read, not all of
-them, so this is "not here" rather than "nowhere".
+`adapter`:
+
+| Child | Contents |
+|---|---|
+| `status` | Mutable settings: `localNetwork.stationMode.{RSSI,SSID}`, `name` (the zone name, stored in the module), `runState` (`"reboot"` is what a write would set), `uptime` (seconds), `roomTempOffset`, `ledDisabled`, `receiverRelay`, `autoModePrevention`, `userHasModeDry` / `userHasModeHeat`, `userMinCoolSetPoint` / `userMaxHeatSetPoint`, `serverHostname` — `geo-rev2-b.kumocloud.com` on this unit, a host that appears nowhere else here — and `password` |
+| `info` | Immutable identity: `macAddress`, `serialNumber`, `firmwareVersion`, `hardwareVersion`, `isTestMode` |
+| `led` | Two LEDs, each `{onPeriod, offPeriod, count, delay, repeat}`, all `__ungettable` |
+| `localNetwork` | Refuses as a node (`__invalid_api_request`) even though `status.localNetwork` reads fine |
+
+`indoorUnit`:
+
+| Child | Contents |
+|---|---|
+| `status` | What the poller reads |
+| `profile` | The capability profile — see below |
+| `initialSettings` | 31 numbered slots, all `0` on this unit, whose `profile.hasInitialSettings` is `false`. Almost certainly the installer function codes |
+| `schedule` | `events` 1-28, each `{active, inUse, day, time, settings:{mode, spCool, spHeat, vaneDir, fanSpeed}}` — the unit has its own scheduler |
+| `errorHistory` | `errors` 1-10, each `{error2char, error4char, timestamp}` |
+| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts |
+| `settings` | `rawITPFrame {frame, len, id}`: a raw-frame passthrough to the indoor unit |
+| `info` | `{}` |
+| `acoil` | `__action_failed` |
+
+**Three refusal markers, with different meanings.** `__invalid_api_request` — not a thing
+you may ask for, used for a whole node and for the `password` field. `__ungettable` — the
+field exists and cannot be read (every LED timing). `__action_failed` — the read was valid
+and did not work (`acoil`). They are values inside `r`, not `_api_error` codes, so a client
+that only checks for `_api_error` takes them for data.
+
+**`cryptoSerial` appears nowhere.** Not in either enumeration, at any depth. The adapter
+does not expose it, so the LAN secrets cannot be recovered from the device through this
+API — which is now a statement about the whole surface rather than about five nodes.
+
+**Which `password` is in `adapter.status` is still unknown**, and the enumeration did not
+settle it. It sits among mutable settings while `adapter.info` holds the immutable
+identity, so the split is settings-versus-identity rather than LAN-versus-wifi. What the
+enumeration does add is that no `cryptoSerial` sits beside it — which is what you would
+expect if this is the **wifi** password, and leaves the LAN-password reading needing an
+explanation for why only half the pair is present. Do not cite the field as evidence about
+the LAN secrets either way.
+
+**Two things worth not touching.** `settings.rawITPFrame` is a passthrough to the indoor
+unit's own serial protocol — the deepest write surface on the device, and nothing here
+goes near it. `initialSettings` is where the installer function codes live, including the
+setpoint limits that [What does not exist](#what-does-not-exist) concluded no API could
+change: that conclusion was reached against the **cloud**, and these slots are on the
+adapter. Writing them unmeasured is how a unit ends up with limits nobody intended.
 
 `profile_update` — capabilities and limits. Beyond the fields the plugin consumes it also
 carries `hasHotAdjust`, `hasInitialSettings`, `hasModeTest` and `extendedTemps`.
