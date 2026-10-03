@@ -252,7 +252,7 @@ function incomplete(): Record<string, unknown> {
  * profiled.
  */
 export function makeV2Reply(
-  opts: { zones?: boolean; noSecrets?: string[]; badCryptoSerial?: string[] } = {},
+  opts: { zones?: boolean; noSecrets?: string[]; badCryptoSerial?: string[]; noProfile?: string[] } = {},
 ): unknown[] {
   const zoneTable: Record<string, unknown> = opts.zones === false ? {} : {
     [SERIAL_A]: zoneA(),
@@ -267,6 +267,17 @@ export function makeV2Reply(
     }
     zone.password = '';
     zone.cryptoSerial = '';
+  }
+  // `noProfile` drops a unit's whole `reportedProfile`, which mapV2Profile answers
+  // with `undefined` — the degraded reply resolveV2Units falls back to the stand-in
+  // for (`success: 0`, firmwareVersion "00.00.00" in the wild), and the one case
+  // where the adapter's own profile is better than anything the cloud gave.
+  for (const serial of opts.noProfile ?? []) {
+    const zone = zoneTable[serial] as Record<string, unknown> | undefined;
+    if (!zone) {
+      throw new Error(`noProfile names ${serial}, which is not in the fixture`);
+    }
+    delete zone.reportedProfile;
   }
   for (const serial of opts.badCryptoSerial ?? []) {
     const zone = zoneTable[serial] as Record<string, unknown> | undefined;

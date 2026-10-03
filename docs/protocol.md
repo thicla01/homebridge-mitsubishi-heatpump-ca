@@ -188,6 +188,27 @@ The plugin reads a subset; the rest is recorded because the vendor documents non
 `tempSource` is worth knowing: it names which thermistor regulates the unit. `sensor0`
 means a paired wireless sensor is the real thermostat, not the head unit.
 
+The LAN adapter exposes one more node this plugin does not read, recorded because it
+answers a question that keeps coming up. `{"c":{"adapter":{"status":{}}}}` returns the
+module's own state — `localNetwork.stationMode.RSSI` and `SSID`, the zone `name`,
+`runState` (`"reboot"` is what a write there would set), `uptime`, `roomTempOffset`,
+`ledDisabled`, `receiverRelay`, `userMinCoolSetPoint` / `userMaxHeatSetPoint`, and
+`serverHostname`, which on the measured unit was `geo-rev2-b.kumocloud.com` — a host that
+appears nowhere else in this document.
+
+The node also holds a `password`, which answers **`__invalid_api_request`**: a per-field
+refusal, not a failure of the request. **Which password is unknown.** Its neighbours are
+`SSID` and `serverHostname`, so this node reads like the surface the phone app WRITES
+during provisioning — wifi credentials, zone name, LED, offset, cloud host, the reboot
+trigger — which makes the **wifi** password at least as likely as the LAN API one. Do not
+cite it as evidence about the LAN secrets either way.
+
+What the probe does establish is narrower and does not depend on that: across the five
+nodes read, **neither `password` nor `cryptoSerial` came back as a usable value** — and
+`cryptoSerial` did not appear as a field at all. So the LAN secrets could not be recovered
+from the device through these nodes. Measured 2026-10-03; five nodes were read, not all of
+them, so this is "not here" rather than "nowhere".
+
 `profile_update` — capabilities and limits. Beyond the fields the plugin consumes it also
 carries `hasHotAdjust`, `hasInitialSettings`, `hasModeTest` and `extendedTemps`.
 `minimumSetPoints` / `maximumSetPoints` are `{ cool, heat, auto }` in Celsius.
@@ -295,11 +316,47 @@ live outside `indoorUnit.status`:
 | Body | Returns |
 |---|---|
 | `{"c":{"sensors":{"<i>":{}}}}` | Paired wireless sensor slot `i` (0–3): `uuid`, `temperature` (~6 decimals, against the unit's 0.5 °C-quantized `roomTemp`), `humidity`. Slots are consecutive — the first slot with no `uuid` ends the list |
-| `{"c":{"mhk2":{"status":{}}}}` | An MHK2 wall thermostat; `indoorHumid` is the only field read |
+| `{"c":{"mhk2":{"status":{}}}}` | An MHK2 wall thermostat; `indoorHumid` is the only field read, though the node also carries `outdoorTemp` and `outdoorHumid` |
+| `{"c":{"indoorUnit":{"profile":{}}}}` | The unit's own capability profile — see below |
 
 They are queried only while the unit reports a `tempSource`/`activeThermistor` of
 `sensorN`; a unit that yields neither is latched and not asked again until its
-temperature source changes (`getSensorReadings`, `src/local-api.ts`).
+temperature source changes (`getSensorReadings`, `src/local-api.ts`). The sensor leaf
+also carries `rssi`, `txPower` and **`battery`** — which the README has long called the
+one sensor reading local control gives up. Unverified either way: the account this was
+measured on has no paired sensor, so every field came back null.
+
+### The capability profile, from the adapter
+
+`{"c":{"indoorUnit":{"profile":{}}}}` answers the unit's own profile, and it is the same
+one the v2 cloud serves — field for field, measured on a GX15 on 2026-10-03 with
+`tools/kumo-probe.mjs`:
+
+```json
+{ "hasModeDry": true, "hasModeHeat": true, "hasModeVent": true, "hasVaneDir": true,
+  "hasVaneSwing": true, "hasFanSpeedAuto": true, "numberOfFanSpeeds": 5,
+  "usesSetPointInDryMode": true, "hasDefrost": true, "hasStandby": true,
+  "extendedTemps": true, "hasHotAdjust": true, "hasInitialSettings": false,
+  "hasModeTest": false,
+  "minimumSetPoints": { "cool": 16, "heat": 10, "auto": 16 },
+  "maximumSetPoints": { "cool": 31, "heat": 31, "auto": 31 } }
+```
+
+Note the three distinct floors. A hand-declared `localDevices` entry carries ONE
+`minSetPoint` for every mode, so it publishes the cooling floor as the heating floor —
+and HomeKit rejects a write below a published minimum rather than clamping it, which is
+what makes "hold 10 °C while away" unaskable (docs/configuration.md). The adapter knows
+all three. `platform.ts:refineProfilesFromAdapter` therefore reads this node for any unit
+whose profile is the config-assembled stand-in, and leaves a v2-discovered profile alone —
+they agree, and a second startup request is not free on an adapter that holds about one
+connection.
+
+Two fields are **not** adopted from it: `hasModeDry` and `hasModeVent`. In `localOnly`
+those two do double duty — they describe the hardware AND opt into the Dry / Fan-only
+tiles, because `wantsModeSwitch` defaults to true in that mode, so the profile flag is the
+only gate. Both are true on ordinary hardware, so adopting them would hand two switches to
+every local-only install on upgrade. `extendedTemps`, `hasHotAdjust`, `hasInitialSettings`
+and `hasModeTest` are read but unmodelled.
 
 ### `_api_error`
 

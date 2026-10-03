@@ -100,6 +100,12 @@ interface ResolvedLocalUnit {
   /** Optional startup state, so a tile is not blank until the first LAN poll. */
   seed?: Partial<DeviceStatus> | null;
   /**
+   * True when `profile` is the unit's real one, from the v2 reply. False when it is
+   * the config-assembled stand-in — the case the adapter can improve on, since it
+   * serves the real profile itself (`refineProfilesFromAdapter`).
+   */
+  profileDiscovered: boolean;
+  /**
    * Where the profile came from. 'config' means the capabilities were DECLARED by
    * hand, which is what makes the Dry/Fan tiles implicit in local-only mode;
    * 'v2' means they were discovered, so the tiles stay opt-in as on the cloud path.
@@ -915,6 +921,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       ip: device.ip,
       creds: { password: device.password, cryptoSerial: device.cryptoSerial },
       profile: this.syntheticProfile(device),
+      profileDiscovered: false,
       source: 'config',
     };
   }
@@ -1039,6 +1046,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         // falls back to the same defaults the cloud path uses — per unit, not as one
         // global decision.
         profile: device.profile ?? this.syntheticProfile({}),
+        profileDiscovered: device.profile !== undefined,
         seed: device.condition,
         source: 'v2',
         celsius: inventory.celsius,
@@ -1235,6 +1243,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
 
     await this.resolveMissingLocalIps(admitted);
+    // After the sweep, so a unit whose address was not known up front is included.
+    // Before the poller starts, so the first status lands on an accessory whose
+    // setpoint ranges are already the real ones.
+    await this.refineProfilesFromAdapter(admitted);
     // After the sweep, so a v2 unit whose address was not in the reply is exported
     // with the address it was actually found at.
     this.exportLocalSecrets(admitted);
@@ -1329,6 +1341,69 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
     });
     this.log.info(`✓ ${origin.summary.replace('%s', `${ok}/${units.length}`)}`);
+  }
+
+  /**
+   * Replace a stand-in capability profile with the one the adapter itself reports.
+   *
+   * Measured on a GX15 on 2026-10-03: `indoorUnit.profile` answers the same profile
+   * the v2 cloud serves, field for field. That matters most where there is no cloud
+   * profile to have: a hand-declared `localDevices` entry carries ONE `minSetPoint`
+   * for every mode, so syntheticProfile publishes the cooling floor as the heating
+   * floor — 16 °C where the unit will accept 10 — and HomeKit then REJECTS a write
+   * below the published minimum rather than clamping it, which is what makes "hold
+   * 10 °C while away" unaskable (docs/configuration.md). The adapter knows all three
+   * floors. It also knows the real fan-speed count, where the stand-in guesses 4.
+   *
+   * Only for a unit whose profile was NOT discovered from the cloud: where v2 gave a
+   * real one, it already matches, and this would be a second request at startup on an
+   * adapter that holds about one connection. Best-effort throughout — a read that
+   * fails leaves the stand-in in place, because a declared profile is still a working
+   * one and startup must not hang on an unreachable unit.
+   *
+   * `hasModeDry` and `hasModeVent` are deliberately NOT taken from the adapter, and
+   * this is the subtle part. In local-only those two do double duty: they describe the
+   * hardware AND opt into the Dry / Fan-only tiles (`wantsModeSwitch` defaults to true
+   * in this mode, so the profile flag is the only gate). Both are true on ordinary
+   * hardware, so adopting them would hand a Dry switch and a Fan-only switch to every
+   * local-only install that never asked for one, on upgrade. Discovery improves the
+   * hardware description; it must not change which tiles exist. Anyone who wants them
+   * declares the capability, exactly as before, or sets showDrySwitch explicitly.
+   */
+  private async refineProfilesFromAdapter(units: ResolvedLocalUnit[]): Promise<void> {
+    const local = this.localClient;
+    if (!local) {
+      return;
+    }
+    for (const unit of units) {
+      if (unit.profileDiscovered || !local.hasLocal(unit.deviceSerial)) {
+        continue;
+      }
+      let discovered: Partial<DeviceProfile> | null = null;
+      try {
+        discovered = await local.getProfile(unit.deviceSerial);
+      } catch {
+        continue; // unreachable or wedged; the stand-in still works
+      }
+      if (!discovered) {
+        this.log.debug(`${unit.displayName}: the adapter reported no profile — keeping the declared one`);
+        continue;
+      }
+      // The two tile-gating flags keep whatever the declaration said. See above.
+      const { hasModeDry, hasModeVent, ...hardware } = discovered;
+      void hasModeDry;
+      void hasModeVent;
+      const before = unit.profile;
+      unit.profile = { ...before, ...hardware };
+      const floors = unit.profile.minimumSetPoints;
+      this.log.info(
+        `${unit.displayName}: capabilities read from the adapter — setpoint floors `
+        + `heat ${floors.heat}°C / cool ${floors.cool}°C / auto ${floors.auto}°C, `
+        + `${unit.profile.numberOfFanSpeeds} fan speeds. The Dry and Fan-only tiles still `
+        + 'follow your config, not this.',
+      );
+      this.kumoAPI.emitDeviceProfile(unit.deviceSerial, unit.profile);
+    }
   }
 
   /**

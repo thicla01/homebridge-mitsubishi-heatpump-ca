@@ -27,6 +27,7 @@ import {
   discoverDeviceIps,
   buildLocalCommandBody,
   isLocalHost,
+  PROFILE_READ_BODY,
   STATUS_READ_BODY,
 } from '../dist/local-api.js';
 import { makeLog } from './helpers';
@@ -840,6 +841,118 @@ test('a local reply larger than the cap is refused, not buffered without limit',
     // The point is that it terminates rather than OOMing: the destroyed request
     // surfaces as a transport failure, not a parsed giant object.
     assert.notStrictEqual(out.error, 'none', 'an oversized reply is not accepted as success');
+  } finally {
+    await adapter.close();
+  }
+});
+
+// ---- the adapter's own capability profile ----------------------------------
+//
+// Measured on a GX15 on 2026-10-03 with tools/kumo-probe.mjs: `indoorUnit.profile`
+// answers the same profile the v2 cloud serves, field for field — three distinct
+// setpoint floors included. That is what a hand-declared localDevices entry cannot
+// express, since it carries one minSetPoint for every mode.
+
+/** The reply the real unit gave, trimmed to the fields DeviceProfile models. */
+const REAL_PROFILE = {
+  hasModeDry: true, hasModeHeat: true, hasVaneDir: true, hasVaneSwing: true,
+  hasModeVent: true, hasFanSpeedAuto: true, numberOfFanSpeeds: 5,
+  usesSetPointInDryMode: true, hasDefrost: true, hasStandby: true,
+  maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+  minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+};
+
+test('the profile read asks for the profile node and maps every field it models', async () => {
+  const adapter = await startAdapter(json({ r: { indoorUnit: { profile: REAL_PROFILE } } }));
+  try {
+    const out = await makeClient(adapter.ip).getProfile(SERIAL);
+
+    assert.strictEqual(adapter.seen.length, 1, 'one exchange');
+    assert.strictEqual(adapter.seen[0].body, PROFILE_READ_BODY.toString('utf8'),
+      'the body asks for the profile node, with an empty leaf the adapter fills in');
+    // The three floors are the point: a declared profile has one number for all three.
+    assert.deepStrictEqual(out?.minimumSetPoints, { cool: 16, heat: 10, auto: 16 });
+    assert.deepStrictEqual(out?.maximumSetPoints, { cool: 31, heat: 31, auto: 31 });
+    assert.strictEqual(out?.numberOfFanSpeeds, 5);
+    assert.strictEqual(out?.hasVaneSwing, true);
+    assert.strictEqual(out?.usesSetPointInDryMode, true);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a partial profile yields only what it carried, so the caller keeps the rest', async () => {
+  // Partial, not a hole: the caller merges this over the profile it already has, and
+  // an absent field has to keep its previous value rather than become undefined.
+  const adapter = await startAdapter(json({
+    r: { indoorUnit: { profile: { numberOfFanSpeeds: 3, hasVaneSwing: false } } },
+  }));
+  try {
+    const out = await makeClient(adapter.ip).getProfile(SERIAL);
+
+    assert.deepStrictEqual(out, { numberOfFanSpeeds: 3, hasVaneSwing: false });
+    assert.ok(!('minimumSetPoints' in (out ?? {})), 'nothing is invented for what was absent');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('setpoint bounds are taken as a triple or not at all', async () => {
+  // A reply carrying only `heat` would leave cool and auto at whatever the stand-in
+  // guessed — three floors half from the unit and half from a guess, which is the
+  // inconsistency the real profile exists to remove.
+  const adapter = await startAdapter(json({
+    r: { indoorUnit: { profile: { minimumSetPoints: { heat: 10 }, numberOfFanSpeeds: 5 } } },
+  }));
+  try {
+    const out = await makeClient(adapter.ip).getProfile(SERIAL);
+
+    assert.deepStrictEqual(out, { numberOfFanSpeeds: 5 }, 'the incomplete triple is dropped whole');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a field of the wrong type is ignored, not coerced', async () => {
+  // Firmware we do not control. A string where a number belongs must not become a
+  // setpoint bound, and "false" must not read as false.
+  const adapter = await startAdapter(json({
+    r: {
+      indoorUnit: {
+        profile: {
+          numberOfFanSpeeds: '5', hasVaneSwing: 'false', hasDefrost: true,
+          minimumSetPoints: { cool: 16, heat: '10', auto: 16 },
+        },
+      },
+    },
+  }));
+  try {
+    const out = await makeClient(adapter.ip).getProfile(SERIAL);
+
+    assert.deepStrictEqual(out, { hasDefrost: true });
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('zero fan speeds is refused — it would publish a slider with nothing on it', async () => {
+  const adapter = await startAdapter(json({
+    r: { indoorUnit: { profile: { numberOfFanSpeeds: 0, hasDefrost: true } } },
+  }));
+  try {
+    assert.deepStrictEqual(await makeClient(adapter.ip).getProfile(SERIAL), { hasDefrost: true });
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('an adapter with no profile node reports nothing rather than an empty profile', async () => {
+  // `serializer_error` is what the simulator answers for a node it does not have, and
+  // plausibly what firmware without this node answers too. Either way: null, and the
+  // caller keeps the profile it had.
+  const adapter = await startAdapter(json({ _api_error: 'serializer_error' }));
+  try {
+    assert.strictEqual(await makeClient(adapter.ip).getProfile(SERIAL), null);
   } finally {
     await adapter.close();
   }

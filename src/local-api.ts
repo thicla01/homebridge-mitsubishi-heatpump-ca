@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { Agent, request as httpRequest } from 'http';
 import { isIP } from 'net';
 import { Logger } from 'homebridge';
-import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
+import { Commands, DeviceProfile, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
 
 /**
  * Local LAN control of Mitsubishi Kumo adapters.
@@ -37,6 +37,16 @@ const W_PARAM = Buffer.from(
 
 /** The query body for a full status read (empty leaves = "report everything"). */
 export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}', 'utf8');
+
+/**
+ * The capability profile, read from the ADAPTER rather than from a cloud reply.
+ *
+ * Measured on a GX15 on 2026-10-03: this node answers the same profile the v2 cloud
+ * serves, field for field — including the three distinct setpoint floors (heat 10,
+ * cool 16, auto 16) that a hand-declared `localDevices` entry cannot express, since
+ * it carries one `minSetPoint` for every mode. See docs/protocol.md.
+ */
+export const PROFILE_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"profile":{}}}}', 'utf8');
 
 /**
  * A dedicated agent with keep-alive OFF.
@@ -652,6 +662,60 @@ export class LocalKumoClient {
       this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: request failed (${(err as Error).message})`);
       return { result: null, error: 'transport' };
     }
+  }
+
+  /**
+   * Ask the adapter for its own capability profile.
+   *
+   * Every field is validated rather than trusted: this is firmware we do not control,
+   * and a partial reply must degrade to "we learned some of it" rather than to a
+   * profile with holes. Hence Partial — the caller merges what came back over the
+   * profile it already had, so an absent field keeps its previous value instead of
+   * becoming undefined. Returns null when the read itself failed.
+   *
+   * Setpoint bounds are taken as a TRIPLE or not at all. A reply that carried only
+   * `minimumSetPoints.heat` would otherwise leave cool and auto at whatever the
+   * stand-in profile guessed, which is the inconsistency the real profile exists to
+   * remove — three floors that genuinely differ.
+   */
+  async getProfile(serial: string): Promise<Partial<DeviceProfile> | null> {
+    const { result } = await this.requestDetailed(serial, PROFILE_READ_BODY);
+    const indoorUnit = result?.indoorUnit as Record<string, unknown> | undefined;
+    const raw = indoorUnit?.profile as Record<string, unknown> | undefined;
+    if (!raw) {
+      return null;
+    }
+
+    const profile: Partial<DeviceProfile> = {};
+    const bool = (key: keyof DeviceProfile & string) => {
+      if (typeof raw[key] === 'boolean') {
+        (profile as Record<string, unknown>)[key] = raw[key];
+      }
+    };
+    for (const key of [
+      'hasFanSpeedAuto', 'hasModeDry', 'usesSetPointInDryMode', 'hasModeHeat',
+      'hasModeVent', 'hasVaneDir', 'hasVaneSwing', 'hasDefrost', 'hasStandby',
+    ] as const) {
+      bool(key);
+    }
+    // A fan with no speeds would publish a RotationSpeed slider with nothing on it.
+    if (typeof raw.numberOfFanSpeeds === 'number' && raw.numberOfFanSpeeds > 0) {
+      profile.numberOfFanSpeeds = raw.numberOfFanSpeeds;
+    }
+    const bounds = (key: 'minimumSetPoints' | 'maximumSetPoints') => {
+      const v = raw[key] as Record<string, unknown> | undefined;
+      if (!v) {
+        return;
+      }
+      const [cool, heat, auto] = [v.cool, v.heat, v.auto];
+      if ([cool, heat, auto].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+        profile[key] = { cool: cool as number, heat: heat as number, auto: auto as number };
+      }
+    };
+    bounds('minimumSetPoints');
+    bounds('maximumSetPoints');
+
+    return Object.keys(profile).length > 0 ? profile : null;
   }
 
   /** Read and map the unit's current status locally, or null if unreachable. */

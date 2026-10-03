@@ -361,8 +361,17 @@ whatsoever: an isolated VLAN, a deliberately offline install, or an account no e
 serves.
 
 **[README → Local-only mode](../README.md#local-only-mode)** covers where to obtain them,
-a full worked config, and what the mode gives up (indoor humidity, profile-sourced
-setpoint limits, and the cloud's own connection flag). The per-unit fields:
+a full worked config, and what the mode gives up (indoor humidity and the cloud's own
+connection flag).
+
+Since 2.3.8 the declared capabilities are a **starting point rather than the last word**:
+the adapter serves its own profile over the LAN, and the plugin prefers it. A declared
+`minSetPoint` of 16 gives way to the unit's real floors — heat 10 / cool 16 / auto 16 on
+a GX15 — and a guessed fan-speed count to the real one, which is why profile-sourced
+setpoint limits are no longer on the list above. The Dry and Fan-only tiles still follow
+what you declared: discovery describes the hardware, it does not add tiles you did not
+ask for. A unit whose adapter does not serve the node keeps the declared profile exactly
+as before. The per-unit fields:
 
 | Field | Required | Description |
 |---|---|---|

@@ -260,6 +260,42 @@ function handle(u, req, res, rawBody) {
     return reply(res, { r: { indoorUnit: { status: { ...u.status } } } });
   }
 
+  // The capability profile, as a real adapter serves it. Measured on a GX15 on
+  // 2026-10-03 with tools/kumo-probe.mjs: the node exists and answers the same
+  // profile the v2 cloud does, three distinct setpoint floors included. The
+  // simulator answered `serializer_error` here until the probe found it missing.
+  //
+  // Deliberately NOT derived from the --units flags: the point of this node is to
+  // disagree with a hand-declared profile, which is the whole reason the plugin
+  // reads it. The floors below are the real unit's — heat 10, cool 16 — so a
+  // simulator run with a declared minSetPoint of 16 shows the refinement working.
+  if (c.indoorUnit && c.indoorUnit.profile) {
+    return reply(res, {
+      r: {
+        indoorUnit: {
+          profile: {
+            hasModeDry: true,
+            hasModeHeat: true,
+            hasModeVent: true,
+            hasVaneDir: true,
+            hasVaneSwing: true,
+            hasFanSpeedAuto: true,
+            hasInitialSettings: false,
+            hasModeTest: false,
+            numberOfFanSpeeds: 5,
+            extendedTemps: true,
+            usesSetPointInDryMode: true,
+            hasHotAdjust: true,
+            hasDefrost: true,
+            hasStandby: true,
+            maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+            minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+          },
+        },
+      },
+    });
+  }
+
   if (c.sensors) {
     const slot = Object.keys(c.sensors)[0];
     // Slot 0 carries the sensor when one is configured; every other slot is

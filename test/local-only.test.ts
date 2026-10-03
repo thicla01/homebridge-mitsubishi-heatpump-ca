@@ -176,9 +176,17 @@ function makeKumoStub(): KumoStub {
 }
 
 interface LocalClientStub extends Pick<LocalKumoClient,
-  'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'getStatusDetailed' | 'sendCommand'> {
+  'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'getStatusDetailed'
+  | 'sendCommand' | 'getProfile'> {
   creds: Map<string, LocalDeviceCreds>;
   statusResult: Partial<DeviceStatus> | null;
+  /**
+   * What the adapter answers for `indoorUnit.profile`. Null by default — an adapter
+   * with no profile node, which keeps every test written before that read existed
+   * asserting the DECLARED profile, as it should.
+   */
+  profileResult: Partial<DeviceProfile> | null;
+  profileReads: string[];
   reads: string[];
 }
 
@@ -216,6 +224,12 @@ function makeLocalClientStub(over: Partial<LocalClientStub> = {}): LocalClientSt
     },
     async sendCommand() {
       return true;
+    },
+    profileResult: null,
+    profileReads: [],
+    async getProfile(serial: string) {
+      stub.profileReads.push(serial);
+      return stub.profileResult;
     },
     ...over,
   };
@@ -824,6 +838,127 @@ test('the declared capabilities and bounds are what the profile carries', async 
     assert.strictEqual(profile.numberOfFanSpeeds, 3);
     assert.deepStrictEqual(profile.minimumSetPoints, { cool: 18, heat: 18, auto: 18 });
     assert.deepStrictEqual(profile.maximumSetPoints, { cool: 28, heat: 28, auto: 28 });
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+// ---- the adapter knows its own profile -----------------------------------
+//
+// Measured on a GX15 on 2026-10-03 (tools/kumo-probe.mjs): `indoorUnit.profile`
+// answers the same profile the v2 cloud serves. That matters most here, where there
+// is no cloud profile to have: a declared localDevices entry carries ONE minSetPoint
+// for every mode, so the stand-in publishes the cooling floor as the heating floor —
+// 16 °C where this unit accepts 10 — and HomeKit REJECTS a write below a published
+// minimum rather than clamping, which is what makes "hold 10 °C while away"
+// unaskable. See docs/configuration.md.
+
+/** The profile the real unit reported, as DeviceProfile models it. */
+const ADAPTER_PROFILE: Partial<DeviceProfile> = {
+  hasModeDry: true, hasModeHeat: true, hasModeVent: true,
+  hasVaneDir: true, hasVaneSwing: true, hasFanSpeedAuto: true,
+  numberOfFanSpeeds: 5, usesSetPointInDryMode: true,
+  hasDefrost: true, hasStandby: true,
+  minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+  maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+};
+
+/** The profile actually in force: the last one emitted for a serial. */
+function effectiveProfile(kumo: KumoStub, serial: string): DeviceProfile {
+  const forSerial = kumo.profiles.filter((p) => p.serial === serial);
+  assert.ok(forSerial.length > 0, `no profile was emitted for ${serial}`);
+  return forSerial[forSerial.length - 1].profile;
+}
+
+test('a declared unit takes the adapter\'s real setpoint floors over its own one number', async () => {
+  const { platform, kumo, local } = makePlatform({
+    localDevices: [{ ...DEVICE, minSetPoint: 16, maxSetPoint: 31 }],
+  });
+  local.profileResult = ADAPTER_PROFILE;
+  try {
+    await platform.discoverDevices();
+
+    assert.deepStrictEqual(local.profileReads, [SERIAL], 'the adapter was asked, once');
+    const profile = effectiveProfile(kumo, SERIAL);
+    assert.deepStrictEqual(profile.minimumSetPoints, { cool: 16, heat: 10, auto: 16 },
+      'the heating floor is the unit\'s 10, not the declared 16 — this is the whole point');
+    assert.strictEqual(profile.numberOfFanSpeeds, 5, 'and the real speed count, not the guess');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the adapter cannot hand anyone a Dry or Fan-only tile they never asked for', async () => {
+  // THE invariant. In local-only those two flags do double duty: they describe the
+  // hardware AND opt into the tiles, because wantsModeSwitch defaults to true in this
+  // mode, so the profile flag is the only gate. Both are true on ordinary hardware,
+  // so adopting them would add two switches to every local-only install on upgrade.
+  // Discovery improves the hardware description; it must not change which tiles exist.
+  const { platform, kumo, local } = makePlatform({
+    localDevices: [{
+      deviceSerial: SERIAL, ip: DEVICE.ip, password: DEVICE.password,
+      cryptoSerial: DEVICE.cryptoSerial, // nothing declared: no dry, no vent
+    }],
+  });
+  local.profileResult = ADAPTER_PROFILE; // the adapter says it can do both
+  try {
+    await platform.discoverDevices();
+
+    const profile = effectiveProfile(kumo, SERIAL);
+    assert.strictEqual(profile.hasModeDry, false, 'the Dry tile stays absent');
+    assert.strictEqual(profile.hasModeVent, false, 'and the Fan-only tile too');
+    // The control: everything that does NOT gate a tile was still adopted, so the
+    // test cannot pass by the refinement simply not running.
+    assert.deepStrictEqual(profile.minimumSetPoints, { cool: 16, heat: 10, auto: 16 });
+    assert.strictEqual(profile.numberOfFanSpeeds, 5);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('an adapter with no profile node leaves the declared profile exactly as it was', async () => {
+  const { platform, kumo, local } = makePlatform({
+    localDevices: [{ ...DEVICE, minSetPoint: 18, maxSetPoint: 28 }],
+  });
+  local.profileResult = null; // older firmware, or a node it will not serve
+  try {
+    await platform.discoverDevices();
+
+    assert.deepStrictEqual(local.profileReads, [SERIAL], 'it was asked');
+    const profile = effectiveProfile(kumo, SERIAL);
+    assert.deepStrictEqual(profile.minimumSetPoints, { cool: 18, heat: 18, auto: 18 },
+      'a declared profile is still a working one');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a read that throws is not fatal — startup must not hang on an unreachable unit', async () => {
+  const { platform, kumo, local } = makePlatform({
+    localDevices: [{ ...DEVICE, minSetPoint: 18, maxSetPoint: 28 }],
+  });
+  local.getProfile = () => Promise.reject(new Error('unreachable'));
+  try {
+    await platform.discoverDevices();
+
+    assert.deepStrictEqual(
+      effectiveProfile(kumo, SERIAL).minimumSetPoints, { cool: 18, heat: 18, auto: 18 },
+    );
+    assert.strictEqual(platform['accessoryHandlers'].length, 1, 'and the unit is still registered');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a unit with no local credentials is not asked', async () => {
+  // Nothing to sign with, so the request could only fail. The sweep has already run
+  // by this point, so an un-credentialed unit here is one that stays that way.
+  const { platform, local } = makePlatform();
+  local.profileResult = ADAPTER_PROFILE;
+  local.hasLocal = () => false;
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(local.profileReads, []);
   } finally {
     platform['cleanup']();
   }

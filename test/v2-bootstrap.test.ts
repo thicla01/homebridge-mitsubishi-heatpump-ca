@@ -154,6 +154,9 @@ interface LocalClientStub {
   getIp(serial: string): string | undefined;
   getStatus(serial: string): Promise<Partial<DeviceStatus> | null>;
   sendCommand(serial: string, commands: Commands): Promise<boolean>;
+  /** Records every adapter profile read, which this mode should not need. */
+  profileReads: string[];
+  getProfile(serial: string): Promise<null>;
 }
 
 function makeLocalClientStub(): LocalClientStub {
@@ -175,6 +178,11 @@ function makeLocalClientStub(): LocalClientStub {
     },
     async getStatus() {
       return stub.statusResult;
+    },
+    profileReads: [],
+    async getProfile(serial: string) {
+      stub.profileReads.push(serial);
+      return null;
     },
     async sendCommand() {
       return true;
@@ -661,6 +669,44 @@ test('a refused v2 sign-in stops the credential retry too', async () => {
 
     platform['scheduleLocalCredRetry']();
     assert.strictEqual(platform['localCredRetryTimer'], null, 'no pass is queued');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a unit whose v2 profile is real is not asked for it again over the LAN', async () => {
+  // The v2 profile and the adapter's own agree field for field (measured 2026-10-03),
+  // so re-reading would buy nothing and cost a second startup request on an adapter
+  // that holds about one connection.
+  const { platform, local, kumo } = makePlatform();
+  try {
+    await platform.discoverDevices();
+
+    assert.deepStrictEqual(local.profileReads, [], 'the cloud already answered this');
+    // The control: the profile in force really is the detailed one, so this test
+    // cannot pass because no profile was resolved at all.
+    assert.deepStrictEqual(
+      kumo.profiles[0].profile.minimumSetPoints, { cool: 16, heat: 10, auto: 16 },
+    );
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a unit the v2 reply profiled with nothing DOES fall back to the adapter', async () => {
+  // The degraded reply resolveV2Units already guards for: a unit the tree lists
+  // without a usable profile (`success: 0`, firmwareVersion "00.00.00" in the wild)
+  // falls back to the stand-in — and the adapter can do better than the stand-in.
+  //
+  // SERIAL_B, not SERIAL_A: the first fixture unit deliberately carries no address,
+  // so its credentials are only seeded by the LAN sweep — which this harness replaces
+  // with a recorder. The read is guarded on having credentials, so on SERIAL_A it
+  // would be skipped for a reason that has nothing to do with the profile.
+  const inventory = parseV2Login(makeV2Reply({ noProfile: [SERIAL_B] }));
+  const { platform, local } = makePlatform({}, { outcome: { fatal: false, inventory } });
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(local.profileReads, [SERIAL_B]);
   } finally {
     platform['cleanup']();
   }
