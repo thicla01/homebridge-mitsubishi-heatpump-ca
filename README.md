@@ -335,14 +335,15 @@ supplied. Three shapes are worth recognising:
   later, named it correctly.
 - **`<name>: the unit reports setpoint changes as locked (global: …; local: …)`** — the
   unit has a control locked out (power, mode or setpoint), set somewhere outside this
-  plugin. In Mitsubishi's own documentation these three are exactly what a central
-  controller can lock on the *local remote*; whether the lock also reaches commands from
-  the Wi-Fi adapter is not known. So commands are still sent — refusing them on a guess
-  could leave a heat pump running that someone turned off — but if one does not take, the
-  lock is the likely reason, and the log says so beside the command: the adapter
-  acknowledges a write it ignores, so "Command accepted" is not proof. Read at the first
-  good poll and every half hour after, in any mode with local control; repeated only when
-  it changes. Every unit measured so far reports nothing locked.
+  plugin. Mitsubishi documents two places a lock comes from: kumo cloud's own installer
+  settings (*Settings > System Setup > Installer Settings > Prohibits*), which take those
+  controls away from the kumo app's user, and a central controller. Whether the adapter
+  also refuses them from a client that is not the kumo app is not known. So commands are
+  still sent — refusing them on a guess could leave a heat pump running that someone
+  turned off — but if one does not take, the lock is the likely reason, and the log says so
+  beside the command: the adapter acknowledges a write it ignores, so "Command accepted" is
+  not proof. Read at the first good poll and every half hour after, in any mode with local
+  control; repeated only when it changes. Every unit measured so far reports nothing locked.
 
 ### Local-only mode
 

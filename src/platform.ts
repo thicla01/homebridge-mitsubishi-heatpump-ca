@@ -2075,10 +2075,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
     this.log.warn(
       `${name}: the unit reports ${locked} changes as locked (global: ${describeLocks(read.global)}; `
-      + `local: ${describeLocks(read.local)}). In Mitsubishi's documentation that is a central `
-      + 'controller locking out the local remote; whether it also reaches commands from this '
-      + 'adapter is not known. They are still sent — but if one does not take, this is the likely '
-      + 'reason, since the adapter acknowledges a write it ignores. This plugin never sets a lock.',
+      + `local: ${describeLocks(read.local)}). Mitsubishi documents two sources: kumo cloud's own `
+      + "installer settings, which take those controls away from the kumo app's user, and a central "
+      + 'controller. Whether the adapter also refuses them from other clients is not known, so they '
+      + 'are still sent — but if one does not take, this lock is the likely reason, since the adapter '
+      + 'acknowledges a write it ignores. This plugin never sets a lock.',
     );
   }
 

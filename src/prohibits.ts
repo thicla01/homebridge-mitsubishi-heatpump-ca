@@ -13,12 +13,26 @@
  *   Reading the lock is how the log stops saying that.
  *
  * WHAT A "PROHIBIT" IS, IN MITSUBISHI'S OWN TERMS
- *   The remote-controller literature (PAC-YT52CRA, PAR-31MAA, PAR-U02MEDA) describes a
- *   central controller prohibiting exactly three local operations — ON/OFF, operation
- *   mode, preset temperature — on the LOCAL REMOTE, with a CENTRAL icon while it does.
- *   Those are this object's three fields. What that literature cannot say is whether a
- *   Wi-Fi adapter on CN105 counts as a local remote (and is refused) or as the central
- *   side (and is not). Found 2026-10-03, after the first version of this file.
+ *   Two sources, per the kumo cloud technician manual (§9.4 "Set Prohibits"): the
+ *   installer settings of kumo cloud itself — which take power, mode or setpoint away
+ *   from the kumo APP's user — and a central controller, whose prohibits kumo displays
+ *   but cannot change. The remote-controller literature (PAC-YT52CRA, PAR-31MAA,
+ *   PAR-U02MEDA) describes the second: a central controller locking those same three
+ *   operations on the LOCAL REMOTE, with a CENTRAL icon while it does. That `local` is
+ *   the kumo-set scope and `global` the central controller's is inferred from those two
+ *   sources and the names, not measured.
+ *
+ *   The manual also says what each lock does to the app's user, and it matches
+ *   controlsTouchedBy below: a power lock forbids turning a running unit off and
+ *   changing the mode of a stopped one, but allows a mode change while running; a mode
+ *   lock still allows turning off; a setpoint lock removes the arrows. The one place
+ *   this module over-warns is a mode lock on a stopped unit turned back on in its LAST
+ *   mode, which the manual allows — and contradicts in the same section, saying such a
+ *   unit must be restarted from an MHK2, not kumo cloud.
+ *
+ *   What neither document says is whether the ADAPTER refuses a locked command from a
+ *   client that is not the kumo app, or only the app hides its controls. Found
+ *   2026-10-03 and 2026-10-04, after the first version of this file.
  *
  * WHY WARN AND NEVER BLOCK
  *   What a real adapter does with a write to a locked control is UNMEASURED. It might

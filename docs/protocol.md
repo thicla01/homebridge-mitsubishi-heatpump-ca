@@ -123,6 +123,12 @@ cloud and shows up on the tile at the next LAN poll, within one 15 s cycle — v
 day. So the lag is in what the app displays, not in what it sends. When the two disagree,
 the LAN reading is the unit's actual state.
 
+The vendor states the rule itself: the kumo cloud user manual (Canadian edition, §4.7)
+requires a minimum difference of 1.5 °C between the two setpoints, and says the app
+maintains it automatically — even when the setpoints are set from an MHK2 controller.
+That last part is the app correcting another controller, not the unit refusing: a 0.5°
+band sent over the LAN was accepted and held, as recorded above.
+
 **Since 2.3.7 this plugin keeps the vendor's minimum in AUTO**, the vendor's way: an edge
 moved into the band pushes the other one away, one way only (`temperature.ts:
 enforceAutoBand`). Two departures from the app, both deliberate. When a scene or a Shortcut
@@ -215,7 +221,7 @@ reads three of these nodes; the rest is recorded so nobody has to guess again.
 | `initialSettings` | 31 numbered slots, all `0` on this unit, whose `profile.hasInitialSettings` is `false`. Almost certainly the installer function codes |
 | `schedule` | `events` 1-28, each `{active, inUse, day, time, settings:{mode, spCool, spHeat, vaneDir, fanSpeed}}` — the unit has its own scheduler |
 | `errorHistory` | `errors` 1-10, each `{error2char, error4char, timestamp}` |
-| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts. Those three are exactly the local operations Mitsubishi's remote-controller literature says a **central controller can prohibit on the local remote** (PAC-YT52CRA, PAR-31MAA, PAR-U02MEDA; a CENTRAL icon shows while they are). Whether the Wi-Fi adapter counts as a local remote, and so is itself refused, or acts as the central side, is **not known**. **Read by the plugin** since 2.3.8: at the first good poll and every 30 minutes, warning when `effective` changes and qualifying the log of any command that touches a locked control. Never enforced — see `src/prohibits.ts` |
+| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts, from two sources per the kumo technician manual (§9.4 "Set Prohibits"): kumo cloud's own installer settings, which take those controls away from the **kumo app's user** — a setpoint lock removes the arrows; a power lock forbids turning a running unit off or changing a stopped unit's mode; a mode lock still allows turning off — and a **central controller**, whose prohibits kumo shows but cannot change. The remote-controller literature (PAC-YT52CRA, PAR-31MAA, PAR-U02MEDA) describes the latter locking those three operations on the local remote, with a CENTRAL icon. `local` = the kumo-set scope and `global` = the central controller's is an inference from those two sources, not a measurement. Whether the **adapter** refuses a locked command from a client other than the kumo app, or only the app hides its controls, is **not known**. **Read by the plugin** since 2.3.8: at the first good poll and every 30 minutes, warning when `effective` changes and qualifying the log of any command that touches a locked control. Never enforced — see `src/prohibits.ts` |
 | `settings` | `rawITPFrame {frame, len, id}`: a raw-frame passthrough to the indoor unit |
 | `info` | `{}` |
 | `acoil` | `__action_failed` |
@@ -420,13 +426,21 @@ and `hasModeTest` are read but unmodelled.
 The same refinement reads five fields of `adapter.status`, the settings the user or an
 installer put on the adapter, and they can only take away:
 
-| Field | Effect | Same as |
-|---|---|---|
-| `userHasModeHeat: false` | HEAT off, and AUTO with it | pykumo, ANDed into its profile |
-| `userHasModeDry: false` | DRY off — the one rule that can remove a declared tile, because a tile that sends a mode the unit was told not to run is worse than none | pykumo |
-| `autoModePrevention: true` | AUTO hidden, HEAT kept — **but only when the unit's profile lists no auto setpoints**. Installers set the flag on units that run AUTO fine, and both reference clients override it this way | pykumo, ha_kumo_ws |
-| `userMaxHeatSetPoint` | Ceiling on **spHeat**, in heat and auto | ha_kumo_ws |
-| `userMinCoolSetPoint` | Floor on **spCool**, in cool, dry and auto | ha_kumo_ws |
+| Field | kumo installer setting | Effect | Same as |
+|---|---|---|---|
+| `userHasModeHeat: false` | System Type: *Cool only* | HEAT off, and AUTO with it | pykumo, ANDed into its profile |
+| `userHasModeDry: false` | Dehumidify/Dry: off | DRY off — the one rule that can remove a declared tile, because a tile that sends a mode the unit was told not to run is worse than none | pykumo |
+| `autoModePrevention: true` | Auto Mode: *No* | AUTO hidden, HEAT kept — **but only when the unit's profile lists no auto setpoints**. Installers set the flag on units that run AUTO fine, and both reference clients override it this way | pykumo, ha_kumo_ws |
+| `userMaxHeatSetPoint` | Max Heat Set Point (61–88 °F) | Ceiling on **spHeat**, in heat and auto | ha_kumo_ws |
+| `userMinCoolSetPoint` | Min Cool Set Point (61–88 °F) | Floor on **spCool**, in cool, dry and auto | ha_kumo_ws |
+
+The second column is the label the same setting carries in kumo cloud's installer
+settings (technician manual §13 "Terms and Definitions"; "Auto Mode" and "Display Offset"
+from the §9.4 screenshots), which is where an owner who skips the contractor PIN can see
+and change them. Two more of that manual's labels match the enumeration: **Display
+Offset** is `roomTempOffset`, and **Settings by Number** — "add a setting using the
+number code provided in an app note or another manual" — is the way into the function
+codes `initialSettings` holds.
 
 The caps are the user's energy limits, not the installer's: they only narrow, and cannot
 lower a heating floor. `0` means no cap (the measured GX15 reports `0` for both), and a cap

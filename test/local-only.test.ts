@@ -730,7 +730,8 @@ test('a lock is named once, with the control and where it comes from', async () 
 
     assert.strictEqual(locked().length, 1);
     assert.match(locked()[0], /setpoint changes as locked \(global/);
-    assert.match(locked()[0], /local remote/, 'and what Mitsubishi says such a lock is');
+    assert.match(locked()[0], /installer settings/, 'and the first source Mitsubishi documents');
+    assert.match(locked()[0], /central controller/, 'and the second');
     assert.match(locked()[0], /not known/, 'and that its reach to this adapter is unmeasured');
     assert.match(locked()[0], /local: setpoint/, 'and which scope set it');
     assert.match(locked()[0], /still sent/, 'and that nothing is being refused');
@@ -856,7 +857,7 @@ test('a locked setpoint write is STILL SENT, and the log says it may not take', 
     return true;
   };
   platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
-  const notes = () => warns.filter((w) => /may or may not reach this adapter/.test(w));
+  const notes = () => warns.filter((w) => /whether it reaches this adapter is not known/.test(w));
   try {
     await platform.discoverDevices();
     await platform['pollLocalDevices']();
@@ -878,7 +879,7 @@ test('the per-command note is at most once a minute, and only for a locked contr
   const { platform, local } = makePlatform();
   local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
   platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
-  const notes = () => warns.filter((w) => /may or may not reach this adapter/.test(w));
+  const notes = () => warns.filter((w) => /whether it reaches this adapter is not known/.test(w));
   try {
     await platform.discoverDevices();
     await platform['pollLocalDevices']();
