@@ -3,6 +3,7 @@ import { Agent, request as httpRequest } from 'http';
 import { isIP } from 'net';
 import { Logger } from 'homebridge';
 import { Commands, DeviceProfile, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
+import { UnitProhibits, parseProhibits } from './prohibits';
 
 /**
  * Local LAN control of Mitsubishi Kumo adapters.
@@ -47,6 +48,9 @@ export const STATUS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"status":{}}}}'
  * it carries one `minSetPoint` for every mode. See docs/protocol.md.
  */
 export const PROFILE_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"profile":{}}}}', 'utf8');
+
+/** The unit's lockouts. See src/prohibits.ts for why they are read and never enforced. */
+export const PROHIBITS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"prohibits":{}}}}', 'utf8');
 
 /**
  * A dedicated agent with keep-alive OFF.
@@ -716,6 +720,18 @@ export class LocalKumoClient {
     bounds('maximumSetPoints');
 
     return Object.keys(profile).length > 0 ? profile : null;
+  }
+
+  /**
+   * Ask the adapter which controls the unit reports as locked.
+   *
+   * Null when the read failed or the reply carried no usable `effective` scope —
+   * "cannot tell", which the caller must treat as no change rather than as "unlocked".
+   */
+  async getProhibits(serial: string): Promise<UnitProhibits | null> {
+    const { result } = await this.requestDetailed(serial, PROHIBITS_READ_BODY);
+    const indoorUnit = result?.indoorUnit as Record<string, unknown> | undefined;
+    return parseProhibits(indoorUnit?.prohibits);
   }
 
   /** Read and map the unit's current status locally, or null if unreachable. */

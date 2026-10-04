@@ -314,7 +314,7 @@ Local status polling every 15s
 ```
 
 The sweep runs only for units whose address neither the v2 reply nor `localControlIps`
-supplied. Two failure shapes are worth recognising:
+supplied. Three shapes are worth recognising:
 
 - **`the unit rejected our credentials on 3 requests in a row
   (device_authentication_error)`** — the password and cryptoSerial must both belong to
@@ -333,6 +333,15 @@ supplied. Two failure shapes are worth recognising:
   *Before 2.3.4 this line said "no answer" for every cause*, which sent people to hunt
   their network for what was a credential problem — while the poller, forty-five seconds
   later, named it correctly.
+- **`<name>: the unit reports setpoint changes as LOCKED (global: …; local: …)`** — the
+  unit itself has a control locked out (power, mode or setpoint), set somewhere outside
+  this plugin. Commands are still sent — whether a locked unit ignores them has not been
+  measured, and refusing them on a guess could leave a heat pump running that someone
+  turned off — but the adapter acknowledges a write it ignores, so a "Command accepted"
+  for that control cannot be read as "applied" while the lock lasts, and the log says so
+  beside the command. Read at the first good poll and every half hour after, in any mode
+  with local control; repeated only when it changes. Every unit measured so far reports
+  nothing locked.
 
 ### Local-only mode
 

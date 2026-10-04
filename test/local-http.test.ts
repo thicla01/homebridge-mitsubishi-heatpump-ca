@@ -28,6 +28,7 @@ import {
   buildLocalCommandBody,
   isLocalHost,
   PROFILE_READ_BODY,
+  PROHIBITS_READ_BODY,
   STATUS_READ_BODY,
 } from '../dist/local-api.js';
 import { makeLog } from './helpers';
@@ -953,6 +954,46 @@ test('an adapter with no profile node reports nothing rather than an empty profi
   const adapter = await startAdapter(json({ _api_error: 'serializer_error' }));
   try {
     assert.strictEqual(await makeClient(adapter.ip).getProfile(SERIAL), null);
+  } finally {
+    await adapter.close();
+  }
+});
+
+// ---- the unit's lockouts ---------------------------------------------------
+
+test('the lockout read asks for the prohibits node and parses what the real unit sent', async () => {
+  const adapter = await startAdapter(json({
+    r: {
+      indoorUnit: {
+        prohibits: {
+          global: { power: false, mode: false, setpoint: false },
+          local: { power: false, mode: false, setpoint: true },
+          effective: { power: false, mode: false, setpoint: true },
+        },
+      },
+    },
+  }));
+  try {
+    const out = await makeClient(adapter.ip).getProhibits(SERIAL);
+
+    assert.strictEqual(adapter.seen.length, 1, 'one exchange');
+    assert.strictEqual(adapter.seen[0].body, PROHIBITS_READ_BODY.toString('utf8'));
+    assert.ok(out);
+    assert.deepStrictEqual([...out.effective], ['setpoint']);
+    assert.deepStrictEqual([...out.local], ['setpoint']);
+    assert.deepStrictEqual([...out.global], []);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a refusal marker where the lockouts should be is "cannot tell", not "unlocked"', async () => {
+  // The adapter puts refusals INSIDE `r` (`__invalid_api_request`, `__ungettable`,
+  // `__action_failed`), not in `_api_error` — so the client sees a successful reply
+  // whose payload is a string. That must not read as three unlocked controls.
+  const adapter = await startAdapter(json({ r: { indoorUnit: { prohibits: '__invalid_api_request' } } }));
+  try {
+    assert.strictEqual(await makeClient(adapter.ip).getProhibits(SERIAL), null);
   } finally {
     await adapter.close();
   }

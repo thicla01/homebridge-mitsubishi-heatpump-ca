@@ -215,7 +215,7 @@ reads three of these nodes; the rest is recorded so nobody has to guess again.
 | `initialSettings` | 31 numbered slots, all `0` on this unit, whose `profile.hasInitialSettings` is `false`. Almost certainly the installer function codes |
 | `schedule` | `events` 1-28, each `{active, inUse, day, time, settings:{mode, spCool, spHeat, vaneDir, fanSpeed}}` — the unit has its own scheduler |
 | `errorHistory` | `errors` 1-10, each `{error2char, error4char, timestamp}` |
-| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts |
+| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts. **Read by the plugin** since 2.3.8: at the first good poll and every 30 minutes, warning when `effective` changes and qualifying the log of any command that touches a locked control. Never enforced — see `src/prohibits.ts` |
 | `settings` | `rawITPFrame {frame, len, id}`: a raw-frame passthrough to the indoor unit |
 | `info` | `{}` |
 | `acoil` | `__action_failed` |

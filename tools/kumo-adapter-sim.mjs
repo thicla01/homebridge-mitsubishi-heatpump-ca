@@ -48,6 +48,12 @@
 //                      authfail  always reject the token
 //                      busy      always answer `__no_memory` (retryable)
 //                      slow:MS   answer after MS milliseconds
+//                      locked:C  report control C (power, mode or setpoint) as locked
+//                                in indoorUnit.prohibits — locally and in effect.
+//                                Writes are STILL APPLIED: what a real adapter does
+//                                with a locked write is unmeasured, and a simulator
+//                                that guessed would agree with whatever we guessed.
+//                                This exists to show the plugin's warning, nothing more.
 //
 // Not shipped to npm — `files` in package.json covers dist/ only.
 
@@ -258,6 +264,20 @@ function handle(u, req, res, rawBody) {
       log(u, `applied ${JSON.stringify(write)}`);
     }
     return reply(res, { r: { indoorUnit: { status: { ...u.status } } } });
+  }
+
+  // Lockouts, in the shape a real GX15 returned on 2026-10-03 (all false there).
+  // `--fault i=locked:C` reports one; see the option's note for why writes still apply.
+  if (c.indoorUnit && c.indoorUnit.prohibits) {
+    const locked = u.fault.startsWith('locked:') ? u.fault.slice(7) : '';
+    const scope = (on) => ({
+      power: on && locked === 'power',
+      mode: on && locked === 'mode',
+      setpoint: on && locked === 'setpoint',
+    });
+    return reply(res, {
+      r: { indoorUnit: { prohibits: { global: scope(false), local: scope(true), effective: scope(true) } } },
+    });
   }
 
   // The capability profile, as a real adapter serves it. Measured on a GX15 on

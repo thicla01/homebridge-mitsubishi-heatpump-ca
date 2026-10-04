@@ -37,6 +37,7 @@ import { describeLocalFailure } from '../dist/local-api.js';
 import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { DeviceProfileCallback, DeviceUpdateCallback } from '../dist/kumo-api.js';
 import type { LocalDeviceCreds, LocalKumoClient } from '../dist/local-api.js';
+import type { UnitProhibits } from '../dist/prohibits.js';
 import type {
   Commands, DeviceProfile, DeviceStatus, KumoConfig, LocalDeviceConfig, Site, Zone,
 } from '../dist/settings.js';
@@ -177,7 +178,7 @@ function makeKumoStub(): KumoStub {
 
 interface LocalClientStub extends Pick<LocalKumoClient,
   'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'getStatusDetailed'
-  | 'sendCommand' | 'getProfile'> {
+  | 'sendCommand' | 'getProfile' | 'getProhibits'> {
   creds: Map<string, LocalDeviceCreds>;
   statusResult: Partial<DeviceStatus> | null;
   /**
@@ -187,6 +188,13 @@ interface LocalClientStub extends Pick<LocalKumoClient,
    */
   profileResult: Partial<DeviceProfile> | null;
   profileReads: string[];
+  /**
+   * What the adapter answers for `indoorUnit.prohibits`. Null by default — "cannot
+   * tell", which changes nothing — so every test written before the read existed
+   * stays exactly as quiet as it was.
+   */
+  prohibitsResult: UnitProhibits | null;
+  prohibitsReads: string[];
   reads: string[];
 }
 
@@ -227,6 +235,12 @@ function makeLocalClientStub(over: Partial<LocalClientStub> = {}): LocalClientSt
     },
     profileResult: null,
     profileReads: [],
+    prohibitsResult: null,
+    prohibitsReads: [],
+    async getProhibits(serial: string) {
+      stub.prohibitsReads.push(serial);
+      return stub.prohibitsResult;
+    },
     async getProfile(serial: string) {
       stub.profileReads.push(serial);
       return stub.profileResult;
@@ -655,6 +669,221 @@ test('a unit that keeps failing its local polls is named in a warning, once', as
     await poll();
     await poll();
     assert.strictEqual(named().length, 2);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+// ---- the unit's lockouts ---------------------------------------------------
+//
+// indoorUnit.prohibits, found by enumerating a real GX15 on 2026-10-03. The adapter
+// acknowledges writes it ignores, so while a lock is on "Command accepted by API"
+// cannot be read as "applied". These pin that the log says so — once per change, on
+// a schedule that adds next to nothing to the adapter's load — and that nothing else
+// changes: what the firmware does with a locked write is unmeasured, so commands go
+// on being sent. See src/prohibits.ts.
+
+const UNLOCKED: UnitProhibits = { effective: new Set(), global: new Set(), local: new Set() };
+const SETPOINT_LOCKED_LOCALLY: UnitProhibits = {
+  effective: new Set(['setpoint']), global: new Set(), local: new Set(['setpoint']),
+};
+
+test('an unlocked unit is read once at the first good poll, and nothing is said', async () => {
+  const warns: string[] = [];
+  const infos: string[] = [];
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = UNLOCKED; // what every unit measured so far reports
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+
+    assert.deepStrictEqual(local.prohibitsReads, [SERIAL],
+      'the control: it WAS read, so the silence below means something');
+    assert.deepStrictEqual(warns.filter((w) => /lock/i.test(w)), []);
+    assert.deepStrictEqual(infos.filter((i) => /lock/i.test(i)), [],
+      'no "no longer locked" for a lock that never was');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a lock is named once, with the control and where it comes from', async () => {
+  const warns: string[] = [];
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  const locked = () => warns.filter((w) => /LOCKED/.test(w));
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+
+    assert.strictEqual(locked().length, 1);
+    assert.match(locked()[0], /setpoint changes as LOCKED/);
+    assert.match(locked()[0], /local: setpoint/, 'and which scope set it');
+    assert.match(locked()[0], /still sent/, 'and that nothing is being refused');
+    assert.match(locked()[0], /never sets a lock/, 'and that the plugin did not cause it');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the lockouts are not re-read on every poll — half an hour apart', async () => {
+  // Two extra requests an hour per adapter, not four a minute: this is diagnosis,
+  // on adapters that hold about one connection.
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = UNLOCKED;
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+    await platform['pollLocalDevices']();
+    await platform['pollLocalDevices']();
+    assert.deepStrictEqual(local.prohibitsReads, [SERIAL], 'three polls, one read');
+
+    // Age the last read past the window, as half an hour of wall time would.
+    platform['prohibitsCheckedAt'].set(SERIAL, Date.now() - 30 * 60 * 1000 - 1);
+    await platform['pollLocalDevices']();
+    assert.deepStrictEqual(local.prohibitsReads, [SERIAL, SERIAL], 'and again once it is due');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a lock that persists is not repeated, and one that clears is said once', async () => {
+  const warns: string[] = [];
+  const infos: string[] = [];
+  const { platform, local } = makePlatform();
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  const due = () => platform['prohibitsCheckedAt'].set(SERIAL, 0);
+  try {
+    await platform.discoverDevices();
+
+    local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
+    await platform['pollLocalDevices']();
+    due();
+    await platform['pollLocalDevices']();
+    assert.strictEqual(warns.filter((w) => /LOCKED/.test(w)).length, 1,
+      'still locked half an hour later is not news');
+
+    local.prohibitsResult = UNLOCKED;
+    due();
+    await platform['pollLocalDevices']();
+    due();
+    await platform['pollLocalDevices']();
+    assert.strictEqual(infos.filter((i) => /no longer reports any control as locked/.test(i)).length, 1);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a read that cannot tell does not clear a standing lock', async () => {
+  // `null` is a failed read or a refusal marker. Treating it as "unlocked" would
+  // announce a lock cleared that nobody cleared, and drop the per-command note.
+  const infos: string[] = [];
+  const { platform, local } = makePlatform();
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  try {
+    await platform.discoverDevices();
+    local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
+    await platform['pollLocalDevices']();
+
+    local.prohibitsResult = null;
+    platform['prohibitsCheckedAt'].set(SERIAL, 0);
+    await platform['pollLocalDevices']();
+
+    assert.deepStrictEqual(infos.filter((i) => /no longer/.test(i)), []);
+    const handler = platform['accessoryHandlers'][0];
+    assert.deepStrictEqual([...handler['lockedControls']], ['setpoint'],
+      'and the accessory keeps qualifying its log');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a lockout read that fails waits for the next window instead of retrying every poll', async () => {
+  // The timestamp is taken BEFORE the request. Taken after a success instead, an
+  // adapter that refuses this node would be asked for it on every single poll.
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = null; // the adapter will not say
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+    await platform['pollLocalDevices']();
+    await platform['pollLocalDevices']();
+    assert.deepStrictEqual(local.prohibitsReads, [SERIAL]);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a poll that failed does not go on to ask for the lockouts', async () => {
+  // The read rides on a status read that worked, so it never adds a request to an
+  // adapter that has just failed to answer one.
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = UNLOCKED;
+  local.statusResult = null;
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+    assert.deepStrictEqual(local.prohibitsReads, []);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a locked setpoint write is STILL SENT, and the log says it may not take', async () => {
+  // THE invariant. Refusing a write on an unmeasured assumption about the firmware
+  // could leave a heat pump running that someone turned off; noting it costs a line.
+  const warns: string[] = [];
+  const sent: unknown[] = [];
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
+  local.sendCommand = async (_serial: string, commands: unknown) => {
+    sent.push(commands);
+    return true;
+  };
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  const notes = () => warns.filter((w) => /may not take effect/.test(w));
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+    const handler = platform['accessoryHandlers'][0];
+
+    const ok = await handler['sendDeviceCommand']({ spHeat: 20 });
+
+    assert.strictEqual(ok, true, 'the command went through');
+    assert.deepStrictEqual(sent, [{ spHeat: 20 }], 'exactly as asked — nothing withheld');
+    assert.strictEqual(notes().length, 1);
+    assert.match(notes()[0], /setpoint changes as locked/);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the per-command note is at most once a minute, and only for a locked control', async () => {
+  const warns: string[] = [];
+  const { platform, local } = makePlatform();
+  local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  const notes = () => warns.filter((w) => /may not take effect/.test(w));
+  try {
+    await platform.discoverDevices();
+    await platform['pollLocalDevices']();
+    const handler = platform['accessoryHandlers'][0];
+
+    await handler['sendDeviceCommand']({ fanSpeed: 'quiet' });
+    assert.strictEqual(notes().length, 0, 'fan speed is under no lock');
+
+    await handler['sendDeviceCommand']({ spHeat: 20 });
+    await handler['sendDeviceCommand']({ spHeat: 20.5 });
+    await handler['sendDeviceCommand']({ spCool: 24 });
+    assert.strictEqual(notes().length, 1, 'a slider drag is one note, not three');
+
+    handler['lockNoteAt'] = Date.now() - 60_001;
+    await handler['sendDeviceCommand']({ spHeat: 21 });
+    assert.strictEqual(notes().length, 2, 'and the next one after a minute');
   } finally {
     platform['cleanup']();
   }

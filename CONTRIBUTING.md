@@ -63,7 +63,11 @@ config edit. Useful flags: `--humidity` (declares a paired sensor, which is what
 spend a request on the sensor leaves), `--strict` (rejects two overlapping requests to
 one unit, the way an adapter that tolerates a single connection does), `--bind` (listen
 on the LAN address to drive a Homebridge on another machine), and `--fault i=KIND` with
-KIND in `mute` / `authfail` / `busy` / `slow:MS`. Every port in the range has to be free;
+KIND in `mute` / `authfail` / `busy` / `slow:MS` / `locked:C`. The last reports control `C`
+(`power`, `mode` or `setpoint`) as locked in `indoorUnit.prohibits` and **still applies
+writes**: what a real adapter does with a locked write is unmeasured, and a simulator
+that guessed would agree with whatever we guessed — it exists to show the warning, nothing
+more. Every port in the range has to be free;
 a collision exits with the port named, because a simulator that half-starts produces
 results that read like a bug in the plugin (it did, once — see below).
 

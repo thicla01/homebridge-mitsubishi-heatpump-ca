@@ -53,7 +53,12 @@ const LIVE: Partial<DeviceStatus> = {
  * has to be classified by a human instead of quietly falling through whichever
  * filter happens not to catch it.
  */
-const NOT_CHARACTERISTIC_HANDLERS = ['getSiteId', 'getDeviceSerial', 'getThresholdTemperature'];
+// Platform accessors and internal helpers: none is bound to an `onGet`, so none has
+// a HomeKit read to refuse. getDisplayName joined with the prohibits warning, which
+// names the unit the way the user does rather than by serial.
+const NOT_CHARACTERISTIC_HANDLERS = [
+  'getSiteId', 'getDeviceSerial', 'getDisplayName', 'getThresholdTemperature',
+];
 
 function allGetters(): string[] {
   return Object.getOwnPropertyNames(KumoThermostatAccessory.prototype)

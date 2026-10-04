@@ -12,6 +12,7 @@ import {
 import { join } from 'path';
 import { EveHistoryStore, EveHistoryFeed, attachEveHistory } from './eve-history';
 import { throwCommunicationFailure } from './no-response';
+import { LockedControl, controlsTouchedBy, describeLocks } from './prohibits';
 
 /**
  * Fan speed <-> HomeKit RotationSpeed, on the Fanv2 service.
@@ -67,6 +68,13 @@ export class KumoThermostatAccessory {
   // history and the mirror still want the last real reading), it just stops being
   // offered to HomeKit as current. See failIfUnreachable.
   private unreachableReason: string | null = null;
+  // Controls the unit reports as locked (indoorUnit.prohibits.effective), as last
+  // read by the platform. Never consulted to refuse a write — see src/prohibits.ts.
+  private lockedControls: ReadonlySet<LockedControl> = new Set();
+  // When a command last drew the "locked" note, so a slider drag or a scene burst
+  // cannot fill the log with it. Once a minute is often enough to sit beside the
+  // command lines someone is reading when a change did not take.
+  private lockNoteAt = 0;
   private hasHumiditySensor: boolean = false;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
@@ -1072,6 +1080,11 @@ export class KumoThermostatAccessory {
     return this.siteId;
   }
 
+  /** The name the user sees, for platform log lines about this unit. */
+  public getDisplayName(): string {
+    return this.accessory.displayName;
+  }
+
   public getDeviceSerial(): string {
     return this.deviceSerial;
   }
@@ -1179,6 +1192,7 @@ export class KumoThermostatAccessory {
         // within the window.
         this.lastLocalUpdateTs = Date.now();
         this.platform.log.debug(`[LOCAL] ${this.accessory.displayName}: command sent locally`);
+        this.noteLockedCommand(commands);
         return true;
       }
       if (localOnly) {
@@ -1663,6 +1677,45 @@ export class KumoThermostatAccessory {
   /** Evidence of contact, from any transport. Idempotent. */
   public clearUnreachable(): void {
     this.unreachableReason = null;
+  }
+
+  /**
+   * The controls the unit currently reports as locked. Called by the platform, which
+   * owns the reading and its schedule; this side only uses it to qualify the log.
+   */
+  public setLockedControls(locks: ReadonlySet<LockedControl>): void {
+    this.lockedControls = locks;
+  }
+
+  /**
+   * After a command the adapter acknowledged, say so if it touched a locked control.
+   *
+   * The adapter does not reject a write it ignores, so while a lock is on "sent" is
+   * not "applied", and the line a reader finds next to "Command accepted by API" is
+   * where that has to be said. Logging only: the command already went out, and will
+   * keep going out — refusing it on an unmeasured assumption about how the firmware
+   * treats a locked write could leave a heat pump running that someone turned off.
+   */
+  private noteLockedCommand(commands: Commands): void {
+    if (this.lockedControls.size === 0) {
+      return;
+    }
+    const unitIsOn = this.currentStatus
+      ? this.currentStatus.power === 1 && this.currentStatus.operationMode !== 'off'
+      : null;
+    const hit = controlsTouchedBy(commands, unitIsOn).filter((c) => this.lockedControls.has(c));
+    if (hit.length === 0) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lockNoteAt < 60_000) {
+      return;
+    }
+    this.lockNoteAt = now;
+    this.platform.log.warn(
+      `[LOCAL] ${this.accessory.displayName}: sent, but the unit reports ${describeLocks(new Set(hit))} `
+      + 'changes as locked — this one may not take effect, and the adapter would acknowledge it either way.',
+    );
   }
 
   /** See `no-response.ts` — the platform silences handler-less accessories the same way. */

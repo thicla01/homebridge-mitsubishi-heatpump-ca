@@ -25,6 +25,7 @@ import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
 import { KumoV2Client, V2Inventory, v2Endpoint } from './kumo-v2';
 import { MirrorController } from './mirror';
 import { throwCommunicationFailure, UNCONFIGURED_GUARD_CHARACTERISTICS } from './no-response';
+import { UnitProhibits, describeLocks } from './prohibits';
 
 /** Stand-in siteId for units declared in config; local-only mode has no site. */
 const LOCAL_ONLY_SITE_ID = 'local-only';
@@ -51,6 +52,14 @@ const LOCAL_CRED_RETRY_WAIT_MS = 10000;
  * within ~45s at the default 15s interval.
  */
 const LOCAL_POLL_WARN_AFTER = 3;
+/**
+ * How often each unit's lockouts are re-read (indoorUnit.prohibits, src/prohibits.ts).
+ *
+ * A lock is a state someone sets deliberately — an installer, a central controller —
+ * and rarely, so this does not need the poll's cadence. Half an hour catches one set
+ * while the plugin runs, at two extra requests an hour per adapter.
+ */
+const PROHIBITS_RECHECK_MS = 30 * 60 * 1000;
 
 /**
  * Stands in for an address the export does not know, in exportLocalSecrets.
@@ -378,6 +387,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // Consecutive failed local polls per serial, for the latched unreachability
   // warning (see noteLocalPollFailure). Reset by the first successful poll.
   private readonly localPollFailures: Map<string, number> = new Map();
+  // When each unit's lockouts were last asked for, and what they were. The second is
+  // what makes the warning fire on a CHANGE rather than every half hour.
+  private readonly prohibitsCheckedAt: Map<string, number> = new Map();
+  private readonly prohibitsSeen: Map<string, string> = new Map();
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -1892,6 +1905,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         if (status) {
           handler.updateFromLocal(status);
           this.noteLocalPollSuccess(handler);
+          // After a read that worked, so the adapter is known to be answering.
+          await this.checkProhibits(handler);
         } else {
           // A null status is not an exception: the adapter answers HTTP 200 with
           // `{"_api_error": ...}` to a bad credential, and a read returns nothing
@@ -1910,6 +1925,65 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         this.noteLocalPollFailure(handler, (error as Error).message);
       }
     }
+  }
+
+  /**
+   * Re-read a unit's lockouts when they are due, and say so when they change.
+   *
+   * The first read happens on the first poll that succeeds; after that, every
+   * PROHIBITS_RECHECK_MS. The timestamp is taken BEFORE the request, so a read that
+   * fails waits for the next window rather than retrying every poll — this is
+   * diagnosis, and it must not add load to an adapter that just failed to answer it.
+   *
+   * Warns on a lock appearing or changing, logs once when the last one clears, and is
+   * silent otherwise — including at startup when nothing is locked, which is the case
+   * on every unit measured so far. A read that cannot tell ("cannot tell" is null) is
+   * no change: it neither raises nor clears a warning.
+   *
+   * What a real adapter does with a write to a locked control is unmeasured, so the
+   * accessory goes on sending — see src/prohibits.ts.
+   */
+  private async checkProhibits(handler: KumoThermostatAccessory): Promise<void> {
+    const local = this.localClient;
+    if (!local) {
+      return;
+    }
+    const serial = handler.getDeviceSerial();
+    const now = Date.now();
+    const last = this.prohibitsCheckedAt.get(serial);
+    if (last !== undefined && now - last < PROHIBITS_RECHECK_MS) {
+      return;
+    }
+    this.prohibitsCheckedAt.set(serial, now);
+
+    let read: UnitProhibits | null = null;
+    try {
+      read = await local.getProhibits(serial);
+    } catch {
+      return;
+    }
+    if (!read) {
+      return;
+    }
+
+    const locked = describeLocks(read.effective);
+    const before = this.prohibitsSeen.get(serial);
+    this.prohibitsSeen.set(serial, locked);
+    handler.setLockedControls(read.effective);
+    if (before === locked || (before === undefined && locked === 'none')) {
+      return;
+    }
+    const name = handler.getDisplayName();
+    if (locked === 'none') {
+      this.log.info(`${name}: the unit no longer reports any control as locked.`);
+      return;
+    }
+    this.log.warn(
+      `${name}: the unit reports ${locked} changes as LOCKED (global: ${describeLocks(read.global)}; `
+      + `local: ${describeLocks(read.local)}). HomeKit changes to them are still sent, but the `
+      + 'unit may ignore them — and the adapter acknowledges a write it ignores, so "Command '
+      + 'accepted" cannot be read as "applied" while this lasts. This plugin never sets a lock.',
+    );
   }
 
   /**
