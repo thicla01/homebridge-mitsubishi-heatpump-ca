@@ -230,13 +230,21 @@ that only checks for `_api_error` takes them for data.
 does not expose it, so the LAN secrets cannot be recovered from the device through this
 API — which is now a statement about the whole surface rather than about five nodes.
 
-**Which `password` is in `adapter.status` is still unknown**, and the enumeration did not
-settle it. It sits among mutable settings while `adapter.info` holds the immutable
-identity, so the split is settings-versus-identity rather than LAN-versus-wifi. What the
-enumeration does add is that no `cryptoSerial` sits beside it — which is what you would
-expect if this is the **wifi** password, and leaves the LAN-password reading needing an
-explanation for why only half the pair is present. Do not cite the field as evidence about
-the LAN secrets either way.
+**The `password` in `adapter.status` is most likely the LAN API password**, held
+write-only. The evidence is structural rather than measured. The cloud's v2 record for a
+unit (pykumo's `examples/server-config-nozones-sanitized.json`, values redacted there)
+keeps that unit's LAN `password` among the same neighbours this node has — `roomTempOffset`,
+`ledDisabled`, the user caps (as `minCoolSetpoint` / `maxHeatSetpoint`), an auto-mode flag
+(`autoModeEnabled`), the mode switches (`overrideSettings`), `rssi` — while the **wifi**
+credentials are a separate, site-level object, `network {name, password}`. On the adapter,
+the wifi side plausibly lives under `localNetwork`, the node that refuses as a whole.
+
+That same cloud record also holds `cryptoSerial` and `cryptoKeySet`, and neither appears
+anywhere on the adapter's surface. So the answer to "why a password but no cryptoSerial"
+is that the adapter's settings include the password the app provisions, and the crypto
+identity was never one of them — it is held cloud-side. This reverses the reading recorded
+here when the field was first seen (that it was probably the wifi password). Still an
+inference from shapes: do not cite it as proof.
 
 **Two things worth not touching.** `settings.rawITPFrame` is a passthrough to the indoor
 unit's own serial protocol — the deepest write surface on the device, and nothing here
@@ -304,6 +312,16 @@ reply fetched 2026-09-12 matched a capture taken the day before the 2026-07-31 c
 from a backup still authenticated weeks after. The secrets were **withheld from the API,
 not rotated**.
 
+A plausible reason the v3 API could withhold them at no cost to its own app: the Comfort
+app does not use the per-device password at all. An analysis of the decompiled app
+([KTibow/comfort-decompilation](https://github.com/KTibow/comfort-decompilation), April
+2025) describes it authenticating through the cloud with a key built into the app,
+combined with the `cryptoSerial`, a "crypto slot" and a one-time challenge — where the
+Kumo Cloud app used the device-specific password over the LAN, as this plugin does. v3 is
+the Comfort app's backend, so the password was vestigial there. That analysis is the
+source for the mechanism; nothing in this plugin uses, or should use, the built-in key,
+which is the same in every copy of the app.
+
 What is NOT known is what a full re-pairing does. Nobody has measured it, and it is the
 only moment at which the two ends could come to hold the same value (the `⌐3` Bluetooth
 provisioning session), so it is the one plausible trigger. Two cheap hardware-derivation
@@ -330,6 +348,11 @@ Worth recording rather than acting on: a named key *set* is the vocabulary of a 
 derivation tests above. If the letter is the same for everyone it is a scheme identifier
 rather than a per-device marker — and therefore *not* a canary that would reveal a
 regenerated secret, which is the thing that would actually be useful.
+
+A possible counterpart, unconfirmed: the Comfort app analysis cited above names a "crypto
+slot" that goes into its authentication alongside the `cryptoSerial`. A slot selected from
+a set is what `cryptoKeySet` sounds like. Same caution as the rest of this section — a
+name, not a measurement.
 
 ### Wire format
 
