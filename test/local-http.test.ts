@@ -29,6 +29,7 @@ import {
   isLocalHost,
   PROFILE_READ_BODY,
   PROHIBITS_READ_BODY,
+  ADAPTER_STATUS_READ_BODY,
   STATUS_READ_BODY,
 } from '../dist/local-api.js';
 import { makeLog } from './helpers';
@@ -996,5 +997,58 @@ test('a refusal marker where the lockouts should be is "cannot tell", not "unloc
     assert.strictEqual(await makeClient(adapter.ip).getProhibits(SERIAL), null);
   } finally {
     await adapter.close();
+  }
+});
+
+// ---- the adapter's own settings ---------------------------------------------
+
+/** adapter.status as the real GX15 returned it on 2026-10-03, minus nothing. */
+const REAL_ADAPTER_STATUS = {
+  localNetwork: { stationMode: { RSSI: -53, SSID: 'Mitsu' } },
+  autoModePrevention: false,
+  userMinCoolSetPoint: 0,
+  userMaxHeatSetPoint: 0,
+  name: 'Salon',
+  runState: 'normal',
+  uptime: 347585,
+  roomTempOffset: 0,
+  password: '__invalid_api_request',
+  userHasModeDry: true,
+  userHasModeHeat: true,
+  ledDisabled: false,
+  serverHostname: 'geo-rev2-b.kumocloud.com',
+  receiverRelay: 'none',
+};
+
+test('the settings read asks for adapter.status and keeps exactly five fields', async () => {
+  const adapter = await startAdapter(json({ r: { adapter: { status: REAL_ADAPTER_STATUS } } }));
+  try {
+    const out = await makeClient(adapter.ip).getUserSettings(SERIAL);
+
+    assert.strictEqual(adapter.seen.length, 1, 'one exchange');
+    assert.strictEqual(adapter.seen[0].body, ADAPTER_STATUS_READ_BODY.toString('utf8'));
+    assert.deepStrictEqual(out, {
+      userHasModeHeat: true, userHasModeDry: true, autoModePrevention: false,
+      userMaxHeatSetPoint: 0, userMinCoolSetPoint: 0,
+    }, 'raw values — what 0 means is the caller\'s decision — and nothing else: no password');
+  } finally {
+    await adapter.close();
+  }
+});
+
+test('a settings field of the wrong type is dropped, and nothing usable is null', async () => {
+  const adapter = await startAdapter(json({
+    r: { adapter: { status: { userHasModeHeat: 'false', userMaxHeatSetPoint: '22', autoModePrevention: true } } },
+  }));
+  try {
+    assert.deepStrictEqual(await makeClient(adapter.ip).getUserSettings(SERIAL), { autoModePrevention: true });
+  } finally {
+    await adapter.close();
+  }
+  const empty = await startAdapter(json({ r: { adapter: { status: '__invalid_api_request' } } }));
+  try {
+    assert.strictEqual(await makeClient(empty.ip).getUserSettings(SERIAL), null);
+  } finally {
+    await empty.close();
   }
 });

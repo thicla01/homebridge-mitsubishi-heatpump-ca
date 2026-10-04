@@ -497,6 +497,23 @@ export interface DeviceProfile {
   hasStandby: boolean;
   minimumSetPoints: { cool: number; heat: number; auto: number };
   maximumSetPoints: { cool: number; heat: number; auto: number };
+  // The three below come from the adapter's own settings (adapter.status), not from
+  // the unit's capability profile, and only the local-profile path fills them in
+  // (platform.ts:refineProfilesFromAdapter). Absent means "no restriction", which is
+  // what every other source of a profile has always meant.
+  //
+  // False hides AUTO from the mode picker. Set from `autoModePrevention` under the
+  // rule pykumo and ha_kumo_ws both apply: honoured only when the unit's own profile
+  // lists no auto setpoints, because installers set the flag on units that run AUTO
+  // fine. HEAT is unaffected — that is `hasModeHeat`.
+  hasModeAuto?: boolean;
+  // A ceiling on the HEATING setpoint and a floor on the COOLING one, set by the user
+  // in the vendor app (`userMaxHeatSetPoint` / `userMinCoolSetPoint`). They apply by
+  // FIELD — spHeat in heat and auto, spCool in cool, dry and auto — and can only
+  // narrow a range, never widen it: they are not the installer limits, and cannot
+  // lower a heating floor. See temperature.ts:capRange.
+  userMaxHeatSetPoint?: number;
+  userMinCoolSetPoint?: number;
 }
 
 // ---- Vane and fan-speed vocabularies --------------------------------------

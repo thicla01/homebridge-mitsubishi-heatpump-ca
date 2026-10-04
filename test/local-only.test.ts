@@ -36,7 +36,7 @@ import { KumoAPI } from '../dist/kumo-api.js';
 import { describeLocalFailure } from '../dist/local-api.js';
 import { KumoThermostatAccessory } from '../dist/accessory.js';
 import type { DeviceProfileCallback, DeviceUpdateCallback } from '../dist/kumo-api.js';
-import type { LocalDeviceCreds, LocalKumoClient } from '../dist/local-api.js';
+import type { AdapterUserSettings, LocalDeviceCreds, LocalKumoClient } from '../dist/local-api.js';
 import type { UnitProhibits } from '../dist/prohibits.js';
 import type {
   Commands, DeviceProfile, DeviceStatus, KumoConfig, LocalDeviceConfig, Site, Zone,
@@ -178,7 +178,7 @@ function makeKumoStub(): KumoStub {
 
 interface LocalClientStub extends Pick<LocalKumoClient,
   'setCreds' | 'clearCreds' | 'hasLocal' | 'getIp' | 'getStatus' | 'getStatusDetailed'
-  | 'sendCommand' | 'getProfile' | 'getProhibits'> {
+  | 'sendCommand' | 'getProfile' | 'getProhibits' | 'getUserSettings'> {
   creds: Map<string, LocalDeviceCreds>;
   statusResult: Partial<DeviceStatus> | null;
   /**
@@ -195,6 +195,9 @@ interface LocalClientStub extends Pick<LocalKumoClient,
    */
   prohibitsResult: UnitProhibits | null;
   prohibitsReads: string[];
+  /** What the adapter answers for adapter.status. Null by default, like the others. */
+  userSettingsResult: AdapterUserSettings | null;
+  userSettingsReads: string[];
   reads: string[];
 }
 
@@ -237,6 +240,12 @@ function makeLocalClientStub(over: Partial<LocalClientStub> = {}): LocalClientSt
     profileReads: [],
     prohibitsResult: null,
     prohibitsReads: [],
+    userSettingsResult: null,
+    userSettingsReads: [],
+    async getUserSettings(serial: string) {
+      stub.userSettingsReads.push(serial);
+      return stub.userSettingsResult;
+    },
     async getProhibits(serial: string) {
       stub.prohibitsReads.push(serial);
       return stub.prohibitsResult;
@@ -1190,6 +1199,156 @@ test('a unit with no local credentials is not asked', async () => {
   try {
     await platform.discoverDevices();
     assert.deepStrictEqual(local.profileReads, []);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+// ---- what the adapter's own settings take away -----------------------------
+//
+// adapter.status carries settings that restrict the profile: the two mode switches
+// and autoModePrevention (pykumo ANDs them into its profile) and the user's two
+// setpoint caps (ha_kumo_ws narrows its ranges with them). Every rule only removes.
+
+/** adapter.status as the real GX15 reported it: nothing restricted. */
+const REAL_SETTINGS: AdapterUserSettings = {
+  userHasModeHeat: true, userHasModeDry: true, autoModePrevention: false,
+  userMaxHeatSetPoint: 0, userMinCoolSetPoint: 0,
+};
+
+/** The published HeaterCooler characteristic of the first registered accessory. */
+function published(spies: Spies, char: unknown) {
+  const heaterCooler = registered(spies)[0].getService(Service.HeaterCooler);
+  assert.ok(heaterCooler, 'the climate service was published');
+  return heaterCooler.chars.get(char)?.props as Record<string, unknown> | undefined;
+}
+
+test('the real unit\'s settings restrict nothing, and nothing is said about them', async () => {
+  const infos: string[] = [];
+  const { platform, kumo, local } = makePlatform({
+    localDevices: [{ deviceSerial: SERIAL, ip: DEVICE.ip, password: DEVICE.password, cryptoSerial: DEVICE.cryptoSerial }],
+  });
+  local.profileResult = ADAPTER_PROFILE;
+  local.userSettingsResult = REAL_SETTINGS;
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  try {
+    await platform.discoverDevices();
+
+    assert.deepStrictEqual(local.userSettingsReads, [SERIAL], 'the control: they WERE read');
+    const profile = effectiveProfile(kumo, SERIAL);
+    assert.strictEqual(profile.hasModeHeat, true);
+    assert.strictEqual(profile.hasModeAuto, undefined);
+    assert.strictEqual(profile.userMaxHeatSetPoint, undefined, '0 is "no cap"');
+    assert.strictEqual(profile.userMinCoolSetPoint, undefined);
+    assert.strictEqual(profile.hasModeDry, false, 'userHasModeDry true cannot ADD a tile either');
+    assert.deepStrictEqual(infos.filter((i) => /settings on the adapter/.test(i)), []);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('heat switched off on the adapter takes HEAT and AUTO out of the picker', async () => {
+  const { platform, local, spies } = makePlatform();
+  local.profileResult = ADAPTER_PROFILE;
+  local.userSettingsResult = { ...REAL_SETTINGS, userHasModeHeat: false };
+  try {
+    await platform.discoverDevices();
+    const modes = published(spies, Characteristic.TargetHeaterCoolerState)?.validValues;
+    assert.deepStrictEqual(modes, [Characteristic.TargetHeaterCoolerState.COOL]);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('dry switched off on the adapter removes a Dry tile the config declared', async () => {
+  // The one rule that can remove a tile on upgrade, and deliberately: the unit has
+  // been told not to dry, and a tile that sends a mode it will not run is worse than
+  // none. pykumo applies the same switch.
+  const { platform, local, spies } = makePlatform(); // DEVICE declares hasModeDry
+  local.userSettingsResult = { ...REAL_SETTINGS, userHasModeDry: false };
+  try {
+    await platform.discoverDevices();
+    assert.ok(!registered(spies)[0].getServiceById(Service.Switch, 'dry'), 'the Dry tile is gone');
+    assert.ok(registered(spies)[0].getServiceById(Service.Switch, 'fan-only'),
+      'and only that one — the Fan-only tile it also declared stays');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('autoModePrevention leaves AUTO on a unit whose profile lists auto setpoints', async () => {
+  // pykumo and ha_kumo_ws both override the flag this way: installers set it on
+  // units that run AUTO fine. The GX15's profile lists auto setpoints, so AUTO stays.
+  const infos: string[] = [];
+  const { platform, local, spies } = makePlatform();
+  local.profileResult = ADAPTER_PROFILE;
+  local.userSettingsResult = { ...REAL_SETTINGS, autoModePrevention: true };
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  try {
+    await platform.discoverDevices();
+    const modes = published(spies, Characteristic.TargetHeaterCoolerState)?.validValues as number[];
+    assert.ok(modes.includes(Characteristic.TargetHeaterCoolerState.AUTO));
+    assert.ok(infos.some((i) => /AUTO stays/.test(i)), 'and the log says why the flag was not honoured');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('autoModePrevention hides AUTO, and only AUTO, when no auto setpoints are listed', async () => {
+  const { platform, local, spies } = makePlatform();
+  local.profileResult = null; // no profile node: nothing lists auto setpoints
+  local.userSettingsResult = { ...REAL_SETTINGS, autoModePrevention: true };
+  try {
+    await platform.discoverDevices();
+    const T = Characteristic.TargetHeaterCoolerState;
+    assert.deepStrictEqual(published(spies, T)?.validValues, [T.HEAT, T.COOL]);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the user\'s caps narrow the published ranges, by field', async () => {
+  const { platform, local, spies } = makePlatform();
+  local.profileResult = ADAPTER_PROFILE;
+  local.userSettingsResult = { ...REAL_SETTINGS, userMaxHeatSetPoint: 22, userMinCoolSetPoint: 24 };
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(published(spies, Characteristic.HeatingThresholdTemperature),
+      { minValue: 10, maxValue: 22, minStep: 0.1 }, 'the heating ceiling is the cap; the floor is untouched');
+    assert.deepStrictEqual(published(spies, Characteristic.CoolingThresholdTemperature),
+      { minValue: 24, maxValue: 31, minStep: 0.1 }, 'the cooling floor is the cap; the ceiling is untouched');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a cap outside the range it would narrow is ignored, not trusted', async () => {
+  // The two directions that do damage if trusted. A heating ceiling of 5 sits below
+  // the heating floor and would pin heating to the single value 10. A cooling floor
+  // of 75 is what 75 °F looks like in this °C field, and would pin cooling to the
+  // single value 31. (A ceiling above the ceiling, or a floor below the floor, is
+  // harmless either way — capRange clamps it to nothing — so it cannot test this.)
+  const { platform, local, spies } = makePlatform();
+  local.profileResult = ADAPTER_PROFILE;
+  local.userSettingsResult = { ...REAL_SETTINGS, userMaxHeatSetPoint: 5, userMinCoolSetPoint: 75 };
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(published(spies, Characteristic.HeatingThresholdTemperature),
+      { minValue: 10, maxValue: 31, minStep: 0.1 });
+    assert.deepStrictEqual(published(spies, Characteristic.CoolingThresholdTemperature),
+      { minValue: 16, maxValue: 31, minStep: 0.1 });
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a settings read that throws still lets the profile through', async () => {
+  const { platform, kumo, local } = makePlatform({ localDevices: [{ ...DEVICE, minSetPoint: 16 }] });
+  local.profileResult = ADAPTER_PROFILE;
+  local.getUserSettings = () => Promise.reject(new Error('busy'));
+  try {
+    await platform.discoverDevices();
+    assert.deepStrictEqual(effectiveProfile(kumo, SERIAL).minimumSetPoints, { cool: 16, heat: 10, auto: 16 });
   } finally {
     platform['cleanup']();
   }

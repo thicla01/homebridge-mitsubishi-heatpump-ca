@@ -19,13 +19,14 @@ import {
 } from './settings';
 import { KumoAPI } from './kumo-api';
 import { KumoThermostatAccessory } from './accessory';
-import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
+import { AdapterUserSettings, LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
   describeLocalFailure,
 } from './local-api';
 import { KumoV2Client, V2Inventory, v2Endpoint } from './kumo-v2';
 import { MirrorController } from './mirror';
 import { throwCommunicationFailure, UNCONFIGURED_GUARD_CHARACTERISTICS } from './no-response';
 import { UnitProhibits, describeLocks } from './prohibits';
+import { thresholdRange } from './temperature';
 
 /** Stand-in siteId for units declared in config; local-only mode has no site. */
 const LOCAL_ONLY_SITE_ID = 'local-only';
@@ -1380,8 +1381,18 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    * in this mode, so the profile flag is the only gate). Both are true on ordinary
    * hardware, so adopting them would hand a Dry switch and a Fan-only switch to every
    * local-only install that never asked for one, on upgrade. Discovery improves the
-   * hardware description; it must not change which tiles exist. Anyone who wants them
-   * declares the capability, exactly as before, or sets showDrySwitch explicitly.
+   * hardware description; it must not ADD tiles. Anyone who wants them declares the
+   * capability, exactly as before, or sets showDrySwitch explicitly.
+   *
+   * The adapter's own settings (adapter.status) are read alongside, and they can only
+   * take away: `userHasModeHeat` / `userHasModeDry` false switch a mode off, as pykumo
+   * applies them — a tile that sends a mode the unit has been told not to run is worse
+   * than no tile; `autoModePrevention` hides AUTO under the rule pykumo and ha_kumo_ws
+   * share (only when the unit's profile lists no auto setpoints — installers set the
+   * flag on units that run AUTO fine); and `userMaxHeatSetPoint` / `userMinCoolSetPoint`
+   * narrow the ranges by field, as ha_kumo_ws does. 0 is "no cap" — a heating ceiling
+   * of 0 °C would forbid heating — and a cap outside the range it would narrow is
+   * ignored rather than trusted. See applyAdapterSettings.
    */
   private async refineProfilesFromAdapter(units: ResolvedLocalUnit[]): Promise<void> {
     const local = this.localClient;
@@ -1398,25 +1409,109 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       } catch {
         continue; // unreachable or wedged; the stand-in still works
       }
-      if (!discovered) {
+      let settings: AdapterUserSettings | null = null;
+      try {
+        settings = await local.getUserSettings(unit.deviceSerial);
+      } catch {
+        // The profile alone is still worth applying.
+      }
+      if (!discovered && !settings) {
         this.log.debug(`${unit.displayName}: the adapter reported no profile — keeping the declared one`);
         continue;
       }
-      // The two tile-gating flags keep whatever the declaration said. See above.
-      const { hasModeDry, hasModeVent, ...hardware } = discovered;
-      void hasModeDry;
-      void hasModeVent;
-      const before = unit.profile;
-      unit.profile = { ...before, ...hardware };
-      const floors = unit.profile.minimumSetPoints;
-      this.log.info(
-        `${unit.displayName}: capabilities read from the adapter — setpoint floors `
-        + `heat ${floors.heat}°C / cool ${floors.cool}°C / auto ${floors.auto}°C, `
-        + `${unit.profile.numberOfFanSpeeds} fan speeds. The Dry and Fan-only tiles still `
-        + 'follow your config, not this.',
-      );
+
+      let profile = unit.profile;
+      if (discovered) {
+        // The two tile-gating flags keep whatever the declaration said. See above.
+        const { hasModeDry, hasModeVent, ...hardware } = discovered;
+        void hasModeDry;
+        void hasModeVent;
+        profile = { ...profile, ...hardware };
+        const floors = profile.minimumSetPoints;
+        this.log.info(
+          `${unit.displayName}: capabilities read from the adapter — setpoint floors `
+          + `heat ${floors.heat}°C / cool ${floors.cool}°C / auto ${floors.auto}°C, `
+          + `${profile.numberOfFanSpeeds} fan speeds. This adds no Dry or Fan-only tile; `
+          + 'those follow your config.',
+        );
+      }
+      if (settings) {
+        // A complete bounds triple is only accepted with its `auto` member, so its
+        // presence is exactly "the unit's profile lists auto setpoints".
+        const autoListed = discovered?.minimumSetPoints !== undefined
+          || discovered?.maximumSetPoints !== undefined;
+        profile = this.applyAdapterSettings(unit.displayName, profile, settings, autoListed);
+      }
+      unit.profile = profile;
       this.kumoAPI.emitDeviceProfile(unit.deviceSerial, unit.profile);
     }
+  }
+
+  /**
+   * Apply what the adapter's settings take away from a profile, and say what they did.
+   *
+   * Pure apart from the log: returns a new profile, so the caller decides when it
+   * lands. Every rule here only removes — a mode, AUTO, part of a range. Nothing the
+   * adapter says can add a capability the profile did not already have.
+   */
+  private applyAdapterSettings(
+    name: string,
+    profile: DeviceProfile,
+    settings: AdapterUserSettings,
+    autoListed: boolean,
+  ): DeviceProfile {
+    const out: DeviceProfile = { ...profile };
+    const applied: string[] = [];
+
+    if (settings.userHasModeHeat === false && out.hasModeHeat) {
+      out.hasModeHeat = false;
+      applied.push('HEAT is switched off (so is AUTO, which needs it)');
+    }
+    if (settings.userHasModeDry === false && out.hasModeDry) {
+      out.hasModeDry = false;
+      applied.push('DRY is switched off');
+    }
+    if (settings.autoModePrevention === true) {
+      if (autoListed) {
+        applied.push('autoModePrevention is set, but the unit lists auto setpoints, so AUTO stays — '
+          + 'the rule pykumo and ha_kumo_ws apply, because installers set it on units that run AUTO fine');
+      } else if (out.hasModeAuto !== false) {
+        out.hasModeAuto = false;
+        applied.push('AUTO is prevented');
+      }
+    }
+
+    // Caps are validated against the range they would narrow, BEFORE either is
+    // attached: a cap outside it is not a narrowing but a mistake, and trusting one
+    // can pin a range to a single value. 75 °F in this °C field reads as a 75 °C
+    // cooling floor, above the cooling ceiling; a heating ceiling under the heating
+    // floor does the same to heating. (The other direction — a ceiling above the
+    // ceiling — is harmless, and capRange would clamp it away regardless.)
+    const heat = thresholdRange(out, 'spHeat');
+    const cap = settings.userMaxHeatSetPoint;
+    if (cap !== undefined && cap > 0) {
+      if (cap > heat.min && cap < heat.max) {
+        out.userMaxHeatSetPoint = cap;
+        applied.push(`the heating setpoint is capped at ${cap}°C`);
+      } else if (cap <= heat.min) {
+        this.log.debug(`${name}: ignoring userMaxHeatSetPoint ${cap} — at or below the heating floor ${heat.min}°C`);
+      }
+    }
+    const cool = thresholdRange(out, 'spCool');
+    const floor = settings.userMinCoolSetPoint;
+    if (floor !== undefined && floor > 0) {
+      if (floor > cool.min && floor < cool.max) {
+        out.userMinCoolSetPoint = floor;
+        applied.push(`the cooling setpoint has a floor of ${floor}°C`);
+      } else if (floor >= cool.max) {
+        this.log.debug(`${name}: ignoring userMinCoolSetPoint ${floor} — at or above the cooling ceiling ${cool.max}°C`);
+      }
+    }
+
+    if (applied.length > 0) {
+      this.log.info(`${name}: settings on the adapter itself — ${applied.join('; ')}.`);
+    }
+    return out;
   }
 
   /**

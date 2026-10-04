@@ -371,7 +371,10 @@ a GX15 — and a guessed fan-speed count to the real one, which is why profile-s
 setpoint limits are no longer on the list above. The Dry and Fan-only tiles still follow
 what you declared: discovery describes the hardware, it does not add tiles you did not
 ask for. A unit whose adapter does not serve the node keeps the declared profile exactly
-as before. The per-unit fields:
+as before. The adapter's own settings are read too, and can only take away: a mode
+switched off there, AUTO prevented there, or a setpoint cap set in the vendor app narrows
+what HomeKit offers, and the log names each one ([protocol](protocol.md#the-capability-profile-from-the-adapter)).
+The per-unit fields:
 
 | Field | Required | Description |
 |---|---|---|

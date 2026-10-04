@@ -6,8 +6,8 @@ import {
   FanSpeed, FAN_SPEEDS, VaneDirection, isVaneDirection, normalizeFanSpeed, normalizeCloudRegion,
 } from './settings';
 import {
-  MIN_AUTO_BAND_C, cToF, enforceAutoBand, quantizeSetpointInRange,
-  quantizeSetpointInRangeCelsius, sameSetpoint,
+  MIN_AUTO_BAND_C, cToF, capRange, enforceAutoBand, quantizeSetpointInRange,
+  quantizeSetpointInRangeCelsius, sameSetpoint, thresholdRange,
 } from './temperature';
 import { join } from 'path';
 import { EveHistoryStore, EveHistoryFeed, attachEveHistory } from './eve-history';
@@ -593,10 +593,12 @@ export class KumoThermostatAccessory {
     // /technician/login, /devices/{serial}/settings and a role/userType/installerPin
     // login variant sweep; all 404 or ignored). Clamping to the profile is the whole
     // of what a client can do.
-    const heatMin = Math.min(profile.minimumSetPoints.heat, profile.minimumSetPoints.auto);
-    const heatMax = Math.max(profile.maximumSetPoints.heat, profile.maximumSetPoints.auto);
-    const coolMin = Math.min(profile.minimumSetPoints.cool, profile.minimumSetPoints.auto);
-    const coolMax = Math.max(profile.maximumSetPoints.cool, profile.maximumSetPoints.auto);
+    //
+    // The user's own caps (userMaxHeatSetPoint / userMinCoolSetPoint) narrow these
+    // further, and they reach this through setpointRange so the range published here
+    // and the range the writer quantizes and clamps against cannot disagree.
+    const { min: heatMin, max: heatMax } = this.setpointRange('spHeat');
+    const { min: coolMin, max: coolMax } = this.setpointRange('spCool');
 
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps({ minValue: heatMin, maxValue: heatMax, minStep: 0.1 });
@@ -615,8 +617,11 @@ export class KumoThermostatAccessory {
     const modes: number[] = [T.COOL];
     if (profile.hasModeHeat) {
       modes.unshift(T.HEAT);
-      // AUTO needs both directions to mean anything.
-      modes.unshift(T.AUTO);
+      // AUTO needs both directions to mean anything — and can be turned off on its
+      // own by the adapter's autoModePrevention (see DeviceProfile.hasModeAuto).
+      if (profile.hasModeAuto !== false) {
+        modes.unshift(T.AUTO);
+      }
     }
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
@@ -2677,12 +2682,7 @@ export class KumoThermostatAccessory {
    * would never let the user put it.
    */
   private setpointRange(field: 'spHeat' | 'spCool'): { min: number; max: number } {
-    const p = this.deviceProfile;
-    const mode = field === 'spHeat' ? 'heat' : 'cool';
-    return {
-      min: p ? Math.min(p.minimumSetPoints[mode], p.minimumSetPoints.auto) : 10,
-      max: p ? Math.max(p.maximumSetPoints[mode], p.maximumSetPoints.auto) : 35,
-    };
+    return this.deviceProfile ? thresholdRange(this.deviceProfile, field) : { min: 10, max: 35 };
   }
 
   /**
@@ -2958,13 +2958,22 @@ export class KumoThermostatAccessory {
   // own limits — one combined command, so the 1.7.2 trailing-setpoint race cannot
   // recur.
 
-  /** Clamp a setpoint to this unit's supported range for a mode (no-op until profile loads). */
-  private clampSetpoint(value: number, mode: 'heat' | 'cool' | 'auto'): number {
+  /**
+   * Clamp a setpoint to this unit's supported range for a mode (no-op until profile
+   * loads), then to the user's cap for that FIELD. The field is a parameter because
+   * in AUTO both setpoints share the `auto` bounds, and only the field says which cap
+   * applies — spHeat's ceiling must not clamp spCool.
+   */
+  private clampSetpoint(value: number, mode: 'heat' | 'cool' | 'auto', field: 'spHeat' | 'spCool'): number {
     if (typeof value !== 'number' || isNaN(value) || !this.deviceProfile) {
       return value;
     }
-    const min = this.deviceProfile.minimumSetPoints[mode];
-    const max = this.deviceProfile.maximumSetPoints[mode];
+    const capped = capRange({
+      min: this.deviceProfile.minimumSetPoints[mode],
+      max: this.deviceProfile.maximumSetPoints[mode],
+    }, field, this.deviceProfile);
+    const min = capped.min;
+    const max = capped.max;
     // Go through the quantizer rather than clamping to the raw bound. The bounds
     // are not generally whole °F (the real profile range 16-31°C is 60.8-87.8°F),
     // so returning one directly would store an off-grid value and put the mirror
@@ -3019,22 +3028,22 @@ export class KumoThermostatAccessory {
         break;
       case 'heat':
         commands.operationMode = 'heat';
-        commands.spHeat = this.clampSetpoint(desired.spHeat, 'heat');
+        commands.spHeat = this.clampSetpoint(desired.spHeat, 'heat', 'spHeat');
         if (fan) {
           commands.fanSpeedRaw = fan;
         }
         break;
       case 'cool':
         commands.operationMode = 'cool';
-        commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
+        commands.spCool = this.clampSetpoint(desired.spCool, 'cool', 'spCool');
         if (fan) {
           commands.fanSpeedRaw = fan;
         }
         break;
       case 'auto':
         commands.operationMode = 'auto';
-        commands.spHeat = this.clampSetpoint(desired.spHeat, 'auto');
-        commands.spCool = this.clampSetpoint(desired.spCool, 'auto');
+        commands.spHeat = this.clampSetpoint(desired.spHeat, 'auto', 'spHeat');
+        commands.spCool = this.clampSetpoint(desired.spCool, 'auto', 'spCool');
         if (fan) {
           commands.fanSpeedRaw = fan;
         }
@@ -3043,7 +3052,7 @@ export class KumoThermostatAccessory {
         commands.operationMode = 'dry';
         commands.power = 1;
         if (this.dryUsesSetpoint()) {
-          commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
+          commands.spCool = this.clampSetpoint(desired.spCool, 'cool', 'spCool');
         }
         if (fan) {
           commands.fanSpeedRaw = fan;

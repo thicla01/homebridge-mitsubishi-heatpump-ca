@@ -266,6 +266,35 @@ function handle(u, req, res, rawBody) {
     return reply(res, { r: { indoorUnit: { status: { ...u.status } } } });
   }
 
+  // The adapter's own settings, as a real GX15 returned them on 2026-10-03: nothing
+  // restricted, both caps 0. The plugin reads five fields of this node; the rest is
+  // here so a probe of the simulator looks like a probe of the real thing — the
+  // password field included, which a real adapter refuses to read back.
+  if (c.adapter && c.adapter.status) {
+    return reply(res, {
+      r: {
+        adapter: {
+          status: {
+            localNetwork: { stationMode: { RSSI: -50, SSID: 'sim' } },
+            autoModePrevention: false,
+            userMinCoolSetPoint: 0,
+            userMaxHeatSetPoint: 0,
+            name: u.name,
+            runState: 'normal',
+            uptime: Math.round(process.uptime()),
+            roomTempOffset: 0,
+            password: '__invalid_api_request',
+            userHasModeDry: true,
+            userHasModeHeat: true,
+            ledDisabled: false,
+            serverHostname: 'simulator.invalid',
+            receiverRelay: 'none',
+          },
+        },
+      },
+    });
+  }
+
   // Lockouts, in the shape a real GX15 returned on 2026-10-03 (all false there).
   // `--fault i=locked:C` reports one; see the option's note for why writes still apply.
   if (c.indoorUnit && c.indoorUnit.prohibits) {

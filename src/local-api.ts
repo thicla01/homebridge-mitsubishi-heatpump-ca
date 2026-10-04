@@ -53,6 +53,25 @@ export const PROFILE_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"profile":{}}}
 export const PROHIBITS_READ_BODY = Buffer.from('{"c":{"indoorUnit":{"prohibits":{}}}}', 'utf8');
 
 /**
+ * The adapter's own settings. Read for five fields only — see getUserSettings. The
+ * node also carries a `password` the adapter refuses to read back, and whatever it
+ * holds, nothing here keeps it.
+ */
+export const ADAPTER_STATUS_READ_BODY = Buffer.from('{"c":{"adapter":{"status":{}}}}', 'utf8');
+
+/**
+ * What the user (or an installer) has set on the adapter that restricts the profile.
+ * Each field is present only when the adapter sent it with the right type.
+ */
+export interface AdapterUserSettings {
+  userHasModeHeat?: boolean;
+  userHasModeDry?: boolean;
+  autoModePrevention?: boolean;
+  userMaxHeatSetPoint?: number;
+  userMinCoolSetPoint?: number;
+}
+
+/**
  * A dedicated agent with keep-alive OFF.
  *
  * Node's global agent defaults to `keepAlive: true` with a 5s timeout, so every
@@ -732,6 +751,38 @@ export class LocalKumoClient {
     const { result } = await this.requestDetailed(serial, PROHIBITS_READ_BODY);
     const indoorUnit = result?.indoorUnit as Record<string, unknown> | undefined;
     return parseProhibits(indoorUnit?.prohibits);
+  }
+
+  /**
+   * Ask the adapter for the settings that restrict what the unit's profile allows:
+   * the two mode switches, autoModePrevention, and the user's two setpoint caps.
+   *
+   * pykumo reads the first three from this node and ANDs them into its profile;
+   * ha_kumo_ws narrows its ranges with the caps. Validated field by field like
+   * getProfile, and returned as raw values: what they MEAN — 0 as "no cap", the
+   * auto-setpoint exception to autoModePrevention — is decided by the caller, which
+   * can see the profile they apply to.
+   */
+  async getUserSettings(serial: string): Promise<AdapterUserSettings | null> {
+    const { result } = await this.requestDetailed(serial, ADAPTER_STATUS_READ_BODY);
+    const adapter = result?.adapter as Record<string, unknown> | undefined;
+    const raw = adapter?.status as Record<string, unknown> | undefined;
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+    const out: AdapterUserSettings = {};
+    for (const key of ['userHasModeHeat', 'userHasModeDry', 'autoModePrevention'] as const) {
+      if (typeof raw[key] === 'boolean') {
+        out[key] = raw[key] as boolean;
+      }
+    }
+    for (const key of ['userMaxHeatSetPoint', 'userMinCoolSetPoint'] as const) {
+      const v = raw[key];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        out[key] = v;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : null;
   }
 
   /** Read and map the unit's current status locally, or null if unreachable. */

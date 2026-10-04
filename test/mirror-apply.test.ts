@@ -131,3 +131,39 @@ test('cool mirror sends operationMode:cool + spCool + fan', async () => {
   await handler.applyMirror({ operationMode: 'cool', power: 1, spHeat: 20, spCool: 22.3, fanSpeed: 'auto' });
   assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'cool', spCool: 22.3, fanSpeedRaw: 'auto' });
 });
+
+// ---- the user's caps apply by field, in AUTO too -----------------------------
+//
+// In AUTO the mirror clamps BOTH setpoints against the `auto` bounds. A heating cap
+// written into those bounds would therefore cap spCool as well — which is why caps
+// are carried as their own fields and applied per setpoint (temperature.ts:capRange).
+
+test('an AUTO mirror caps spHeat at the heating cap and leaves spCool where it was', async () => {
+  const uncapped = makeHarness();
+  uncapped.setProfile(profile());
+  await uncapped.handler.applyMirror({ operationMode: 'autoHeat', power: 1, spHeat: 25, spCool: 27, fanSpeed: 'auto' });
+
+  const capped = makeHarness();
+  capped.setProfile(profile({ userMaxHeatSetPoint: 22 }));
+  await capped.handler.applyMirror({ operationMode: 'autoHeat', power: 1, spHeat: 25, spCool: 27, fanSpeed: 'auto' });
+
+  const before = uncapped.sendCommandCalls[0].commands;
+  const after = capped.sendCommandCalls[0].commands;
+  assert.ok((after.spHeat as number) <= 22, `spHeat respects the cap (got ${after.spHeat})`);
+  assert.strictEqual(after.spCool, before.spCool, 'spCool is exactly what it would have been without the cap');
+});
+
+test('an AUTO mirror lifts spCool to the cooling floor and leaves spHeat where it was', async () => {
+  const uncapped = makeHarness();
+  uncapped.setProfile(profile());
+  await uncapped.handler.applyMirror({ operationMode: 'autoCool', power: 1, spHeat: 19, spCool: 20, fanSpeed: 'auto' });
+
+  const capped = makeHarness();
+  capped.setProfile(profile({ userMinCoolSetPoint: 24 }));
+  await capped.handler.applyMirror({ operationMode: 'autoCool', power: 1, spHeat: 19, spCool: 20, fanSpeed: 'auto' });
+
+  const before = uncapped.sendCommandCalls[0].commands;
+  const after = capped.sendCommandCalls[0].commands;
+  assert.ok((after.spCool as number) >= 24, `spCool respects the floor (got ${after.spCool})`);
+  assert.strictEqual(after.spHeat, before.spHeat, 'spHeat is exactly what it would have been without the floor');
+});

@@ -417,6 +417,25 @@ only gate. Both are true on ordinary hardware, so adopting them would hand two s
 every local-only install on upgrade. `extendedTemps`, `hasHotAdjust`, `hasInitialSettings`
 and `hasModeTest` are read but unmodelled.
 
+The same refinement reads five fields of `adapter.status`, the settings the user or an
+installer put on the adapter, and they can only take away:
+
+| Field | Effect | Same as |
+|---|---|---|
+| `userHasModeHeat: false` | HEAT off, and AUTO with it | pykumo, ANDed into its profile |
+| `userHasModeDry: false` | DRY off — the one rule that can remove a declared tile, because a tile that sends a mode the unit was told not to run is worse than none | pykumo |
+| `autoModePrevention: true` | AUTO hidden, HEAT kept — **but only when the unit's profile lists no auto setpoints**. Installers set the flag on units that run AUTO fine, and both reference clients override it this way | pykumo, ha_kumo_ws |
+| `userMaxHeatSetPoint` | Ceiling on **spHeat**, in heat and auto | ha_kumo_ws |
+| `userMinCoolSetPoint` | Floor on **spCool**, in cool, dry and auto | ha_kumo_ws |
+
+The caps are the user's energy limits, not the installer's: they only narrow, and cannot
+lower a heating floor. `0` means no cap (the measured GX15 reports `0` for both), and a cap
+outside the range it would narrow is ignored — 75 °F in this °C field would otherwise read
+as a 75 °C cooling floor and pin cooling to its ceiling. They apply **by field, never by
+mode**: in AUTO both setpoints share the `auto` bounds, and the mirror clamps both against
+them, so a heating cap written into those bounds would cap spCool too
+(`temperature.ts:capRange`).
+
 ### `_api_error`
 
 The adapter answers HTTP 200 to everything it parses, its own errors included, so the

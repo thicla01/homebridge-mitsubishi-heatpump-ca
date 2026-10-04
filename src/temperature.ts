@@ -22,6 +22,8 @@
  * deterministic regardless of which one carries it.
  */
 
+import type { DeviceProfile } from './settings';
+
 /** Half of the 0.1°C device resolution: the widest gap that is still "the same setpoint". */
 const SETPOINT_TOLERANCE_C = 0.05;
 
@@ -246,6 +248,48 @@ export interface AutoBand {
 export interface SetpointRange {
   min: number;
   max: number;
+}
+
+/**
+ * Narrow a range by the user's own setpoint caps, by FIELD.
+ *
+ * `userMaxHeatSetPoint` lowers the ceiling of anything that sets spHeat;
+ * `userMinCoolSetPoint` raises the floor of anything that sets spCool. Never by mode:
+ * in AUTO both setpoints are live and share the `auto` bounds, so a cap written into
+ * those bounds would cap the OTHER setpoint too — the mirror clamps both AUTO
+ * setpoints against them.
+ *
+ * Never inverts. A cap that falls outside the range it narrows is held at that
+ * range's edge, so a cap below a mode's own floor pins the ceiling at the floor rather
+ * than producing a range with min above max. The platform only attaches caps that lie
+ * inside the merged threshold range, so in practice this guards the per-mode ranges
+ * the mirror uses, where a cap valid overall can still fall outside one mode.
+ */
+export function capRange(range: SetpointRange, field: 'spHeat' | 'spCool', profile: DeviceProfile): SetpointRange {
+  if (field === 'spHeat' && profile.userMaxHeatSetPoint !== undefined) {
+    return { min: range.min, max: Math.max(range.min, Math.min(range.max, profile.userMaxHeatSetPoint)) };
+  }
+  if (field === 'spCool' && profile.userMinCoolSetPoint !== undefined) {
+    return { min: Math.min(range.max, Math.max(range.min, profile.userMinCoolSetPoint)), max: range.max };
+  }
+  return range;
+}
+
+/**
+ * The range a threshold characteristic offers: its own mode's bounds widened to cover
+ * AUTO (in AUTO both handles are live), then narrowed by the user's cap for that field.
+ *
+ * Was computed inline in two places in accessory.ts — the published HAP range and
+ * the range quantization and the AUTO band clamp against. Two copies of one rule is
+ * how a cap applied to one and not the other would have published a range the writer
+ * then contradicted.
+ */
+export function thresholdRange(profile: DeviceProfile, field: 'spHeat' | 'spCool'): SetpointRange {
+  const mode = field === 'spHeat' ? 'heat' : 'cool';
+  return capRange({
+    min: Math.min(profile.minimumSetPoints[mode], profile.minimumSetPoints.auto),
+    max: Math.max(profile.maximumSetPoints[mode], profile.maximumSetPoints.auto),
+  }, field, profile);
 }
 
 /**

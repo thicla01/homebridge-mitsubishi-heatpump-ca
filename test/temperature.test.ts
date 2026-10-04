@@ -17,7 +17,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
+import type { DeviceProfile } from '../dist/settings.js';
 import {
+  capRange,
   cToF,
   fToC,
   quantizeSetpointC,
@@ -25,6 +27,7 @@ import {
   quantizeSetpointCelsius,
   quantizeSetpointInRangeCelsius,
   sameSetpoint,
+  thresholdRange,
 } from '../dist/temperature.js';
 
 /** What the Home app would show for a stored Celsius value. */
@@ -267,4 +270,48 @@ test('the Celsius grid respects the profile range, stepping inward', () => {
   assert.strictEqual(quantizeSetpointInRangeCelsius(40, 16, 31), 31, 'above the ceiling steps down');
   assert.strictEqual(quantizeSetpointInRangeCelsius(15.9, 16, 31), 16,
     'a request just under the cool floor lands on it, not below');
+});
+
+// ---- threshold ranges and the user's own caps --------------------------------
+//
+// The adapter carries two caps the user sets in the vendor app — userMaxHeatSetPoint
+// and userMinCoolSetPoint (ha_kumo_ws narrows its ranges with them). They apply by
+// FIELD, never by mode: in AUTO both setpoints share the `auto` bounds, so a cap
+// written into those bounds would cap the other setpoint too.
+
+/** The GX15's real profile (indoorUnit.profile, 2026-10-03). */
+const GX15 = (over: Partial<DeviceProfile> = {}): DeviceProfile => ({
+  numberOfFanSpeeds: 5, hasFanSpeedAuto: true, hasModeDry: true, usesSetPointInDryMode: true,
+  hasModeHeat: true, hasModeVent: true, hasVaneDir: true, hasVaneSwing: true,
+  hasDefrost: true, hasStandby: true,
+  minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+  maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+  ...over,
+});
+
+test('a threshold covers its own mode widened to AUTO, as it always did', () => {
+  assert.deepStrictEqual(thresholdRange(GX15(), 'spHeat'), { min: 10, max: 31 });
+  assert.deepStrictEqual(thresholdRange(GX15(), 'spCool'), { min: 16, max: 31 });
+});
+
+test('the heating cap lowers spHeat\'s ceiling and leaves spCool alone', () => {
+  const p = GX15({ userMaxHeatSetPoint: 22 });
+  assert.deepStrictEqual(thresholdRange(p, 'spHeat'), { min: 10, max: 22 });
+  assert.deepStrictEqual(thresholdRange(p, 'spCool'), { min: 16, max: 31 },
+    'by field: both share the auto bounds, and only spHeat is capped');
+});
+
+test('the cooling floor raises spCool\'s floor and leaves spHeat alone', () => {
+  const p = GX15({ userMinCoolSetPoint: 24 });
+  assert.deepStrictEqual(thresholdRange(p, 'spCool'), { min: 24, max: 31 });
+  assert.deepStrictEqual(thresholdRange(p, 'spHeat'), { min: 10, max: 31 });
+});
+
+test('a cap never inverts the range it narrows', () => {
+  // The mirror clamps per MODE, so a cap valid against the merged range can still
+  // fall outside one mode's: a ceiling of 12 against AUTO's floor of 16.
+  assert.deepStrictEqual(
+    capRange({ min: 16, max: 31 }, 'spHeat', GX15({ userMaxHeatSetPoint: 12 })), { min: 16, max: 16 });
+  assert.deepStrictEqual(
+    capRange({ min: 16, max: 31 }, 'spCool', GX15({ userMinCoolSetPoint: 35 })), { min: 31, max: 31 });
 });
