@@ -1979,10 +1979,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       return;
     }
     this.log.warn(
-      `${name}: the unit reports ${locked} changes as LOCKED (global: ${describeLocks(read.global)}; `
-      + `local: ${describeLocks(read.local)}). HomeKit changes to them are still sent, but the `
-      + 'unit may ignore them — and the adapter acknowledges a write it ignores, so "Command '
-      + 'accepted" cannot be read as "applied" while this lasts. This plugin never sets a lock.',
+      `${name}: the unit reports ${locked} changes as locked (global: ${describeLocks(read.global)}; `
+      + `local: ${describeLocks(read.local)}). In Mitsubishi's documentation that is a central `
+      + 'controller locking out the local remote; whether it also reaches commands from this '
+      + 'adapter is not known. They are still sent — but if one does not take, this is the likely '
+      + 'reason, since the adapter acknowledges a write it ignores. This plugin never sets a lock.',
     );
   }
 

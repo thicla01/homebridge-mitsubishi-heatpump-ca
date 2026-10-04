@@ -215,7 +215,7 @@ reads three of these nodes; the rest is recorded so nobody has to guess again.
 | `initialSettings` | 31 numbered slots, all `0` on this unit, whose `profile.hasInitialSettings` is `false`. Almost certainly the installer function codes |
 | `schedule` | `events` 1-28, each `{active, inUse, day, time, settings:{mode, spCool, spHeat, vaneDir, fanSpeed}}` — the unit has its own scheduler |
 | `errorHistory` | `errors` 1-10, each `{error2char, error4char, timestamp}` |
-| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts. **Read by the plugin** since 2.3.8: at the first good poll and every 30 minutes, warning when `effective` changes and qualifying the log of any command that touches a locked control. Never enforced — see `src/prohibits.ts` |
+| `prohibits` | `global` / `local` / `effective`, each `{power, mode, setpoint}` — lockouts. Those three are exactly the local operations Mitsubishi's remote-controller literature says a **central controller can prohibit on the local remote** (PAC-YT52CRA, PAR-31MAA, PAR-U02MEDA; a CENTRAL icon shows while they are). Whether the Wi-Fi adapter counts as a local remote, and so is itself refused, or acts as the central side, is **not known**. **Read by the plugin** since 2.3.8: at the first good poll and every 30 minutes, warning when `effective` changes and qualifying the log of any command that touches a locked control. Never enforced — see `src/prohibits.ts` |
 | `settings` | `rawITPFrame {frame, len, id}`: a raw-frame passthrough to the indoor unit |
 | `info` | `{}` |
 | `acoil` | `__action_failed` |

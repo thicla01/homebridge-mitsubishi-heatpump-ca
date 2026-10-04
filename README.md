@@ -333,15 +333,16 @@ supplied. Three shapes are worth recognising:
   *Before 2.3.4 this line said "no answer" for every cause*, which sent people to hunt
   their network for what was a credential problem — while the poller, forty-five seconds
   later, named it correctly.
-- **`<name>: the unit reports setpoint changes as LOCKED (global: …; local: …)`** — the
-  unit itself has a control locked out (power, mode or setpoint), set somewhere outside
-  this plugin. Commands are still sent — whether a locked unit ignores them has not been
-  measured, and refusing them on a guess could leave a heat pump running that someone
-  turned off — but the adapter acknowledges a write it ignores, so a "Command accepted"
-  for that control cannot be read as "applied" while the lock lasts, and the log says so
-  beside the command. Read at the first good poll and every half hour after, in any mode
-  with local control; repeated only when it changes. Every unit measured so far reports
-  nothing locked.
+- **`<name>: the unit reports setpoint changes as locked (global: …; local: …)`** — the
+  unit has a control locked out (power, mode or setpoint), set somewhere outside this
+  plugin. In Mitsubishi's own documentation these three are exactly what a central
+  controller can lock on the *local remote*; whether the lock also reaches commands from
+  the Wi-Fi adapter is not known. So commands are still sent — refusing them on a guess
+  could leave a heat pump running that someone turned off — but if one does not take, the
+  lock is the likely reason, and the log says so beside the command: the adapter
+  acknowledges a write it ignores, so "Command accepted" is not proof. Read at the first
+  good poll and every half hour after, in any mode with local control; repeated only when
+  it changes. Every unit measured so far reports nothing locked.
 
 ### Local-only mode
 

@@ -12,9 +12,18 @@
  *   sees nothing happen and finds "accepted" in the log has been told something false.
  *   Reading the lock is how the log stops saying that.
  *
+ * WHAT A "PROHIBIT" IS, IN MITSUBISHI'S OWN TERMS
+ *   The remote-controller literature (PAC-YT52CRA, PAR-31MAA, PAR-U02MEDA) describes a
+ *   central controller prohibiting exactly three local operations — ON/OFF, operation
+ *   mode, preset temperature — on the LOCAL REMOTE, with a CENTRAL icon while it does.
+ *   Those are this object's three fields. What that literature cannot say is whether a
+ *   Wi-Fi adapter on CN105 counts as a local remote (and is refused) or as the central
+ *   side (and is not). Found 2026-10-03, after the first version of this file.
+ *
  * WHY WARN AND NEVER BLOCK
  *   What a real adapter does with a write to a locked control is UNMEASURED. It might
- *   ignore it, refuse it, or honour it anyway. Measuring would mean setting a lock on
+ *   ignore it, refuse it, or honour it anyway — and the vocabulary above makes "honour
+ *   it anyway" more plausible than this file first assumed. Measuring would mean setting a lock on
  *   someone's heat pump, which this project does not do. Under that uncertainty the
  *   costs are lopsided: a needless warning costs a log line, a needless refusal costs
  *   heat. So commands are always sent, and the lock only changes what the log says.

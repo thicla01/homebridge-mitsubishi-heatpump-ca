@@ -1714,7 +1714,8 @@ export class KumoThermostatAccessory {
     this.lockNoteAt = now;
     this.platform.log.warn(
       `[LOCAL] ${this.accessory.displayName}: sent, but the unit reports ${describeLocks(new Set(hit))} `
-      + 'changes as locked — this one may not take effect, and the adapter would acknowledge it either way.',
+      + 'changes as locked — a lock on the local remote that may or may not reach this adapter. '
+      + 'If this one does not take, that is the likely reason; the adapter would acknowledge it either way.',
     );
   }
 

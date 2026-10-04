@@ -714,13 +714,15 @@ test('a lock is named once, with the control and where it comes from', async () 
   const { platform, local } = makePlatform();
   local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
   platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
-  const locked = () => warns.filter((w) => /LOCKED/.test(w));
+  const locked = () => warns.filter((w) => /as locked \(global/.test(w));
   try {
     await platform.discoverDevices();
     await platform['pollLocalDevices']();
 
     assert.strictEqual(locked().length, 1);
-    assert.match(locked()[0], /setpoint changes as LOCKED/);
+    assert.match(locked()[0], /setpoint changes as locked \(global/);
+    assert.match(locked()[0], /local remote/, 'and what Mitsubishi says such a lock is');
+    assert.match(locked()[0], /not known/, 'and that its reach to this adapter is unmeasured');
     assert.match(locked()[0], /local: setpoint/, 'and which scope set it');
     assert.match(locked()[0], /still sent/, 'and that nothing is being refused');
     assert.match(locked()[0], /never sets a lock/, 'and that the plugin did not cause it');
@@ -764,7 +766,7 @@ test('a lock that persists is not repeated, and one that clears is said once', a
     await platform['pollLocalDevices']();
     due();
     await platform['pollLocalDevices']();
-    assert.strictEqual(warns.filter((w) => /LOCKED/.test(w)).length, 1,
+    assert.strictEqual(warns.filter((w) => /as locked \(global/.test(w)).length, 1,
       'still locked half an hour later is not news');
 
     local.prohibitsResult = UNLOCKED;
@@ -845,7 +847,7 @@ test('a locked setpoint write is STILL SENT, and the log says it may not take', 
     return true;
   };
   platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
-  const notes = () => warns.filter((w) => /may not take effect/.test(w));
+  const notes = () => warns.filter((w) => /may or may not reach this adapter/.test(w));
   try {
     await platform.discoverDevices();
     await platform['pollLocalDevices']();
@@ -867,7 +869,7 @@ test('the per-command note is at most once a minute, and only for a locked contr
   const { platform, local } = makePlatform();
   local.prohibitsResult = SETPOINT_LOCKED_LOCALLY;
   platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
-  const notes = () => warns.filter((w) => /may not take effect/.test(w));
+  const notes = () => warns.filter((w) => /may or may not reach this adapter/.test(w));
   try {
     await platform.discoverDevices();
     await platform['pollLocalDevices']();
