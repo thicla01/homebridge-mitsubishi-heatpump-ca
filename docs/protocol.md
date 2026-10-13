@@ -388,9 +388,21 @@ They are queried only while the unit reports a `tempSource`/`activeThermistor` o
 `sensorN`; a unit that yields neither is latched and not asked again until its
 temperature source changes (`getSensorReadings`, `src/local-api.ts`). The sensor leaf
 also carries `rssi`, `txPower` and **`battery`**. Measured 2026-10-13 on a freshly paired
-PAC-USWHS003-TH-1: `battery` 71 — a percentage, which the kumo app confirmed once restarted
-(it had shown a stale 0 % until then) — `rssi` −38, `txPower` −53, next to a temperature of
-22.305429 and a humidity of 50.152344. Pairing switched `tempSource` and `activeThermistor`
+PAC-USWHS003-TH-1 — paired to a GX15's **built-in** Wi-Fi module (IC `4441A-MB43`, firmware
+`03.07.03`), a combination no Mitsubishi document lists: every sensor datasheet names only
+the external PAC-USWHS002-WF-1/WF-2 interfaces, and the kumo technician manuals never
+mention built-in modules. The kumo app had already listed that zone under Dry Mode
+Automation, a feature its manual reserves for "WI 2" interfaces with a sensor. `rssi` is
+the Bluetooth link from the sensor as the module receives it — −38 dBm next to the unit,
+−68 dBm a few metres away on a shelf — not the module's Wi-Fi, which is
+`adapter.status.localNetwork.stationMode.RSSI`.
+
+At pairing: `battery` 71 — a percentage, which the kumo app confirmed once restarted (it
+had shown a stale 0 % until then) — `rssi` −38, `txPower` −53, next to a temperature of
+22.305429 and a humidity of 50.152344. The battery figure is an estimate from the coin
+cell's voltage and is **not monotonic**: it read 80 a few hours later, after the move. A
+cell recovers after the pairing burst and drifts with temperature, so near the 20 %
+threshold the low-battery state may come and go before it settles. Pairing switched `tempSource` and `activeThermistor`
 from `unset` to `sensor0`, and changed nothing else in the `adapter` and `indoorUnit`
 trees. Since 2.3.9 the plugin reads the battery from this leaf, so the sensor's Battery
 tile works under `cloudRegion: "ca"` and `localOnly` too, where no `sensor_update` event
