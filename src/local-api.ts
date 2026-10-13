@@ -825,6 +825,9 @@ export class LocalKumoClient {
         if (extra.battery !== undefined) {
           mapped.sensorBattery = extra.battery;
         }
+        if (extra.rssi !== undefined) {
+          mapped.sensorRssi = extra.rssi;
+        }
       }
     }
     return { status: mapped, error: 'none' };
@@ -874,7 +877,7 @@ export class LocalKumoClient {
    */
   private async getSensorReadings(
     serial: string,
-  ): Promise<{ humidity?: number | null; temperature?: number; battery?: number } | null> {
+  ): Promise<{ humidity?: number | null; temperature?: number; battery?: number; rssi?: number } | null> {
     if (this.noSensor.has(serial)) {
       return null;
     }
@@ -891,8 +894,11 @@ export class LocalKumoClient {
       const battery = typeof sensor.battery === 'number' && Number.isFinite(sensor.battery)
         ? sensor.battery
         : undefined;
+      const rssi = typeof sensor.rssi === 'number' && Number.isFinite(sensor.rssi)
+        ? sensor.rssi
+        : undefined;
       if (temperature !== undefined || humidity !== undefined) {
-        return { temperature, humidity, battery };
+        return { temperature, humidity, battery, rssi };
       }
     }
 

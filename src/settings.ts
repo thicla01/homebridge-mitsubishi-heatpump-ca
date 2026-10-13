@@ -446,6 +446,12 @@ export interface DeviceStatus {
   filterDirty?: boolean;
   /** Wireless-sensor battery percent, when the unit has a paired sensor. */
   sensorBattery?: number | null;
+  /**
+   * The paired sensor's Bluetooth signal as the adapter receives it, in dBm. Read
+   * over the LAN only, and used only to warn about a weak link (platform.ts:
+   * noteSensorSignal) — HomeKit has no characteristic for it.
+   */
+  sensorRssi?: number | null;
 }
 
 /**

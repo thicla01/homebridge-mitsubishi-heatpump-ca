@@ -314,7 +314,7 @@ Local status polling every 15s
 ```
 
 The sweep runs only for units whose address neither the v2 reply nor `localControlIps`
-supplied. Three shapes are worth recognising:
+supplied. Four shapes are worth recognising:
 
 - **`the unit rejected our credentials on 3 requests in a row
   (device_authentication_error)`** — the password and cryptoSerial must both belong to
@@ -344,6 +344,14 @@ supplied. Three shapes are worth recognising:
   beside the command: the adapter acknowledges a write it ignores, so "Command accepted" is
   not proof. Read at the first good poll and every half hour after, in any mode with local
   control; repeated only when it changes. Every unit measured so far reports nothing locked.
+- **`<name>: the wireless sensor's Bluetooth signal is weak — median … dBm over the last 20
+  readings`** — the paired sensor's link to the unit, not your Wi-Fi. One reading means
+  little: on a real sensor, four reads minutes apart with nothing moved spanned −68 to −45
+  dBm. So the verdict is the median of the last 20 polls, warned once below −85 dBm and
+  lifted once it is back to −80. The unit regulates on that sensor, so a link that drops
+  out leaves it working from stale readings; moving the sensor closer to the indoor unit,
+  or away from metal and enclosed spots, is the fix. HomeKit has no place for a signal
+  strength, so this lives in the log only.
 
 ### Local-only mode
 

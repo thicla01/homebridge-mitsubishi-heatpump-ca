@@ -393,9 +393,14 @@ PAC-USWHS003-TH-1 — paired to a GX15's **built-in** Wi-Fi module (IC `4441A-MB
 the external PAC-USWHS002-WF-1/WF-2 interfaces, and the kumo technician manuals never
 mention built-in modules. The kumo app had already listed that zone under Dry Mode
 Automation, a feature its manual reserves for "WI 2" interfaces with a sensor. `rssi` is
-the Bluetooth link from the sensor as the module receives it — −38 dBm next to the unit,
-−68 dBm a few metres away on a shelf — not the module's Wi-Fi, which is
-`adapter.status.localNetwork.stationMode.RSSI`.
+the Bluetooth link from the sensor as the module receives it — −38 dBm next to the unit;
+−68, −56, −45 and −46 dBm on a shelf about 4 m away, four reads minutes apart with nothing
+moved — not the module's Wi-Fi, which is `adapter.status.localNetwork.stationMode.RSSI`.
+Two things follow from those four reads. One reading means little, so the plugin judges
+the link on the **median of its last 20 readings** — warned once below −85 dBm, lifted
+at −80, log only (`platform.ts:noteSensorSignal`, since 2.3.9). And the signal refreshes
+more often than the measurements: it changed on every read while the temperature changed
+once, so an unchanged temperature is no sign of a lost sensor.
 
 At pairing: `battery` 71 — a percentage, which the kumo app confirmed once restarted (it
 had shown a stale 0 % until then) — `rssi` −38, `txPower` −53, next to a temperature of

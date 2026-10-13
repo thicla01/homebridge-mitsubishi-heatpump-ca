@@ -901,6 +901,141 @@ test('the per-command note is at most once a minute, and only for a locked contr
   }
 });
 
+// ---- the wireless sensor's Bluetooth signal ------------------------------
+//
+// On a real PAC-USWHS003-TH-1, four reads a few minutes apart with nothing moved
+// returned -68, -56, -45 and -46 dBm. One reading means little, so the verdict is
+// taken on the median of the last 20, warned once below -85 and cleared at -80.
+// Logging only: HomeKit has no characteristic for a signal strength.
+
+/** Run one poll per reading, with the sensor's signal set to each in turn. */
+async function pollWithSignal(platform: KumoV3Platform, local: LocalClientStub, readings: Array<number | undefined>) {
+  for (const rssi of readings) {
+    local.statusResult = { roomTemp: 21, operationMode: 'heat', power: 1, spCool: 24, spHeat: 21, sensorRssi: rssi };
+    await platform['pollLocalDevices']();
+  }
+}
+
+function captureLog(platform: KumoV3Platform) {
+  const warns: string[] = [];
+  const infos: string[] = [];
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  return {
+    weak: () => warns.filter((w) => /Bluetooth signal is weak/.test(w)),
+    good: () => infos.filter((i) => /Bluetooth signal is good again/.test(i)),
+  };
+}
+
+test('a strong signal says nothing', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSignal(platform, local, Array(25).fill(-46));
+    assert.deepStrictEqual(log.weak(), []);
+    assert.deepStrictEqual(log.good(), [], 'and no "good again" for a link that never was weak');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a weak signal is not judged before the window is full', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSignal(platform, local, Array(19).fill(-95));
+    assert.deepStrictEqual(log.weak(), [], 'nineteen readings are not twenty');
+    await pollWithSignal(platform, local, [-95]);
+    assert.strictEqual(log.weak().length, 1, 'the twentieth is');
+    assert.match(log.weak()[0], /median -95 dBm over the last 20 readings/);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a weak link with good moments is still reported — the median sees through the spikes', async () => {
+  // The case a "weak for five minutes straight" rule misses: any good reading would
+  // reset it, and a link sitting at -92 still has the odd -70.
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    // The good moments fall on every fifth poll, the twentieth included, so the
+    // reading that fills the window is a -70 spike. Judged on the latest reading
+    // this link would pass; judged on the median, it does not. The first version
+    // of this test ended on a weak reading, and a mutation judging on the latest
+    // reading survived it.
+    const readings = Array.from({ length: 20 }, (_, i) => (i % 5 === 4 ? -70 : -92));
+    await pollWithSignal(platform, local, readings);
+    assert.strictEqual(log.weak().length, 1);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a good link with dips is not reported — the median sees through those too', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    // Mirror image: the window fills on a -95 dip, which the latest reading would
+    // report and the median does not.
+    const readings = Array.from({ length: 20 }, (_, i) => (i % 5 === 4 ? -95 : -60));
+    await pollWithSignal(platform, local, readings);
+    assert.deepStrictEqual(log.weak(), []);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the warning is said once, and lifted only once the link is clearly back', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSignal(platform, local, Array(20).fill(-90));
+    await pollWithSignal(platform, local, Array(20).fill(-90));
+    assert.strictEqual(log.weak().length, 1, 'latched: forty weak readings, one warning');
+
+    await pollWithSignal(platform, local, Array(20).fill(-83));
+    assert.deepStrictEqual(log.good(), [],
+      'between the two thresholds is not "good again" — that is what keeps a hovering link quiet');
+
+    await pollWithSignal(platform, local, Array(20).fill(-60));
+    assert.strictEqual(log.good().length, 1);
+    // Lifted as soon as the MEDIAN crosses -80, which happens when half the window
+    // holds the new readings: (-83 + -60) / 2 = -71.5 — not after twenty of them.
+    const lifted = Number(/median (-?[\d.]+) dBm/.exec(log.good()[0])?.[1]);
+    assert.ok(lifted >= -80, `lifted at a median of ${lifted}, at or above the -80 recovery threshold`);
+
+    await pollWithSignal(platform, local, Array(20).fill(-90));
+    assert.strictEqual(log.weak().length, 2, 'and re-armed: a second episode is reported');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a poll without a signal is not a reading', async () => {
+  // No sensor, or a slot without the field: "cannot tell" neither fills the window
+  // nor lifts a standing warning.
+  const { platform, local } = makePlatform();
+  const log = captureLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSignal(platform, local, [...Array(19).fill(-95), undefined, undefined]);
+    assert.deepStrictEqual(log.weak(), [], 'two empty polls did not complete the window');
+
+    await pollWithSignal(platform, local, [-95]);
+    assert.strictEqual(log.weak().length, 1);
+    await pollWithSignal(platform, local, Array(30).fill(undefined));
+    assert.deepStrictEqual(log.good(), [], 'and silence did not lift it');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
 test('the same streak stops the accessory answering HomeKit, and recovery restores it', async () => {
   // The end-to-end half of test/unreachable.test.ts: that file pins the accessory's
   // guard and the platform's mode decision separately, and this one pins that the

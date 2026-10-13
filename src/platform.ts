@@ -61,6 +61,25 @@ const LOCAL_POLL_WARN_AFTER = 3;
  * while the plugin runs, at two extra requests an hour per adapter.
  */
 const PROHIBITS_RECHECK_MS = 30 * 60 * 1000;
+/**
+ * The wireless sensor's Bluetooth link: how many readings the verdict is taken
+ * over, and the two thresholds on their MEDIAN.
+ *
+ * A median, because one reading means little. On a real PAC-USWHS003-TH-1, four
+ * reads a few minutes apart with nothing moved came back -68, -56, -45 and -46 dBm:
+ * 23 dB of spread from multipath, three advertising channels and people walking
+ * by. "Weak for five minutes straight" would be reset by any single good reading,
+ * so a sensor sitting at -90 with the odd -82 would never be reported, and a
+ * healthy one with the odd dip would be. The median of the last 20 readings —
+ * five minutes at the default poll — ignores both.
+ *
+ * The thresholds are common Bluetooth LE guidance, not measured on this sensor:
+ * below about -85 dBm readings start to drop out. Recovery needs -80, so a link
+ * hovering at the threshold is reported once rather than every few minutes.
+ */
+const SENSOR_SIGNAL_WINDOW = 20;
+const SENSOR_SIGNAL_WEAK_DBM = -85;
+const SENSOR_SIGNAL_RECOVERED_DBM = -80;
 
 /**
  * Stands in for an address the export does not know, in exportLocalSecrets.
@@ -392,6 +411,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // what makes the warning fire on a CHANGE rather than every half hour.
   private readonly prohibitsCheckedAt: Map<string, number> = new Map();
   private readonly prohibitsSeen: Map<string, string> = new Map();
+  // The wireless sensor's recent Bluetooth readings per unit, and whether a weak
+  // link has been reported — see noteSensorSignal.
+  private readonly sensorSignal: Map<string, { samples: number[]; warned: boolean }> = new Map();
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -2000,6 +2022,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         if (status) {
           handler.updateFromLocal(status);
           this.noteLocalPollSuccess(handler);
+          this.noteSensorSignal(handler, status.sensorRssi);
           // After a read that worked, so the adapter is known to be answering.
           await this.checkProhibits(handler);
         } else {
@@ -2019,6 +2042,54 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       } catch (error) {
         this.noteLocalPollFailure(handler, (error as Error).message);
       }
+    }
+  }
+
+  /**
+   * Track the wireless sensor's Bluetooth signal, and say so when the link is weak.
+   *
+   * Logging only — HomeKit has no characteristic for a signal strength, and dressing
+   * one up as another sensor type would put a tile in the Home app that lies about
+   * what it measures. Every reading goes to the debug log. Once the window is full,
+   * the median decides: below SENSOR_SIGNAL_WEAK_DBM one warning, latched until the
+   * median climbs back to SENSOR_SIGNAL_RECOVERED_DBM, which is said once too.
+   *
+   * A poll that carried no signal — no sensor, or a sensor slot without the field —
+   * is not a reading. It neither fills the window nor clears a warning: "cannot tell"
+   * is not "fine", the same rule as the lockouts.
+   */
+  private noteSensorSignal(handler: KumoThermostatAccessory, rssi: number | null | undefined): void {
+    if (typeof rssi !== 'number' || !Number.isFinite(rssi)) {
+      return;
+    }
+    const serial = handler.getDeviceSerial();
+    const name = handler.getDisplayName();
+    const state = this.sensorSignal.get(serial) ?? { samples: [], warned: false };
+    state.samples.push(rssi);
+    if (state.samples.length > SENSOR_SIGNAL_WINDOW) {
+      state.samples.shift();
+    }
+    this.sensorSignal.set(serial, state);
+    this.log.debug(`[SENSOR] ${name}: Bluetooth signal ${rssi} dBm`);
+
+    if (state.samples.length < SENSOR_SIGNAL_WINDOW) {
+      return;
+    }
+    const sorted = [...state.samples].sort((a, b) => a - b);
+    const mid = sorted.length / 2;
+    const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[Math.floor(mid)];
+
+    if (!state.warned && median < SENSOR_SIGNAL_WEAK_DBM) {
+      state.warned = true;
+      this.log.warn(
+        `${name}: the wireless sensor's Bluetooth signal is weak — median ${median} dBm over the `
+        + `last ${SENSOR_SIGNAL_WINDOW} readings. Below about ${SENSOR_SIGNAL_WEAK_DBM} dBm its `
+        + 'readings may start to drop out, and the unit regulates on them. Moving it closer to the '
+        + 'indoor unit, or away from metal and enclosed spots, should help.',
+      );
+    } else if (state.warned && median >= SENSOR_SIGNAL_RECOVERED_DBM) {
+      state.warned = false;
+      this.log.info(`${name}: the wireless sensor's Bluetooth signal is good again (median ${median} dBm).`);
     }
   }
 

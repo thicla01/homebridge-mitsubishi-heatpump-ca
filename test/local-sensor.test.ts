@@ -176,6 +176,30 @@ test('the sensor\'s battery rides along with its readings', async () => {
   assert.strictEqual(status.humidity, 50.152344);
 });
 
+test('the sensor\'s Bluetooth signal rides along too', async () => {
+  // rssi is the link from the sensor as the adapter receives it — not the adapter's
+  // own Wi-Fi, which lives in adapter.status. The platform warns on it; HomeKit
+  // has nowhere to show it.
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: REAL_SLOT } }],
+  ]);
+  const status = await client.getStatus('S1');
+  assert.ok(status);
+  assert.strictEqual(status.sensorRssi, -38);
+});
+
+test('a signal of the wrong type is dropped', async () => {
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: { ...REAL_SLOT, rssi: '-38' } } }],
+  ]);
+  const status = await client.getStatus('S1');
+  assert.ok(status);
+  assert.strictEqual(status.sensorRssi, undefined);
+  assert.strictEqual(status.sensorBattery, 71, 'and the battery beside it is unaffected');
+});
+
 test('a battery of the wrong type is dropped, and the readings are not', async () => {
   // Firmware we do not control. "71" must not become a level, and must not cost
   // the temperature and humidity that came with it.
