@@ -539,8 +539,9 @@ export class KumoThermostatAccessory {
    */
   private updateSensorBattery(percent: number): void {
     const C = this.platform.Characteristic;
-    // BatteryLevel is a uint8 percentage. The value comes off the cloud, so clamp
-    // and round it here rather than handing HAP something it will reject.
+    // BatteryLevel is a uint8 percentage. The value comes off the cloud or off the
+    // adapter's sensor leaf — either way from outside — so clamp and round it here
+    // rather than handing HAP something it will reject.
     const level = Math.max(0, Math.min(100, Math.round(percent)));
 
     if (!this.batteryService) {
@@ -1155,6 +1156,19 @@ export class KumoThermostatAccessory {
         this.currentStatus.standby = status.standby;
       }
       this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+    }
+
+    // The paired sensor's battery, read from the adapter's own sensor leaf. Under
+    // cloudRegion "ca" and localOnly this is the ONLY way it can arrive: the cloud
+    // event that carries it elsewhere is part of the v3 machinery those modes never
+    // start. Telemetry like the three above, so it lands whatever processZoneUpdate
+    // decided about the rest of the update, and through the same lazily-created
+    // service the cloud path uses — one tile, whichever transport fed it.
+    if (typeof status.sensorBattery === 'number' && Number.isFinite(status.sensorBattery)) {
+      if (this.currentStatus) {
+        this.currentStatus.sensorBattery = status.sensorBattery;
+      }
+      this.updateSensorBattery(status.sensorBattery);
     }
   }
 

@@ -351,7 +351,16 @@ function handle(u, req, res, rawBody) {
     // empty, which is how the client learns the list has ended.
     if (HUMIDITY && slot === '0') {
       return reply(res, {
-        r: { sensors: { 0: { uuid: `sim-sensor-${u.index}`, humidity: 44 + u.index, temperature: u.status.roomTemp } } },
+        // The slot as a real PAC-USWHS003-TH-1 reported it on 2026-10-13, battery
+        // included (a percentage — the kumo app showed the same value).
+        r: {
+          sensors: {
+            0: {
+              uuid: `sim-sensor-${u.index}`, rssi: -38, txPower: -53, battery: 71,
+              humidity: 44 + u.index, temperature: u.status.roomTemp,
+            },
+          },
+        },
       });
     }
     return reply(res, { r: { sensors: {} } });

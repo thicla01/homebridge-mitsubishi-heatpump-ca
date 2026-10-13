@@ -149,6 +149,76 @@ test('the sensor temperature replaces the unit\'s 0.5°C-quantized roomTemp', as
   assert.strictEqual(status.humidity, 51.617188, 'humidity comes from the sensor');
 });
 
+// ---- The sensor's battery, over the LAN -----------------------------------
+//
+// Measured 2026-10-13 on a GX15 with a freshly paired PAC-USWHS003-TH-1: the
+// sensor leaf carries `battery` alongside temperature and humidity. 71 there, and
+// the kumo app showed the same 71 % once restarted. Under cloudRegion "ca" and
+// localOnly this leaf is the only place the battery can come from.
+
+/** The slot exactly as the real unit returned it. */
+const REAL_SLOT = {
+  uuid: 'real-sensor', rssi: -38, txPower: -53, battery: 71,
+  temperature: 22.305429, humidity: 50.152344,
+};
+
+test('the sensor\'s battery rides along with its readings', async () => {
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: REAL_SLOT } }],
+  ]);
+
+  const status = await client.getStatus('S1');
+
+  assert.ok(status, 'a status was read');
+  assert.strictEqual(status.sensorBattery, 71);
+  assert.strictEqual(status.roomTemp, 22.305429, 'and the readings it travels with are unchanged');
+  assert.strictEqual(status.humidity, 50.152344);
+});
+
+test('a battery of the wrong type is dropped, and the readings are not', async () => {
+  // Firmware we do not control. "71" must not become a level, and must not cost
+  // the temperature and humidity that came with it.
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: { ...REAL_SLOT, battery: '71' } } }],
+  ]);
+
+  const status = await client.getStatus('S1');
+
+  assert.ok(status);
+  assert.strictEqual(status.sensorBattery, undefined);
+  assert.strictEqual(status.roomTemp, 22.305429);
+});
+
+test('an empty battery field on a live slot reports no level rather than zero', async () => {
+  // A paired sensor that has not reported its battery yet. null is "no reading",
+  // and turning it into 0 would raise a low-battery alert on a healthy cell.
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: { ...REAL_SLOT, battery: null } } }],
+  ]);
+
+  const status = await client.getStatus('S1');
+
+  assert.ok(status);
+  assert.strictEqual(status.sensorBattery, undefined);
+});
+
+test('an MHK2 has no battery to report', async () => {
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: { uuid: null } } }],
+    ['mhk2', { mhk2: { status: { indoorHumid: 48 } } }],
+  ]);
+
+  const status = await client.getStatus('S1');
+
+  assert.ok(status);
+  assert.strictEqual(status.humidity, 48, 'the control: the MHK2 path really ran');
+  assert.strictEqual(status.sensorBattery, undefined);
+});
+
 test('a unit with no sensor keeps its own roomTemp and reports no humidity', async () => {
   const { client, asked } = makeClient([
     ['indoorUnit', STATUS_NO_SENSOR],

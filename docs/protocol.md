@@ -387,9 +387,19 @@ live outside `indoorUnit.status`:
 They are queried only while the unit reports a `tempSource`/`activeThermistor` of
 `sensorN`; a unit that yields neither is latched and not asked again until its
 temperature source changes (`getSensorReadings`, `src/local-api.ts`). The sensor leaf
-also carries `rssi`, `txPower` and **`battery`** — which the README has long called the
-one sensor reading local control gives up. Unverified either way: the account this was
-measured on has no paired sensor, so every field came back null.
+also carries `rssi`, `txPower` and **`battery`**. Measured 2026-10-13 on a freshly paired
+PAC-USWHS003-TH-1: `battery` 71 — a percentage, which the kumo app confirmed once restarted
+(it had shown a stale 0 % until then) — `rssi` −38, `txPower` −53, next to a temperature of
+22.305429 and a humidity of 50.152344. Pairing switched `tempSource` and `activeThermistor`
+from `unset` to `sensor0`, and changed nothing else in the `adapter` and `indoorUnit`
+trees. Since 2.3.9 the plugin reads the battery from this leaf, so the sensor's Battery
+tile works under `cloudRegion: "ca"` and `localOnly` too, where no `sensor_update` event
+ever arrives.
+
+The parent, `{"c":{"sensors":{}}}`, enumerates all four slots — only slot 0 was occupied —
+plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`), and
+`scansCompleted` (40687 after about 5.5 days of adapter uptime: roughly one scan every
+12 s, *if* it counts from boot — unverified).
 
 ### The capability profile, from the adapter
 
@@ -594,7 +604,7 @@ One accessory per indoor unit.
 | Service | When |
 |---|---|
 | `HumiditySensor` | `showHumiditySensor`, on by default |
-| `Battery` | Units with a paired wireless sensor. `BatteryLevel`, `StatusLowBattery` below 20%, `ChargingState = NOT_CHARGEABLE` |
+| `Battery` | Units with a paired wireless sensor. `BatteryLevel`, `StatusLowBattery` below 20%, `ChargingState = NOT_CHARGEABLE`. Fed by the cloud's `sensor_update` where there is one, and from the adapter's sensor leaf otherwise (`cloudRegion: "ca"`, `localOnly`; since 2.3.9) |
 | `FilterMaintenance` | Created lazily, the first time the unit reports a dirty filter |
 | `Slats` | `exposeVaneSlat`, off by default. Five discrete angles, −90° to 90° in 45° steps |
 | `Switch` ×2 | `showDrySwitch` / `showFanOnlySwitch`, both off by default and both capability-gated |

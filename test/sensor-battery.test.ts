@@ -324,6 +324,59 @@ test('the Battery service carries only characteristics HAP allows on it', () => 
     'a wireless sensor runs on a cell you replace, not one you charge');
 });
 
+// ---- The same tile, fed by the LAN ---------------------------------------
+//
+// Under cloudRegion "ca" and localOnly there is no sensor_update event: the v3
+// machinery that carries it never starts. The battery arrives instead in the
+// local status, read from the adapter's sensor leaf (local-api.ts:
+// getSensorReadings), and must land on the same tile. Measured 2026-10-13 on a
+// real PAC-USWHS003-TH-1: 71, and the kumo app agreed once restarted.
+
+/** A local status as the poller hands it over, with the real sensor's readings. */
+const localStatus = (over: Partial<DeviceStatus> = {}): Partial<DeviceStatus> => ({
+  roomTemp: 22.305429, humidity: 50.152344, spHeat: 19, spCool: 22,
+  power: 1, operationMode: 'cool', fanSpeed: 'auto', airDirection: 'auto',
+  ...over,
+});
+
+test('a battery read over the LAN builds the same tile the cloud would', () => {
+  const h = makeHarness();
+  const before = h.publishes();
+
+  h.handler.updateFromLocal(localStatus({ sensorBattery: 71 }));
+
+  const battery = h.battery();
+  assert.notStrictEqual(battery, null, 'the tile exists');
+  assert.strictEqual(battery!.chars.get(Characteristic.BatteryLevel)!.value, 71);
+  assert.strictEqual(battery!.chars.get(Characteristic.StatusLowBattery)!.value,
+    Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL);
+  assert.ok(h.publishes() > before, 'and HomeKit was told about the new service');
+});
+
+test('a low battery over the LAN raises the alert', () => {
+  const h = makeHarness();
+  h.handler.updateFromLocal(localStatus({ sensorBattery: 15 }));
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.StatusLowBattery)!.value,
+    Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW);
+});
+
+test('a later LAN reading moves the level on the existing tile', () => {
+  const h = makeHarness();
+  h.handler.updateFromLocal(localStatus({ sensorBattery: 71 }));
+  const tile = h.battery();
+  h.handler.updateFromLocal(localStatus({ sensorBattery: 70 }));
+  assert.strictEqual(h.battery(), tile, 'one tile, not a second one');
+  assert.strictEqual(tile!.chars.get(Characteristic.BatteryLevel)!.value, 70);
+});
+
+test('a local status without a battery grows no tile', () => {
+  // The unit with no sensor, polled over the LAN: nothing to report, nothing shown.
+  const h = makeHarness();
+  h.handler.updateFromLocal(localStatus());
+  h.handler.updateFromLocal(localStatus({ sensorBattery: null }));
+  assert.strictEqual(h.battery(), null);
+});
+
 test('StatusLowBattery flips at 20%, with a case either side', () => {
   const cases: Array<[number, number]> = [
     [100, Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL],

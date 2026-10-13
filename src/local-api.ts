@@ -822,6 +822,9 @@ export class LocalKumoClient {
         if (extra.temperature !== undefined) {
           mapped.roomTemp = extra.temperature;
         }
+        if (extra.battery !== undefined) {
+          mapped.sensorBattery = extra.battery;
+        }
       }
     }
     return { status: mapped, error: 'none' };
@@ -863,10 +866,15 @@ export class LocalKumoClient {
    * Sensor slots are consecutive; the first slot with no `uuid` ends the list.
    * A unit that reports neither sensors nor MHK2 is remembered in `noSensor` so
    * the poll stops paying for the lookup, mirroring mitsubishi-comfort's latch.
+   *
+   * The battery rides along from the same slot. It is a percentage: 71 here on a
+   * real PAC-USWHS003-TH-1 on 2026-10-13, and the kumo app showed the same 71 %
+   * once restarted (it had displayed a stale 0 % until then). pykumo, hass-kumo
+   * and ha_kumo_ws all read this exact field as one too. An MHK2 reports none.
    */
   private async getSensorReadings(
     serial: string,
-  ): Promise<{ humidity?: number | null; temperature?: number } | null> {
+  ): Promise<{ humidity?: number | null; temperature?: number; battery?: number } | null> {
     if (this.noSensor.has(serial)) {
       return null;
     }
@@ -880,8 +888,11 @@ export class LocalKumoClient {
       }
       const temperature = typeof sensor.temperature === 'number' ? sensor.temperature : undefined;
       const humidity = typeof sensor.humidity === 'number' ? sensor.humidity : undefined;
+      const battery = typeof sensor.battery === 'number' && Number.isFinite(sensor.battery)
+        ? sensor.battery
+        : undefined;
       if (temperature !== undefined || humidity !== undefined) {
-        return { temperature, humidity };
+        return { temperature, humidity, battery };
       }
     }
 

@@ -332,8 +332,8 @@ over the LAN. Nothing is declared by hand and no secret goes into `config.json`.
   is something you wrote by hand for one unit; here it is discovered, and both are true on
   ordinary hardware — so `showDrySwitch` / `showFanOnlySwitch` decide, as on the cloud path.
 - **What it gives up against a working v3 account:** streaming (status comes from the LAN
-  poll, default 15s), the cloud's own connection flag, and paired-sensor battery
-  readings. A unit that goes quiet is still reported: three failed polls in a row (~45s at
+  poll, default 15s) and the cloud's own connection flag. The paired sensor's battery is
+  no longer on that list: since 2.3.9 it is read from the adapter over the LAN. A unit that goes quiet is still reported: three failed polls in a row (~45s at
   the default interval) log a warning **and** mark the accessory Not Responding in the Home
   app, so the tile stops showing a reading the unit has stopped backing; the next successful
   read clears it. So does a unit the reply lists but returns no secrets for: its accessory is
