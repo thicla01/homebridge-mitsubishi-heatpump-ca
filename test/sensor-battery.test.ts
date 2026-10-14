@@ -361,9 +361,12 @@ test('a low battery over the LAN raises the alert', () => {
 });
 
 test('a later LAN reading moves the level on the existing tile', () => {
+  // As above: a majority of the recent readings, since one reading alone is
+  // smoothed away.
   const h = makeHarness();
   h.handler.updateFromLocal(localStatus({ sensorBattery: 71 }));
   const tile = h.battery();
+  h.handler.updateFromLocal(localStatus({ sensorBattery: 70 }));
   h.handler.updateFromLocal(localStatus({ sensorBattery: 70 }));
   assert.strictEqual(h.battery(), tile, 'one tile, not a second one');
   assert.strictEqual(tile!.chars.get(Characteristic.BatteryLevel)!.value, 70);
@@ -375,6 +378,80 @@ test('a local status without a battery grows no tile', () => {
   h.handler.updateFromLocal(localStatus());
   h.handler.updateFromLocal(localStatus({ sensorBattery: null }));
   assert.strictEqual(h.battery(), null);
+});
+
+// ---- What is shown is a median --------------------------------------------
+//
+// The battery figure is a coin cell's voltage turned into a percentage, in coarse
+// steps, and it sags while the sensor transmits. Thirty reads of a real
+// PAC-USWHS003-TH-1, half a minute apart, gave 88 twenty-eight times and 80 twice,
+// in isolated dips. Shown raw, the Home app flickers between them; at the 20 %
+// threshold the low-battery warning would come and go.
+
+const level = (h: Harness) => h.battery()!.chars.get(Characteristic.BatteryLevel)!.value;
+
+test('the real series never shows its two dips', () => {
+  // The thirty readings in the order they came: the dips were the 4th and 20th.
+  const series = Array.from({ length: 30 }, (_, i) => (i === 3 || i === 19 ? 80 : 88));
+  const h = makeHarness();
+  const shown: unknown[] = [];
+  for (const battery of series) {
+    h.handler.updateFromLocal(localStatus({ sensorBattery: battery }));
+    shown.push(level(h));
+  }
+  assert.deepStrictEqual([...new Set(shown)], [88], 'every one of the thirty displays read 88');
+});
+
+test('a lasting decline is followed, once most of the window agrees', () => {
+  const h = makeHarness();
+  for (let i = 0; i < 9; i++) {
+    h.emitSensor({ battery: 88 });
+  }
+  for (let i = 0; i < 4; i++) {
+    h.emitSensor({ battery: 80 });
+  }
+  assert.strictEqual(level(h), 88, 'four of nine is a minority');
+  h.emitSensor({ battery: 80 });
+  assert.strictEqual(level(h), 80, 'five of nine is not');
+});
+
+test('the low-battery warning follows the smoothed level, not one low reading', () => {
+  const h = makeHarness();
+  for (let i = 0; i < 8; i++) {
+    h.emitSensor({ battery: 25 });
+  }
+  h.emitSensor({ battery: 15 });
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.StatusLowBattery)!.value,
+    Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL, 'one sagging reading raises nothing');
+  for (let i = 0; i < 4; i++) {
+    h.emitSensor({ battery: 15 });
+  }
+  assert.strictEqual(h.battery()!.chars.get(Characteristic.StatusLowBattery)!.value,
+    Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW, 'a cell that has really dropped does');
+});
+
+test('while the window fills, what is shown is a value the sensor reported', () => {
+  // Two readings have no single middle. Averaging them would show 84, a figure the
+  // sensor never sent; the upper of the pair is shown instead.
+  const h = makeHarness();
+  h.emitSensor({ battery: 88 });
+  h.emitSensor({ battery: 80 });
+  assert.strictEqual(level(h), 88);
+});
+
+test('the window forgets: only the last nine readings count', () => {
+  // Five fresh readings, not nine. With nine the median of an UNBOUNDED history
+  // would be 90 too — eighteen values, the upper middle one a 90 — so this would
+  // pass with no window at all. With five, the window holds four 40s and five 90s
+  // (median 90), while all fourteen readings ever seen hold nine 40s (median 40).
+  const h = makeHarness();
+  for (let i = 0; i < 9; i++) {
+    h.emitSensor({ battery: 40 });
+  }
+  for (let i = 0; i < 5; i++) {
+    h.emitSensor({ battery: 90 });
+  }
+  assert.strictEqual(level(h), 90, 'the old readings beyond the window no longer count');
 });
 
 test('StatusLowBattery flips at 20%, with a case either side', () => {
@@ -405,10 +482,14 @@ test('the battery level is clamped and rounded to the uint8 HAP expects', () => 
 });
 
 test('a later battery reading updates the existing service without re-publishing', () => {
+  // Two readings of 12, not one: since 2.3.10 what is shown is the median of the
+  // recent readings, so a single reading moves nothing — see the smoothing tests
+  // below. Two of three is a majority, which is the point being made here.
   const h = makeHarness();
   h.emitSensor({ battery: 100 });
   const after = h.publishes();
 
+  h.emitSensor({ battery: 12 });
   h.emitSensor({ battery: 12 });
 
   assert.strictEqual(h.battery()!.chars.get(Characteristic.BatteryLevel)!.value, 12);

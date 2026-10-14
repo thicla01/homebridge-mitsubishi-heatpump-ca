@@ -116,6 +116,10 @@ export class KumoThermostatAccessory {
   // Below this percent the sensor is reported as low. HAP has no threshold of its
   // own; 20% is the convention Homebridge accessories use.
   private readonly LOW_BATTERY_PCT = 20;
+  // The sensor's most recent battery readings; HomeKit is shown their median. See
+  // updateSensorBattery.
+  private readonly batteryReadings: number[] = [];
+  private readonly BATTERY_SMOOTHING_WINDOW = 9;
 
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
@@ -536,13 +540,30 @@ export class KumoThermostatAccessory {
    * sensor, not the heat pump. HomeKit has no way to say that, so Apple Home will
    * label the low-battery warning with the ACCESSORY's name ("Bedroom has a low
    * battery"), which is why the service is named for the sensor.
+   *
+   * WHAT IS SHOWN IS A MEDIAN, not the latest reading. The figure is a coin cell's
+   * voltage turned into a percentage, in coarse steps, and it sags while the sensor
+   * transmits: thirty reads of a real PAC-USWHS003-TH-1 half a minute apart gave
+   * 88 twenty-eight times and 80 twice, in isolated dips. Shown raw, the Home app
+   * flickers between them — harmless at 88, but at the 20 % threshold it would
+   * raise and drop the low-battery warning. The median of the last
+   * BATTERY_SMOOTHING_WINDOW readings ignores an isolated dip and still follows a
+   * real decline once most of the window agrees. With an even number of readings
+   * (only while the window fills) the upper one of the middle pair is taken, so
+   * what is shown is always a value the sensor actually reported.
    */
   private updateSensorBattery(percent: number): void {
     const C = this.platform.Characteristic;
     // BatteryLevel is a uint8 percentage. The value comes off the cloud or off the
     // adapter's sensor leaf — either way from outside — so clamp and round it here
     // rather than handing HAP something it will reject.
-    const level = Math.max(0, Math.min(100, Math.round(percent)));
+    const reading = Math.max(0, Math.min(100, Math.round(percent)));
+    this.batteryReadings.push(reading);
+    if (this.batteryReadings.length > this.BATTERY_SMOOTHING_WINDOW) {
+      this.batteryReadings.shift();
+    }
+    const sorted = [...this.batteryReadings].sort((a, b) => a - b);
+    const level = sorted[Math.floor(sorted.length / 2)];
 
     if (!this.batteryService) {
       const existing = this.accessory.getService(this.platform.Service.Battery);
@@ -1334,8 +1355,9 @@ export class KumoThermostatAccessory {
         spCool: zone.adapter.spCool,
         spHeat: zone.adapter.spHeat,
         spAuto: zone.adapter.spAuto,
-        // The sensor battery is in no zone/streaming payload — it arrives only on
-        // sensor_update — so carry it across this rebuild of the status object.
+        // The sensor battery is in no zone/streaming payload — it arrives on
+        // sensor_update, or in the local status after this call returns — so carry
+        // it across this rebuild of the status object.
         sensorBattery: this.currentStatus?.sensorBattery ?? null,
         // Same shape, three more fields. standby/defrost/filterDirty are in the
         // streaming `displayConfig` and in the local status, but NOT in the

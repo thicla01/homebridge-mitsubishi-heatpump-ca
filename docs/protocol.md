@@ -404,19 +404,33 @@ once, so an unchanged temperature is no sign of a lost sensor.
 
 At pairing: `battery` 71 — a percentage, which the kumo app confirmed once restarted (it
 had shown a stale 0 % until then) — `rssi` −38, `txPower` −53, next to a temperature of
-22.305429 and a humidity of 50.152344. The battery figure is an estimate from the coin
-cell's voltage and is **not monotonic**: it read 80 a few hours later, after the move. A
-cell recovers after the pairing burst and drifts with temperature, so near the 20 %
-threshold the low-battery state may come and go before it settles. Pairing switched `tempSource` and `activeThermistor`
-from `unset` to `sensor0`, and changed nothing else in the `adapter` and `indoorUnit`
-trees. Since 2.3.9 the plugin reads the battery from this leaf, so the sensor's Battery
-tile works under `cloudRegion: "ca"` and `localOnly` too, where no `sensor_update` event
-ever arrives.
+22.305429 and a humidity of 50.152344. Pairing switched `tempSource` and
+`activeThermistor` from `unset` to `sensor0`, and changed nothing else in the `adapter`
+and `indoorUnit` trees. Since 2.3.9 the plugin reads the battery from this leaf, so the
+sensor's battery level reaches HomeKit under `cloudRegion: "ca"` and `localOnly` too,
+where no `sensor_update` event ever arrives. Apple Home shows it in the accessory's
+details, beside the humidity, rather than as a tile of its own.
 
 The parent, `{"c":{"sensors":{}}}`, enumerates all four slots — only slot 0 was occupied —
-plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`), and
-`scansCompleted` (40687 after about 5.5 days of adapter uptime: roughly one scan every
-12 s, *if* it counts from boot — unverified).
+plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`) and
+`scansCompleted`.
+
+**How often each field moves** — thirty reads of the parent half a minute apart,
+2026-10-13, nothing touched:
+
+| Field | Behaviour |
+|---|---|
+| `scansCompleted` | +73 in 885 s: **one Bluetooth scan every 12.1 s**. It counts from the adapter's boot — 40687 scans after 478930 s of uptime is 11.8 s, the same rate |
+| `rssi` | Changed on 25 of 29 intervals, −41 to −77 dBm, median −51.5: refreshed every scan. This is the field that shows the link is alive |
+| `temperature`, `humidity` | **Unchanged for the whole fifteen minutes** in a stable room. The sensor sends new measurements rarely — most likely only when they change, since they moved within minutes while the sensor was settling after a move. A frozen temperature is no sign of a lost sensor |
+| `battery` | 88 twenty-eight times, 80 twice in isolated dips, earlier 71: a coin cell's voltage turned into a percentage, in steps of about 8 %, sagging while the sensor transmits. Not monotonic either — 71 at pairing, 80 and then 88 as the new cell recovered |
+
+Shown raw, that battery figure would flicker in the Home app, and near 20 % raise and drop
+the low-battery warning. Since 2.3.10 what HomeKit is shown is the **median of the last
+nine readings** (`accessory.ts:updateSensorBattery`), which ignores an isolated dip and
+follows a real decline once most of the window agrees. Humidity arrives in exact steps of
+1/1024 % (56.011719 = 57356/1024), so its six decimals are the format's resolution, not
+the sensor's accuracy; the temperature follows no such simple rule.
 
 ### The capability profile, from the adapter
 
@@ -621,7 +635,7 @@ One accessory per indoor unit.
 | Service | When |
 |---|---|
 | `HumiditySensor` | `showHumiditySensor`, on by default |
-| `Battery` | Units with a paired wireless sensor. `BatteryLevel`, `StatusLowBattery` below 20%, `ChargingState = NOT_CHARGEABLE`. Fed by the cloud's `sensor_update` where there is one, and from the adapter's sensor leaf otherwise (`cloudRegion: "ca"`, `localOnly`; since 2.3.9) |
+| `Battery` | Units with a paired wireless sensor. `BatteryLevel`, `StatusLowBattery` below 20%, `ChargingState = NOT_CHARGEABLE`. Fed by the cloud's `sensor_update` where there is one, and from the adapter's sensor leaf otherwise (`cloudRegion: "ca"`, `localOnly`; since 2.3.9). The level is the median of the last nine readings (since 2.3.10). Apple Home shows it in the accessory's details, not as a tile |
 | `FilterMaintenance` | Created lazily, the first time the unit reports a dirty filter |
 | `Slats` | `exposeVaneSlat`, off by default. Five discrete angles, −90° to 90° in 45° steps |
 | `Switch` ×2 | `showDrySwitch` / `showFanOnlySwitch`, both off by default and both capability-gated |
