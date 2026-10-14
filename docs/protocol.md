@@ -392,7 +392,10 @@ PAC-USWHS003-TH-1 — paired to a GX15's **built-in** Wi-Fi module (IC `4441A-MB
 `03.07.03`), a combination no Mitsubishi document lists: every sensor datasheet names only
 the external PAC-USWHS002-WF-1/WF-2 interfaces, and the kumo technician manuals never
 mention built-in modules. The kumo app had already listed that zone under Dry Mode
-Automation, a feature its manual reserves for "WI 2" interfaces with a sensor. `rssi` is
+Automation, a feature its manual reserves for "WI 2" interfaces with a sensor. Once the
+sensor was paired, the app still refused to switch that feature on, although the cloud's
+record of the zone held the sensor (see [REST, v2](#rest-v2)). So the pairing works, but
+whether Dry Mode Automation does on a built-in module is still open. `rssi` is
 the Bluetooth link from the sensor as the module receives it — −38 dBm next to the unit;
 −68, −56, −45 and −46 dBm on a shelf about 4 m away, four reads minutes apart with nothing
 moved — not the module's Wi-Fi, which is `adapter.status.localNetwork.stationMode.RSSI`.
@@ -604,6 +607,30 @@ thermostat), plus three blocks:
 Zone level also carries `minCoolSetpoint`/`maxHeatSetpoint` (installer limits, 0.5 °C
 adrift from the profile's bounds in the samples, so not interchangeable with them) and
 `autoModeEnabled`. Neither is used.
+
+Three more zone blocks concern humidity. Only one field among them is read — and it is
+not one that a wireless sensor fills. `tools/kumo-v2-zones.mjs` prints all three, as
+described in CONTRIBUTING:
+
+- `kumoSensorSettings` — the cloud's copy of the paired wireless sensor. With no sensor
+  (live mapping, 2026-08-18) it was `{ _uuid: 0, _humidity: 0 }`. The day after a
+  PAC-USWHS003-TH-1 was paired (2026-10-14), the whole object had been replaced by the
+  adapter's own sensor leaf: `uuid` (the same value as the adapter's `sensors.0.uuid`),
+  `battery`, `humidity`, `rssi`, `temperature` and `txPower`, plus `lastUpdated`. No
+  underscore field survived. The values were current — `battery` 96 and `rssi` −61, not
+  the pairing figures — so the cloud keeps the record up to date. It is not read here,
+  since the LAN poller reads the same leaf from the adapter.
+- `autoDrySettings` — Dry Mode Automation: `isAutoDry`, `enable`, `targetHumid` (35),
+  `overcool` (1.5), `offset` (4) and `active`. All were switched off, with the same
+  values before and after the pairing. The Canadian kumo app still refused to switch the
+  feature on for that zone ("Please add a wireless sensor or capable thermostat to the
+  zone to enable Dry Mode Automation."), with the sensor already in the record above.
+  Whatever the app checks, then, it is not simply that this record exists.
+- `mhk2Settings` — the MHK2 wall thermostat: `connected` (`thermostat`, `outdoorAir`,
+  `indoorAir`, each with a battery string), `status` (`outdoorTemp`, `outdoorHumid`,
+  `indoorHumid`), `auto`, `schedule`, `hold`, `dr` and `info`. `status.indoorHumid` is
+  the one field the plugin reads, to seed humidity at startup. It stays `null` without an
+  MHK2 — a paired wireless sensor does not fill it.
 
 **What v2 does NOT have:** no socket, no streaming, no MQTT — nothing in the whole tree.
 It is a bootstrap and cannot be a status source; the LAN poller is the only status path in

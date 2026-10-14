@@ -150,8 +150,8 @@ holder's personal data, so the guarantees were tested rather than assumed: again
 local fake server serving the test fixture, the output carried none of its seven secrets,
 eleven personal-data sentinels, the configured credentials or the serial numbers; an
 error body planted with a sentinel was never read; and a filter trap — a password, a
-token, an e-mail and an address planted *inside* `kumoSensorSettings` — was withheld
-while `_uuid` stayed visible. `KUMO_V2_URL_OVERRIDE` exists for that fake server and is
+token, an e-mail, an address and a name planted *inside* `kumoSensorSettings` — was
+withheld while `_uuid` and `lastUpdated` stayed visible. `KUMO_V2_URL_OVERRIDE` exists for that fake server and is
 refused for any host but `127.0.0.1` and `localhost`.
 
 ## The `@types/node` floor

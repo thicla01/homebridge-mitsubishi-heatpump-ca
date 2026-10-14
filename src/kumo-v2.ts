@@ -346,9 +346,11 @@ export function mapV2Condition(zone: Record<string, unknown>): Partial<DeviceSta
     status.airDirection = vane;
   }
 
-  // Humidity is not in reportedCondition at all. The only v2 leaf for it is the
-  // MHK2 block — the same source the LAN path reads — and it is null on a unit
-  // with no wall thermostat, so it is set only when it is a real number.
+  // Humidity is not in reportedCondition at all. The MHK2 block carries it — the
+  // same source the LAN path reads — and it is null on a unit with no wall
+  // thermostat, so it is set only when it is a real number. A paired wireless
+  // sensor's humidity sits in `kumoSensorSettings` instead (docs/protocol.md) and is
+  // deliberately not read: the LAN poller reads the same sensor from the adapter.
   const mhk2 = asRecord(asRecord(zone.mhk2Settings)?.status);
   const indoorHumid = asNumber(mhk2?.indoorHumid);
   if (indoorHumid !== undefined) {

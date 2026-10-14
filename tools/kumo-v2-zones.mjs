@@ -6,11 +6,13 @@
 //   On a GX15 with a PAC-USWHS003-TH-1 paired, linked to its zone, reporting
 //   humidity and battery in the kumo app, the app still refused to enable Dry Mode
 //   Automation: "Please add a wireless sensor or capable thermostat to the zone".
-//   The v2 reply carries, per zone, a `kumoSensorSettings` (`_uuid`, `_humidity`)
-//   and an `autoDrySettings` (`isAutoDry`, `enable`, `targetHumid`) that the plugin
-//   never reads. If the zone's `_uuid` is empty, the cloud has the sensor's readings
-//   but never attached the sensor to the zone — which is plausibly what Dry Mode
-//   Automation checks. This tool shows those fields so that question has an answer.
+//   The v2 reply carries, per zone, a `kumoSensorSettings` and an `autoDrySettings`
+//   that the plugin never reads. This tool shows them. Its first run, on that GX15
+//   (2026-10-14), answered the question it was built for: the cloud HAD attached the
+//   sensor to the zone — `kumoSensorSettings` held the adapter's own sensor uuid with
+//   live battery, humidity, rssi, temperature and txPower — so the refusal comes from
+//   somewhere else. `autoDrySettings` held isAutoDry, enable, targetHumid, overcool,
+//   offset and active, all switched off. See docs/protocol.md.
 //
 // WHAT THE REPLY ALSO CONTAINS, AND WHY NONE OF IT IS PRINTED
 //   The same reply carries every unit's LAN `password` and `cryptoSerial`, a session
@@ -128,8 +130,13 @@ try {
 
 // ---- the walk, and the only things printed -----------------------------------
 
-/** Keys never printed, whatever object they turn up in. */
-const SENSITIVE = /pass|token|crypto|secret|email|phone|addr|street|zip|first|last|serial|mac/i;
+/**
+ * Keys never printed, whatever object they turn up in. Names are matched as
+ * `firstName` / `lastName`, not as bare "first" / "last": the bare words withheld
+ * `lastUpdated` from the first real run, which is exactly the field that says how
+ * fresh the cloud's copy of the sensor is.
+ */
+const SENSITIVE = /pass|token|crypto|secret|email|phone|addr|street|zip|first_?name|last_?name|serial|mac/i;
 
 /** A copy of `value` holding only what is safe to show. */
 function safe(value, depth = 0) {
