@@ -132,6 +132,28 @@ answered in the same run. Verified against the simulator, whose fall-through for
 unimplemented node is that same code; whether real firmware agrees is exactly the kind of
 thing the probe is for.
 
+## Asking the cloud what it records about a zone — `kumo-v2-zones`
+
+`tools/kumo-v2-zones.mjs` is the probe's counterpart on the cloud side, for one question
+the adapter cannot answer: what the kumo cloud's own record of each zone says about its
+wireless sensor and Dry Mode Automation. It signs in once, exactly as the plugin does at
+startup (credentials from the Homebridge config, redirects refused, a refused sign-in
+not retried), walks the zone tree and prints, per zone, the label, `kumoSensorSettings`,
+`autoDrySettings` and `mhk2Settings` — nothing else.
+
+```bash
+sudo /opt/homebridge/bin/node kumo-v2-zones.mjs            # on the Homebridge host
+```
+
+The v2 reply also carries every unit's LAN secrets, a session token and the account
+holder's personal data, so the guarantees were tested rather than assumed: against a
+local fake server serving the test fixture, the output carried none of its seven secrets,
+eleven personal-data sentinels, the configured credentials or the serial numbers; an
+error body planted with a sentinel was never read; and a filter trap — a password, a
+token, an e-mail and an address planted *inside* `kumoSensorSettings` — was withheld
+while `_uuid` stayed visible. `KUMO_V2_URL_OVERRIDE` exists for that fake server and is
+refused for any host but `127.0.0.1` and `localhost`.
+
 ## The `@types/node` floor
 
 `engines.node` promises `>=20.0.0`, but `devDependencies` pins `@types/node` to `^24` —
