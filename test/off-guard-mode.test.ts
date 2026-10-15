@@ -25,7 +25,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 
 import { KumoThermostatAccessory } from '../dist/accessory.js';
-import type { Commands, Zone } from '../dist/settings.js';
+import type { Commands, DeviceProfile, Zone } from '../dist/settings.js';
 import { Characteristic, Service, makeLog, makeAccessory } from './helpers';
 
 const SERIAL = 'TESTSERIAL001';
@@ -37,6 +37,7 @@ interface SentCommand {
 
 function makeHarness() {
   const sendCommandCalls: SentCommand[] = [];
+  let profileCb: ((serial: string, deviceProfile: DeviceProfile) => void) | null = null;
   const platform = {
     Service,
     Characteristic,
@@ -46,7 +47,9 @@ function makeHarness() {
   };
   const kumoAPI = {
     subscribeToDevice() {},
-    onDeviceProfileUpdate() {},
+    onDeviceProfileUpdate(cb: (serial: string, deviceProfile: DeviceProfile) => void) {
+      profileCb = cb;
+    },
     sendCommand(serial: string, commands: Commands) {
       sendCommandCalls.push({ serial, commands });
       return Promise.resolve(true);
@@ -59,7 +62,18 @@ function makeHarness() {
     kumoAPI as never,
     30,
   );
-  return { handler, accessory, sendCommandCalls };
+  // The Dry and Fan-only switches exist only once a profile says the unit has
+  // those modes, as on a real unit.
+  const setProfile = (over: Partial<DeviceProfile> = {}) => profileCb!(SERIAL, {
+    numberOfFanSpeeds: 5, hasFanSpeedAuto: true,
+    hasModeDry: true, usesSetPointInDryMode: true,
+    hasModeHeat: true, hasModeVent: true, hasVaneDir: true, hasVaneSwing: true,
+    hasDefrost: true, hasStandby: true,
+    minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
+    maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
+    ...over,
+  });
+  return { handler, accessory, sendCommandCalls, setProfile };
 }
 
 const zone = (over: Record<string, unknown> = {}): Zone => ({
@@ -143,6 +157,47 @@ test('control: turning the unit on and picking a mode in the same breath still w
     [{ operationMode: 'auto' }, { operationMode: 'heat' }],
     'both the power-on and the requested mode reach the device',
   );
+});
+
+test('AC-off scene: a Dry or Fan-only switch dispatched right after the off does not reach the device', async () => {
+  // The two switches send an active mode too, and had no guard: an "AC off" scene
+  // that captured either one switched on revived the unit, and its noteModeIntent
+  // cleared the window for everything behind it. Ported from upstream 86ec5e2.
+  for (const setSwitch of ['setDryOn', 'setFanOnlyOn'] as const) {
+    const { handler, sendCommandCalls } = makeHarness();
+    handler.updateFromZone(zone({ power: 1, operationMode: 'cool' }));
+
+    const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+    const pSwitch = handler[setSwitch](true);
+    await Promise.all([pOff, pSwitch]);
+
+    assert.deepStrictEqual(
+      sendCommandCalls.map((c) => c.commands),
+      [{ operationMode: 'off' }],
+      `${setSwitch}: the switch's mode would power the unit back on`,
+    );
+  }
+});
+
+test('a refused Dry or Fan-only ON puts the switch back after HAP stores the written value', async () => {
+  // hap-nodejs assigns the written value after the handler resolves, so this
+  // replays that assignment before looking: only a deferred revert survives it.
+  for (const [setSwitch, subtype] of [['setDryOn', 'dry'], ['setFanOnlyOn', 'fan-only']] as const) {
+    const { handler, accessory, setProfile } = makeHarness();
+    setProfile();
+    handler.updateFromZone(zone({ power: 1, operationMode: 'cool' }));
+    const sw = accessory.getServiceById(Service.Switch, subtype);
+    assert.ok(sw, `${subtype} switch exists`);
+
+    const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+    const pSwitch = handler[setSwitch](true);
+    await Promise.all([pOff, pSwitch]);
+    sw.getCharacteristic(Characteristic.On).value = true;
+    await new Promise((r) => setTimeout(r, 150));
+
+    assert.strictEqual(sw.getCharacteristic(Characteristic.On).value, false,
+      `${setSwitch}: the switch must not keep showing a mode the unit is not in`);
+  }
 });
 
 test('control: a mode change with no off in the burst still sends', async () => {

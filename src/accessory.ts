@@ -847,6 +847,23 @@ export class KumoThermostatAccessory {
       `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
+    // Same guard as setTargetHeaterCoolerState, and checked before noteModeIntent
+    // for the same reason: an ON trailing an off in one scene burst revives the
+    // unit, and noteModeIntent would clear the window for everything behind it.
+    // Ported from upstream 86ec5e2.
+    if (on && this.offInFlight()) {
+      this.platform.log.debug(
+        `[FAN ONLY] ${this.accessory.displayName}: an off is in flight — not sending vent`,
+      );
+      setTimeout(() => {
+        this.fanOnlyService?.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isFanOnlyActive(this.currentStatus),
+        );
+      }, 100);
+      return;
+    }
+
     this.noteModeIntent(operationMode);
 
     const success = await this.sendDeviceCommand({ operationMode, power });
@@ -955,6 +972,23 @@ export class KumoThermostatAccessory {
     this.platform.log.info(
       `[DRY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
+
+    // Same guard as setTargetHeaterCoolerState, and checked before noteModeIntent
+    // for the same reason: an ON trailing an off in one scene burst revives the
+    // unit, and noteModeIntent would clear the window for everything behind it.
+    // Ported from upstream 86ec5e2.
+    if (on && this.offInFlight()) {
+      this.platform.log.debug(
+        `[DRY] ${this.accessory.displayName}: an off is in flight — not sending dry`,
+      );
+      setTimeout(() => {
+        this.dryService?.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isDryActive(this.currentStatus),
+        );
+      }, 100);
+      return;
+    }
 
     this.noteModeIntent(operationMode);
 
