@@ -814,8 +814,10 @@ export class LocalKumoClient {
           mapped.humidity = extra.humidity;
         }
         // Prefer the sensor's own temperature over the unit's `roomTemp`.
-        // The unit quantizes to 0.5°C before reporting; the sensor gives ~6
-        // decimals. Measured 2026-07-27: sensor 22.648632°C against roomTemp
+        // While a sensor drives the unit, `roomTemp` IS that sensor's value,
+        // quantized to 0.5°C — warming the sensor by hand moved it 21 → 24.5 with
+        // the unit's own air unchanged (2026-10-15) — so nothing is lost here; the
+        // sensor gives ~6 decimals. Measured 2026-07-27: sensor 22.648632°C against roomTemp
         // 22.5. In °F that is the difference between an unambiguous 72.77 (both
         // apps show 73) and exactly 72.50, which one app rounds to 73 while the
         // other truncates to 72. The finer value removes the ambiguity.

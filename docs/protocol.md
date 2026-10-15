@@ -414,6 +414,18 @@ sensor's battery level reaches HomeKit under `cloudRegion: "ca"` and `localOnly`
 where no `sensor_update` event ever arrives. Apple Home shows it in the accessory's
 details, beside the humidity, rather than as a tile of its own.
 
+**What `roomTemp` carries while a sensor drives the unit.** With `tempSource` and
+`activeThermistor` at `sensor0`, `indoorUnit.status.roomTemp` is the sensor's own value,
+quantized to 0.5 °C — not the unit's thermistor. Measured read-only on 2026-10-15, the
+sensor on a shelf about 4 m from the unit. At rest, `roomTemp` read 21 beside a sensor
+at 21.10. After two minutes in a hand, they read 24.5 and 25.57. The air at the unit did
+not warm 3.5 °C in two minutes; the gap is a fast-rising reading, with the two nodes
+read a second apart. So while a sensor drives the unit, its own room thermistor shows
+nowhere in `indoorUnit.status`, the only room temperature the LAN reports outside the
+sensor slots. Whether the unit still watches that thermistor, to take over if the sensor
+goes silent, is unmeasured. The same reads put the battery at 100 % in the hand against
+96 % on the shelf: a coin cell's voltage rises with its temperature.
+
 The parent, `{"c":{"sensors":{}}}`, enumerates all four slots — only slot 0 was occupied —
 plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`) and
 `scansCompleted`.
