@@ -191,9 +191,10 @@ A fully-enabled unit is more than one tile, so here is the end state:
 **Scenes capture all of these at once.** A scene snapshots the accessory's full state —
 power, mode, setpoints, fan speed, swing, the switches — and re-pushes everything
 concurrently each time it runs, not just the control you were thinking of when you saved
-it. The plugin is built to survive that burst (an "AC off" scene cannot revive the unit
-through a trailing setpoint or the fan tile), but it is worth knowing when a scene seems
-to change more than you asked.
+it. The plugin is built to survive that burst — an "AC off" scene cannot revive the unit
+through a trailing setpoint, the fan tile or a Dry / Fan-only switch, and a scene that
+turns the unit on ends in the mode it recorded — but it is worth knowing when a scene
+seems to change more than you asked.
 
 ### Vane and swing
 

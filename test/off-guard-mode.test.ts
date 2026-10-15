@@ -151,11 +151,15 @@ test('control: turning the unit on and picking a mode in the same breath still w
   const pMode = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
   await Promise.all([pOn, pMode]);
 
-  // 'auto' is what setActive picks with nothing remembered and no profile loaded.
+  // This used to pin [{auto}, {heat}] as correct. It was not: the ON's default
+  // 'auto' raced the 'heat', and in the other dispatch order the unit ended in
+  // AUTO. The mode write powers the unit on by itself, so the held ON is dropped
+  // (on-scene-mode-race.test.ts). The point of this control is unchanged: the
+  // mode the user picked reaches the device.
   assert.deepStrictEqual(
     sendCommandCalls.map((c) => c.commands),
-    [{ operationMode: 'auto' }, { operationMode: 'heat' }],
-    'both the power-on and the requested mode reach the device',
+    [{ operationMode: 'heat' }],
+    'the requested mode reaches the device, and turns the unit on by itself',
   );
 });
 

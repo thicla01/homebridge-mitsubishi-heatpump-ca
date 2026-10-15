@@ -173,6 +173,30 @@ export class KumoThermostatAccessory {
   // logged once per accessory rather than on every profile update.
   private readonly modeTileNoticed: Set<string> = new Set();
   private readonly SETPOINT_HOLD_MS = 1500;
+
+  // A scene that turns on a unit that is OFF and picks its mode pushes Active=ON
+  // and the mode (TargetHeaterCoolerState, or a Dry / Fan-only switch) together,
+  // in either order. The mode write powers the unit on by itself; an ON sent
+  // beside it carries the default mode and races it through the per-device queue,
+  // so whichever lands last wins — a "heat" scene could leave the unit in AUTO.
+  // setActive therefore holds an ON for an off unit for ACTIVE_ON_HOLD_MS and
+  // drops it if a mode write was dispatched within that span on either side of it.
+  // activeWriteGen lets a newer Active write cancel a held ON, which also collapses
+  // a scene's duplicate ONs (climate tile and fan tile) into one and lets an off
+  // right behind an on win. Ported from upstream ukaratay/homebridge-mitsubishi-
+  // heatpump be29857 (2026-10-09). The hold matches SETPOINT_HOLD_MS, which covers
+  // the same scene-burst spread.
+  private modeWriteAt = 0;
+  private activeWriteGen = 0;
+  private readonly ACTIVE_ON_HOLD_MS = 1500;
+  // Turn-ons still in flight: a held ON, or a mode write that has not landed yet.
+  // This part is ours, not upstream's. A setpoint held in the same burst decides
+  // whether the unit is on only once these have settled (holdSetpointWrite). The
+  // ON hold is as long as the setpoint hold, so without this wait an "AC on at 22"
+  // scene that carries no mode write would find the unit still off when its
+  // setpoint's hold ran out, and cache the 22 without sending it — the
+  // cached-and-lost failure on-scene-setpoint-lost.test.ts exists to prevent.
+  private readonly powerOnsInFlight: Set<Promise<void>> = new Set();
   // When each setpoint field was last written and accepted. A poll landing inside
   // the adapter's apply window still reports the OLD value, and ingesting it both
   // flaps the tile and makes the reconcile below compare the device against our own
@@ -865,43 +889,50 @@ export class KumoThermostatAccessory {
     }
 
     this.noteModeIntent(operationMode);
+    const settle = on ? this.trackPowerOn() : () => {};
+    if (on) {
+      this.modeWriteAt = Date.now();
+    }
+    try {
+      const success = await this.sendDeviceCommand({ operationMode, power });
 
-    const success = await this.sendDeviceCommand({ operationMode, power });
-
-    if (!success) {
-      this.platform.log.error(
-        `[FAN ONLY] ${this.accessory.displayName}: Failed to set fan-only ${on ? 'ON' : 'OFF'}`,
-      );
-      // Revert the switch to the actual device state
-      setTimeout(() => {
-        this.fanOnlyService?.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isFanOnlyActive(this.currentStatus),
+      if (!success) {
+        this.platform.log.error(
+          `[FAN ONLY] ${this.accessory.displayName}: Failed to set fan-only ${on ? 'ON' : 'OFF'}`,
         );
-      }, 100);
-      this.failIfNothingToRevert(`setting fan-only ${on ? 'ON' : 'OFF'}`);
-      return;
+        // Revert the switch to the actual device state
+        setTimeout(() => {
+          this.fanOnlyService?.updateCharacteristic(
+            this.platform.Characteristic.On,
+            this.isFanOnlyActive(this.currentStatus),
+          );
+        }, 100);
+        this.failIfNothingToRevert(`setting fan-only ${on ? 'ON' : 'OFF'}`);
+        return;
+      }
+
+      this.platform.log.info(`[FAN ONLY] ${this.accessory.displayName}: Command accepted by API`);
+
+      // Optimistic local-state update so the thermostat tile reflects the change
+      // immediately, and so the Target state matches what the next poll will report —
+      // vent now maps to COOL, not OFF (same rationale as dry above).
+      if (this.currentStatus) {
+        this.currentStatus.operationMode = operationMode;
+        this.currentStatus.power = on ? 1 : 0;
+        this.refreshClimateCharacteristics();
+      }
+
+      // Fan-only and dry are mutually exclusive — engaging fan-only means the
+      // unit is no longer dehumidifying, so flip the dry switch off optimistically.
+      if (this.dryService) {
+        this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
+      }
+
+      // Mirror a HomeKit-driven fan-only toggle to any followers immediately.
+      this.notifyStatusListeners();
+    } finally {
+      settle();
     }
-
-    this.platform.log.info(`[FAN ONLY] ${this.accessory.displayName}: Command accepted by API`);
-
-    // Optimistic local-state update so the thermostat tile reflects the change
-    // immediately, and so the Target state matches what the next poll will report —
-    // vent now maps to COOL, not OFF (same rationale as dry above).
-    if (this.currentStatus) {
-      this.currentStatus.operationMode = operationMode;
-      this.currentStatus.power = on ? 1 : 0;
-      this.refreshClimateCharacteristics();
-    }
-
-    // Fan-only and dry are mutually exclusive — engaging fan-only means the
-    // unit is no longer dehumidifying, so flip the dry switch off optimistically.
-    if (this.dryService) {
-      this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
-    }
-
-    // Mirror a HomeKit-driven fan-only toggle to any followers immediately.
-    this.notifyStatusListeners();
   }
 
   private setupDrySwitch(): void {
@@ -991,44 +1022,51 @@ export class KumoThermostatAccessory {
     }
 
     this.noteModeIntent(operationMode);
+    const settle = on ? this.trackPowerOn() : () => {};
+    if (on) {
+      this.modeWriteAt = Date.now();
+    }
+    try {
+      const success = await this.sendDeviceCommand({ operationMode, power });
 
-    const success = await this.sendDeviceCommand({ operationMode, power });
-
-    if (!success) {
-      this.platform.log.error(
-        `[DRY] ${this.accessory.displayName}: Failed to set dry ${on ? 'ON' : 'OFF'}`,
-      );
-      // Revert the switch to the actual device state
-      setTimeout(() => {
-        this.dryService?.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.isDryActive(this.currentStatus),
+      if (!success) {
+        this.platform.log.error(
+          `[DRY] ${this.accessory.displayName}: Failed to set dry ${on ? 'ON' : 'OFF'}`,
         );
-      }, 100);
-      this.failIfNothingToRevert(`setting dry ${on ? 'ON' : 'OFF'}`);
-      return;
+        // Revert the switch to the actual device state
+        setTimeout(() => {
+          this.dryService?.updateCharacteristic(
+            this.platform.Characteristic.On,
+            this.isDryActive(this.currentStatus),
+          );
+        }, 100);
+        this.failIfNothingToRevert(`setting dry ${on ? 'ON' : 'OFF'}`);
+        return;
+      }
+
+      this.platform.log.info(`[DRY] ${this.accessory.displayName}: Command accepted by API`);
+
+      // Optimistic local-state update so the thermostat tile reflects the change
+      // immediately, and (critically) so the Target state matches what the next poll
+      // will report — dry now maps to COOL, not OFF. Leaving Target at OFF here would
+      // let an off-automation firing before the next poll be suppressed again.
+      if (this.currentStatus) {
+        this.currentStatus.operationMode = operationMode;
+        this.currentStatus.power = on ? 1 : 0;
+        this.refreshClimateCharacteristics();
+      }
+
+      // Fan-only and dry are mutually exclusive — engaging dry means the unit is
+      // no longer fan-only, so flip the fan switch off optimistically.
+      if (this.fanOnlyService) {
+        this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
+      }
+
+      // Mirror a HomeKit-driven dry toggle to any followers immediately.
+      this.notifyStatusListeners();
+    } finally {
+      settle();
     }
-
-    this.platform.log.info(`[DRY] ${this.accessory.displayName}: Command accepted by API`);
-
-    // Optimistic local-state update so the thermostat tile reflects the change
-    // immediately, and (critically) so the Target state matches what the next poll
-    // will report — dry now maps to COOL, not OFF. Leaving Target at OFF here would
-    // let an off-automation firing before the next poll be suppressed again.
-    if (this.currentStatus) {
-      this.currentStatus.operationMode = operationMode;
-      this.currentStatus.power = on ? 1 : 0;
-      this.refreshClimateCharacteristics();
-    }
-
-    // Fan-only and dry are mutually exclusive — engaging dry means the unit is
-    // no longer fan-only, so flip the fan switch off optimistically.
-    if (this.fanOnlyService) {
-      this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
-    }
-
-    // Mirror a HomeKit-driven dry toggle to any followers immediately.
-    this.notifyStatusListeners();
   }
 
   private updateFilterMaintenance(filterDirty: boolean): void {
@@ -1639,7 +1677,33 @@ export class KumoThermostatAccessory {
     if (this.setpointWriteGen.get(key) !== gen) {
       return 'superseded';
     }
+    // A turn-on in the same burst may still be held or on the wire. Its outcome
+    // is what decides whether the unit is on, so wait for it — see powerOnsInFlight.
+    // A failed turn-on leaves the cache at power 0 and the setpoint is suppressed,
+    // exactly as before.
+    if (this.powerOnsInFlight.size > 0) {
+      await Promise.all([...this.powerOnsInFlight]);
+      if (this.setpointWriteGen.get(key) !== gen) {
+        return 'superseded';
+      }
+    }
     return this.shouldSuppressSetpoint() ? 'suppressed' : 'send';
+  }
+
+  /**
+   * Mark a turn-on as in flight until the returned function is called, which the
+   * caller does in a `finally` once the write has landed, failed or been dropped.
+   */
+  private trackPowerOn(): () => void {
+    let settle!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.powerOnsInFlight.add(inFlight);
+    return () => {
+      this.powerOnsInFlight.delete(inFlight);
+      settle();
+    };
   }
 
   /**
@@ -1815,17 +1879,41 @@ export class KumoThermostatAccessory {
    *
    * HomeKit sends Active=1 with no mode of its own, so one has to be chosen.
    *
-   * On a unit that is already ON this reuses the mode it is in, which is what makes
-   * the ca.6 skip below possible. On a unit that is OFF it does NOT restore the
-   * previous mode — it cannot: the cached `operationMode` reads 'off', so
-   * defaultOnMode() decides, and that is AUTO unless the profile says the unit has
-   * no heat. (This comment used to claim `previousOperationMode` was consulted. It
-   * is not, anywhere in this method; the field is carried in DeviceStatus but the
-   * LAN status read never populates a meaningful one. Corrected 2026-08-20 —
-   * restoring the pre-off mode would mean remembering it ourselves.)
+   * On a unit that is already ON there is nothing to send (see the first check
+   * below). On a unit that is OFF it does NOT restore the previous mode — it
+   * cannot: the cached `operationMode` reads 'off', so defaultOnMode() decides,
+   * and that is AUTO unless the profile says the unit has no heat. (This comment
+   * used to claim `previousOperationMode` was consulted. It is not, anywhere in
+   * this method; the field is carried in DeviceStatus but the LAN status read never
+   * populates a meaningful one. Corrected 2026-08-20 — restoring the pre-off mode
+   * would mean remembering it ourselves.) That ON is held through the scene burst
+   * first, and dropped if the burst carries a mode write — see modeWriteAt.
    */
   async setActive(value: CharacteristicValue): Promise<void> {
     const on = value === this.platform.Characteristic.Active.ACTIVE;
+
+    // ON for a unit that is already running changes nothing, so nothing is sent.
+    // A scene that switches mode pushes Active=ON alongside TargetHeaterCoolerState,
+    // concurrently and in either order. Re-sending the remembered mode raced the
+    // scene's own mode write, and whichever landed last won: upstream saw a morning
+    // HEAT scene leave units in the COOL an evening scene had set (2026-10-09).
+    // The narrower skip this replaces compared mode strings and missed a cached
+    // 'autoHeat' / 'autoCool', which normalise to a different 'auto'. An off IN
+    // FLIGHT still lets the ON through: the cache has not caught up with the off,
+    // and swallowing the ON would leave the unit off. Ported from upstream ecb59a1.
+    if (on && !this.offInFlight() &&
+        this.currentStatus?.power === 1 && this.currentStatus.operationMode !== 'off') {
+      this.platform.log.debug(
+        `[ACTIVE] ${this.accessory.displayName}: HomeKit sent ON, already on — nothing to send`,
+      );
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.Active,
+        this.platform.Characteristic.Active.ACTIVE,
+      );
+      return;
+    }
+
+    const gen = ++this.activeWriteGen;
 
     let operationMode: 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
     if (!on) {
@@ -1846,49 +1934,73 @@ export class KumoThermostatAccessory {
     // reviving the unit. See offRequestedAt.
     this.noteModeIntent(operationMode);
 
-    // Tapping a mode in the Home app writes Active AND TargetHeaterCoolerState in
-    // one request. Active resolves to the REMEMBERED mode, so a unit already on in
-    // heat gets a redundant `heat` before the `cool` the user actually asked for —
-    // two LAN commands where one would do, and a visible detour through the old mode
-    // (observed 2026-08-19). Skip only when nothing would change, and NEVER skip an
-    // off: an off command must always reach the unit.
-    if (on && this.currentStatus?.operationMode === operationMode) {
-      this.platform.log.debug(
-        `[ACTIVE] ${this.accessory.displayName}: already ${operationMode} — not sending`,
-      );
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.Active,
-        this.platform.Characteristic.Active.ACTIVE,
-      );
-      return;
-    }
-
-    const success = await this.sendDeviceCommand({ operationMode });
-
-    if (!success) {
-      this.platform.log.error(`[ACTIVE] ${this.accessory.displayName}: failed to turn ${on ? 'ON' : 'OFF'}`);
-      setTimeout(() => {
-        if (this.currentStatus) {
-          this.service.updateCharacteristic(
-            this.platform.Characteristic.Active,
-            this.mapToActive(this.currentStatus),
-          );
+    // An ON stays in flight from here until it lands, fails or is dropped, so a
+    // setpoint in the same burst waits for its outcome. See powerOnsInFlight.
+    const settle = on ? this.trackPowerOn() : () => {};
+    try {
+      // An ON for an off unit waits out the scene burst. See modeWriteAt.
+      if (on) {
+        const heldAt = Date.now();
+        if (heldAt - this.modeWriteAt >= this.ACTIVE_ON_HOLD_MS) {
+          await new Promise(resolve => setTimeout(resolve, this.ACTIVE_ON_HOLD_MS));
         }
-      }, 100);
-      this.failIfNothingToRevert(`turning the unit ${on ? 'ON' : 'OFF'}`);
-      return;
-    }
+        if (this.modeWriteAt > heldAt - this.ACTIVE_ON_HOLD_MS) {
+          this.platform.log.info(
+            `[ACTIVE] ${this.accessory.displayName}: a mode write in the same burst turns it on — nothing to send`,
+          );
+          return;
+        }
+        if (this.activeWriteGen !== gen) {
+          this.platform.log.debug(
+            `[ACTIVE] ${this.accessory.displayName}: a newer on/off write replaced this ON — not sending`,
+          );
+          return;
+        }
+      }
 
-    if (this.currentStatus) {
-      this.currentStatus.operationMode = operationMode;
-      this.currentStatus.power = on ? 1 : 0;
-      this.refreshClimateCharacteristics();
+      // The unit may have come on in this mode while the ON was held — a poll
+      // showing the wall remote's work, say. Skip only when nothing would change,
+      // and NEVER skip an off: an off command must always reach the unit.
+      if (on && this.currentStatus?.operationMode === operationMode) {
+        this.platform.log.debug(
+          `[ACTIVE] ${this.accessory.displayName}: already ${operationMode} — not sending`,
+        );
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.Active,
+          this.platform.Characteristic.Active.ACTIVE,
+        );
+        return;
+      }
+
+      const success = await this.sendDeviceCommand({ operationMode });
+
+      if (!success) {
+        this.platform.log.error(`[ACTIVE] ${this.accessory.displayName}: failed to turn ${on ? 'ON' : 'OFF'}`);
+        setTimeout(() => {
+          if (this.currentStatus) {
+            this.service.updateCharacteristic(
+              this.platform.Characteristic.Active,
+              this.mapToActive(this.currentStatus),
+            );
+          }
+        }, 100);
+        this.failIfNothingToRevert(`turning the unit ${on ? 'ON' : 'OFF'}`);
+        return;
+      }
+
+      if (this.currentStatus) {
+        this.currentStatus.operationMode = operationMode;
+        this.currentStatus.power = on ? 1 : 0;
+        this.refreshClimateCharacteristics();
+      }
+      if (!on) {
+        this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
+        this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
+      }
+      this.notifyStatusListeners();
+    } finally {
+      settle();
     }
-    if (!on) {
-      this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
-      this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
-    }
-    this.notifyStatusListeners();
   }
 
   /** Collapse a reported mode (autoHeat/autoCool) to one the API accepts on send. */
@@ -1969,23 +2081,31 @@ export class KumoThermostatAccessory {
     // A mode is always an active mode here — HeaterCooler expresses off through
     // Active — so this clears any pending off-suppression window.
     this.noteModeIntent(operationMode);
+    // ...and it powers the unit on by itself, so an ON held in the same burst is
+    // dropped rather than sent beside it. See modeWriteAt.
+    this.modeWriteAt = Date.now();
 
-    const success = await this.sendDeviceCommand({ operationMode });
+    const settle = this.trackPowerOn();
+    try {
+      const success = await this.sendDeviceCommand({ operationMode });
 
-    if (success) {
-      this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: Command accepted by API`);
-      if (this.currentStatus) {
-        this.currentStatus.operationMode = operationMode;
-        this.currentStatus.power = 1;
-        this.refreshClimateCharacteristics();
+      if (success) {
+        this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: Command accepted by API`);
+        if (this.currentStatus) {
+          this.currentStatus.operationMode = operationMode;
+          this.currentStatus.power = 1;
+          this.refreshClimateCharacteristics();
+        }
+        // Picking a heat/cool/auto mode leaves fan-only and dry inactive.
+        this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
+        this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
+        this.notifyStatusListeners();
+      } else {
+        this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${operationMode}`);
+        this.failIfNothingToRevert(`setting mode ${operationMode}`);
       }
-      // Picking a heat/cool/auto mode leaves fan-only and dry inactive.
-      this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, false);
-      this.dryService?.updateCharacteristic(this.platform.Characteristic.On, false);
-      this.notifyStatusListeners();
-    } else {
-      this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${operationMode}`);
-      this.failIfNothingToRevert(`setting mode ${operationMode}`);
+    } finally {
+      settle();
     }
   }
 

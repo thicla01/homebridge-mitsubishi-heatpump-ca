@@ -149,7 +149,10 @@ with the rule:
   merely off, and a merely-off unit must stay controllable — picking a mode is how a
   user turns it back on, and an "AC on" scene's setpoints were cached-and-lost while
   only the mode reached the unit. Only an off in the same burst blocks; the merely-off
-  case is decided after the 1500 ms hold, by which time the concurrent on has landed.
+  case is decided after the 1500 ms hold AND after every turn-on in flight has settled
+  (`powerOnsInFlight`). The wait is not redundant with the hold: an ON for an off unit
+  is itself held 1500 ms so a scene's mode write can supersede it, and without the
+  wait a setpoint beside a bare ON decides while the unit still reads off.
 - **The auth-failure streak counts requests, not attempts**
   (`local-api.ts:noteRequestOutcome`). A single `device_authentication_error` can be
   transient — the token signs the body, so a truncated body under connection contention
