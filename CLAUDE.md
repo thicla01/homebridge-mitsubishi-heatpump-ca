@@ -185,6 +185,9 @@ site: the vendor API we do not control, and the user-facing manual.
 **Do not add a Matter accessory graph.** Homebridge 2.2.1 has no `fanControl`
 feature-preservation branch and no rocking/airflow handlers, so vane and swing are
 structurally unreachable over Matter — and vane control is the reason this plugin exists.
+Still true in 2.4.0 (re-checked 2026-10-14, as upstream did in `39572df`): it adds
+`api.matter.deviceRequirements`, but `FanControlBehavior` still reacts only to `fanMode`
+and `percentSetting`.
 A full blocker-by-blocker analysis with re-verification commands was written on 2026-07-27
 and then deleted, because it was pinned to Homebridge internals that will churn long
 before Matter is viable. Recover it if the question comes up again:
