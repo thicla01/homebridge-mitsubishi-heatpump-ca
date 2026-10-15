@@ -2400,10 +2400,25 @@ export class KumoThermostatAccessory {
     }
   }
 
+  /**
+   * Put SwingMode and the slats back on the vane the unit is really in.
+   *
+   * Deferred, never synchronous: hap-nodejs assigns the written value AFTER the
+   * onSet handler resolves (`Characteristic.handleSetRequest` awaits the handler,
+   * then sets `this.value`), so a revert made inside the handler is overwritten and
+   * the tile keeps showing a vane the unit is not in. Ported from upstream b09ebc4.
+   */
+  private revertVaneSoon(): void {
+    setTimeout(() => {
+      this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
+    }, 100);
+  }
+
   /** Send a vane value, validate it, and reconcile the characteristics. */
   private async writeVane(vane: VaneDirection, label: string): Promise<boolean> {
     if (!isVaneDirection(vane)) {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: refusing invalid vane "${vane}"`);
+      this.revertVaneSoon();
       return false;
     }
 
@@ -2413,6 +2428,7 @@ export class KumoThermostatAccessory {
       this.platform.log.debug(
         `[${label}] ${this.accessory.displayName}: an off is in flight — not sending vane`,
       );
+      this.revertVaneSoon();
       return false;
     }
 
@@ -2425,7 +2441,7 @@ export class KumoThermostatAccessory {
       this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: failed to set vane "${vane}"`);
-      this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
+      this.revertVaneSoon();
     }
     return success;
   }
