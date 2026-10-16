@@ -422,9 +422,35 @@ at 21.10. After two minutes in a hand, they read 24.5 and 25.57. The air at the 
 not warm 3.5 °C in two minutes; the gap is a fast-rising reading, with the two nodes
 read a second apart. So while a sensor drives the unit, its own room thermistor shows
 nowhere in `indoorUnit.status`, the only room temperature the LAN reports outside the
-sensor slots. Whether the unit still watches that thermistor, to take over if the sensor
-goes silent, is unmeasured. The same reads put the battery at 100 % in the hand against
-96 % on the shelf: a coin cell's voltage rises with its temperature.
+sensor slots. The unit has not stopped using that thermistor, though: it falls back on
+it when the sensor goes silent, as the next paragraph shows. The same reads put the
+battery at 100 % in the hand against 96 % on the shelf: a coin cell's voltage rises with
+its temperature.
+
+**When the sensor goes silent, the unit falls back on its own.** Measured read-only the
+same day, every two minutes. Shut in a clothes dryer at the far end of a condo, the
+sensor still reached the unit, at −53 to −82 dBm, and the unit regulated on the dryer's
+temperature: `roomTemp` matched the sensor rounded to 0.5 °C on all eight reads. Distance
+is no way to lose this sensor; the 3 m in the manual is a recommendation. With the battery
+removed, within two minutes:
+
+| Field | Sensor present | Battery out | Battery back, within two minutes |
+|---|---|---|---|
+| `tempSource` | `sensor0` | `sensor0` | `sensor0` |
+| `activeThermistor` | `sensor0` | **`unset`** | `sensor0` |
+| Slot 0 `temperature` / `rssi` | readings | `null` | readings |
+| `roomTemp` | the sensor, rounded | **19**, for six minutes | the sensor, rounded |
+
+So `tempSource` is the source configured and `activeThermistor` the one in use, and the
+unit returns to its own thermistor by itself — the safety net that an injected
+`tempSource: api` reading is not known to have. The sensor came back without re-pairing.
+The 19 is presumably that thermistor: the unit, in cooling mode, had likely been cooling
+the room while the dryer read 22.5 to 22.8 °C. But 19 was also the heating setpoint, and
+these reads cannot rule that out.
+
+The plugin follows without being told: with no sensor temperature in the slot, it
+publishes the unit's `roomTemp`. It does not say that the sensor was lost, and the last
+humidity and battery stay on display until the sensor returns.
 
 The parent, `{"c":{"sensors":{}}}`, enumerates all four slots — only slot 0 was occupied —
 plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`) and
@@ -443,9 +469,12 @@ plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`)
 Shown raw, that battery figure would flicker in the Home app, and near 20 % raise and drop
 the low-battery warning. Since 2.3.10 what HomeKit is shown is the **median of the last
 nine readings** (`accessory.ts:updateSensorBattery`), which ignores an isolated dip and
-follows a real decline once most of the window agrees. Humidity arrives in exact steps of
-1/1024 % (56.011719 = 57356/1024), so its six decimals are the format's resolution, not
-the sensor's accuracy; the temperature follows no such simple rule.
+follows a real decline once most of the window agrees. Both measurements come out of the
+conversion formulas of a Sensirion SHT2x-class chip, applied to a coarse raw count, so
+their six decimals are the formula's, not the sensor's precision: temperature is
+−46.85 + 175.72 × n / 1024 °C, in steps of 0.1716 °C (22.305429 is n = 403), and
+humidity is −6 + 125 × m / 256 %, in steps of 0.488 % (56.011719 is m = 127). Every
+reading seen so far fits, upstream's 22.648632 included (n = 405).
 
 ### The capability profile, from the adapter
 
