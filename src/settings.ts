@@ -452,6 +452,14 @@ export interface DeviceStatus {
    * noteSensorSignal) — HomeKit has no characteristic for it.
    */
   sensorRssi?: number | null;
+  /**
+   * The temperature source the unit is set to, and the one it is actually using,
+   * verbatim from the LAN status: `sensor0` for a paired wireless sensor, `unset` for
+   * the unit's own thermistor. They part when the unit gives up on a silent sensor.
+   * Used only to say so (platform.ts:noteSensorSource).
+   */
+  tempSource?: string;
+  activeThermistor?: string;
 }
 
 /**

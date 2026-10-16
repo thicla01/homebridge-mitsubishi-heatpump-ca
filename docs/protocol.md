@@ -449,8 +449,10 @@ the room while the dryer read 22.5 to 22.8 °C. But 19 was also the heating setp
 these reads cannot rule that out.
 
 The plugin follows without being told: with no sensor temperature in the slot, it
-publishes the unit's `roomTemp`. It does not say that the sensor was lost, and the last
-humidity and battery stay on display until the sensor returns.
+publishes the unit's `roomTemp`. The last humidity and battery stay on display until the
+sensor returns. Since 2.3.12 the log says so: two polls in a row that find
+`activeThermistor` off the sensor `tempSource` names raise one warning, latched, and the
+return is said once (`platform.ts:noteSensorSource`).
 
 The parent, `{"c":{"sensors":{}}}`, enumerates all four slots — only slot 0 was occupied —
 plus three fields of its own: `systemEnabled` (`true`), `subsysActive` (`false`) and

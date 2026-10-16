@@ -200,6 +200,60 @@ test('a signal of the wrong type is dropped', async () => {
   assert.strictEqual(status.sensorBattery, 71, 'and the battery beside it is unaffected');
 });
 
+// ---- Which thermistor the unit is using -----------------------------------
+//
+// Measured 2026-10-15 on a GX15: with the sensor's battery out, `activeThermistor`
+// went from `sensor0` to `unset` within two minutes while `tempSource` stayed
+// `sensor0`, and the slot's readings went null. The platform warns on that split
+// (platform.ts:noteSensorSource), so both fields have to reach it intact.
+
+/** The status the real unit returned with the sensor's battery out. */
+const STATUS_SENSOR_SILENT = {
+  indoorUnit: {
+    status: {
+      roomTemp: 19, mode: 'cool', spHeat: 19, spCool: 22,
+      vaneDir: 'auto', fanSpeed: 'auto',
+      tempSource: 'sensor0', activeThermistor: 'unset',
+    },
+  },
+};
+
+test('the configured and the active temperature source are carried verbatim', async () => {
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_WITH_SENSOR],
+    ['sensors', { sensors: { 0: REAL_SLOT } }],
+  ]);
+  const status = await client.getStatus('S1');
+  assert.ok(status);
+  assert.strictEqual(status.tempSource, 'sensor0');
+  assert.strictEqual(status.activeThermistor, 'sensor0');
+});
+
+test('with the sensor silent, the split shows and the unit\'s own roomTemp stands', async () => {
+  // The slot's readings were null on the real unit. Whether it kept the uuid was not
+  // read; with it kept, as here, the poll still asks the slot and finds nothing.
+  const { client } = makeClient([
+    ['indoorUnit', STATUS_SENSOR_SILENT],
+    ['sensors', { sensors: { 0: { uuid: 'real-sensor', rssi: null, txPower: -53, battery: null, temperature: null, humidity: null } } }],
+  ]);
+  const status = await client.getStatus('S1');
+  assert.ok(status);
+  assert.strictEqual(status.tempSource, 'sensor0');
+  assert.strictEqual(status.activeThermistor, 'unset');
+  assert.strictEqual(status.roomTemp, 19, 'no sensor temperature, so the unit\'s own reading is published');
+  assert.strictEqual(status.sensorRssi, undefined);
+});
+
+test('a temperature source that is not a string is left out — "cannot tell"', async () => {
+  const { client } = makeClient([
+    ['indoorUnit', { indoorUnit: { status: { ...STATUS_NO_SENSOR.indoorUnit.status, tempSource: 0, activeThermistor: null } } }],
+  ]);
+  const status = await client.getStatus('S1');
+  assert.ok(status);
+  assert.ok(!('tempSource' in status), 'not a guessed value');
+  assert.ok(!('activeThermistor' in status));
+});
+
 test('a battery of the wrong type is dropped, and the readings are not', async () => {
   // Firmware we do not control. "71" must not become a level, and must not cost
   // the temperature and humidity that came with it.

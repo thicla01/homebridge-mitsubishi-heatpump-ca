@@ -1036,6 +1036,141 @@ test('a poll without a signal is not a reading', async () => {
   }
 });
 
+// ---- the wireless sensor going silent ------------------------------------
+//
+// Measured on a GX15 on 2026-10-15 by taking the sensor's battery out: within two
+// minutes `activeThermistor` went from `sensor0` to `unset`, the unit's own
+// thermistor, while `tempSource` stayed `sensor0`; both came back without
+// re-pairing once the battery was in. Nothing said so. Logging only, like the
+// signal warning above.
+
+type Source = [string | undefined, string | undefined];
+const ON_SENSOR: Source = ['sensor0', 'sensor0'];
+const OFF_SENSOR: Source = ['sensor0', 'unset'];
+const NO_SENSOR: Source = ['unset', 'unset'];
+const CANNOT_TELL: Source = [undefined, undefined];
+
+/** Run one poll per entry, with the unit's temperature source set to each in turn. */
+async function pollWithSource(platform: KumoV3Platform, local: LocalClientStub, polls: Source[]) {
+  for (const [tempSource, activeThermistor] of polls) {
+    local.statusResult = {
+      roomTemp: 21, operationMode: 'heat', power: 1, spCool: 24, spHeat: 21, tempSource, activeThermistor,
+    };
+    await platform['pollLocalDevices']();
+  }
+}
+
+function captureSourceLog(platform: KumoV3Platform) {
+  const warns: string[] = [];
+  const infos: string[] = [];
+  platform.log.warn = (...args: unknown[]) => warns.push(args.join(' '));
+  platform.log.info = (...args: unknown[]) => infos.push(args.join(' '));
+  return {
+    lost: () => warns.filter((w) => /wireless sensor has gone silent/.test(w)),
+    back: () => infos.filter((i) => /wireless sensor is back/.test(i)),
+    unset: () => infos.filter((i) => /no longer set to use a wireless sensor/.test(i)),
+  };
+}
+
+test('a unit on its sensor, or with none, says nothing about it', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, [...Array(10).fill(ON_SENSOR), ...Array(10).fill(NO_SENSOR)]);
+    assert.deepStrictEqual(log.lost(), []);
+    assert.deepStrictEqual(log.back(), []);
+    assert.deepStrictEqual(log.unset(), [], 'a sensor that was never reported lost closes no episode');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('one poll off the sensor is not a loss; two in a row are', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, [ON_SENSOR, OFF_SENSOR, ON_SENSOR]);
+    assert.deepStrictEqual(log.lost(), [], 'a single odd read');
+    assert.deepStrictEqual(log.back(), [], 'and no "back" for a loss never reported');
+
+    await pollWithSource(platform, local, [OFF_SENSOR, OFF_SENSOR]);
+    assert.strictEqual(log.lost().length, 1);
+    const name = platform['accessoryHandlers'][0].getDisplayName();
+    assert.ok(log.lost()[0].startsWith(`${name}:`), 'it names the unit');
+    assert.match(log.lost()[0], /its own thermistor/);
+    assert.match(log.lost()[0], /battery/, 'and points at the usual cause');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('the loss is said once, the return once, and a second loss again', async () => {
+  // Starting off the sensor is the startup case too: a battery that died while
+  // Homebridge was down is reported on the second poll.
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, Array(10).fill(OFF_SENSOR));
+    assert.strictEqual(log.lost().length, 1, 'latched: ten polls, one warning');
+
+    await pollWithSource(platform, local, [ON_SENSOR, ON_SENSOR]);
+    assert.strictEqual(log.back().length, 1, 'the return is said once');
+
+    await pollWithSource(platform, local, [OFF_SENSOR, OFF_SENSOR]);
+    assert.strictEqual(log.lost().length, 2, 're-armed: a second episode is reported');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('any thermistor other than the configured sensor counts as off it', async () => {
+  // `unset` is what this unit reported. Other clients name the unit's own thermistor
+  // `returnAir`; the rule is "not the configured sensor", not one spelling of it.
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, [['sensor0', 'returnAir'], ['sensor0', 'returnAir']]);
+    assert.strictEqual(log.lost().length, 1);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a poll that cannot tell neither counts toward the warning nor lifts it', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, [OFF_SENSOR, CANNOT_TELL]);
+    assert.deepStrictEqual(log.lost(), [], 'one poll off and one that cannot tell are not two off');
+    await pollWithSource(platform, local, [OFF_SENSOR]);
+    assert.strictEqual(log.lost().length, 1, 'nor did it reset the count: this is the second off');
+
+    await pollWithSource(platform, local, Array(10).fill(CANNOT_TELL));
+    assert.deepStrictEqual(log.back(), [], 'and silence did not lift it');
+  } finally {
+    platform['cleanup']();
+  }
+});
+
+test('a sensor taken out of the unit\'s settings closes the episode with its own line', async () => {
+  const { platform, local } = makePlatform();
+  const log = captureSourceLog(platform);
+  try {
+    await platform.discoverDevices();
+    await pollWithSource(platform, local, [OFF_SENSOR, OFF_SENSOR, NO_SENSOR]);
+    assert.strictEqual(log.lost().length, 1);
+    assert.deepStrictEqual(log.back(), [], 'not "back": there is no sensor to be back');
+    assert.strictEqual(log.unset().length, 1);
+  } finally {
+    platform['cleanup']();
+  }
+});
+
 test('the same streak stops the accessory answering HomeKit, and recovery restores it', async () => {
   // The end-to-end half of test/unreachable.test.ts: that file pins the accessory's
   // guard and the platform's mode decision separately, and this one pins that the

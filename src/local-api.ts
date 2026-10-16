@@ -802,6 +802,14 @@ export class LocalKumoClient {
       return { status: null, error: error === 'none' ? 'incomplete' : error };
     }
     const mapped = mapLocalStatus(status);
+    // Verbatim, for platform.ts:noteSensorSource. Absent unless a string arrived:
+    // anything else is "cannot tell".
+    if (typeof status.tempSource === 'string') {
+      mapped.tempSource = status.tempSource;
+    }
+    if (typeof status.activeThermistor === 'string') {
+      mapped.activeThermistor = status.activeThermistor;
+    }
 
     // Only ask for the remote sensor when the unit says one is driving the
     // reading. `tempSource`/`activeThermistor` are 'sensorN' on a unit with a

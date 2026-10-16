@@ -80,6 +80,17 @@ const PROHIBITS_RECHECK_MS = 30 * 60 * 1000;
 const SENSOR_SIGNAL_WINDOW = 20;
 const SENSOR_SIGNAL_WEAK_DBM = -85;
 const SENSOR_SIGNAL_RECOVERED_DBM = -80;
+/**
+ * Consecutive polls that must find the unit off its sensor before that is reported.
+ *
+ * The unit makes the decision itself, after its own wait: measured on a GX15 on
+ * 2026-10-15, `activeThermistor` left `sensor0` within two minutes of the sensor's
+ * battery coming out. Two polls, about 30 s at the default interval, keep a single
+ * odd read from raising a warning the next poll would take back — one caught while
+ * the adapter is still starting up, say, which was not observed but costs nothing to
+ * rule out.
+ */
+const SENSOR_LOST_AFTER_POLLS = 2;
 
 /**
  * Stands in for an address the export does not know, in exportLocalSecrets.
@@ -414,6 +425,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // The wireless sensor's recent Bluetooth readings per unit, and whether a weak
   // link has been reported — see noteSensorSignal.
   private readonly sensorSignal: Map<string, { samples: number[]; warned: boolean }> = new Map();
+  /** Per unit: consecutive polls off its configured sensor, and whether that was said. */
+  private readonly sensorSource: Map<string, { offSensorPolls: number; warned: boolean }> = new Map();
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -2023,6 +2036,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           handler.updateFromLocal(status);
           this.noteLocalPollSuccess(handler);
           this.noteSensorSignal(handler, status.sensorRssi);
+          this.noteSensorSource(handler, status.tempSource, status.activeThermistor);
           // After a read that worked, so the adapter is known to be answering.
           await this.checkProhibits(handler);
         } else {
@@ -2090,6 +2104,61 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     } else if (state.warned && median >= SENSOR_SIGNAL_RECOVERED_DBM) {
       state.warned = false;
       this.log.info(`${name}: the wireless sensor's Bluetooth signal is good again (median ${median} dBm).`);
+    }
+  }
+
+  /**
+   * Say when the unit stops regulating on its paired wireless sensor, and when it
+   * starts again.
+   *
+   * `tempSource` is the source the unit is set to and `activeThermistor` the one in
+   * use. Measured on a GX15 on 2026-10-15 by taking the sensor's battery out: within
+   * two minutes the second went from `sensor0` to `unset`, the unit's own thermistor,
+   * while the first stayed `sensor0`; both came back without re-pairing once the
+   * battery was in. A sensor set but not in use is a sensor the unit has given up on,
+   * and nothing said so: the temperature tile switched quietly to the unit's own
+   * reading, taken at the indoor unit, and the last humidity and battery stayed on
+   * display.
+   *
+   * Logging only, like the signal warning. One warning once SENSOR_LOST_AFTER_POLLS
+   * polls in a row find the unit off its sensor, latched; one line when it is back on
+   * it, or no longer set to use one. A poll that does not carry both fields is
+   * "cannot tell": it neither counts toward the warning nor lifts it.
+   */
+  private noteSensorSource(
+    handler: KumoThermostatAccessory,
+    tempSource: string | undefined,
+    activeThermistor: string | undefined,
+  ): void {
+    if (typeof tempSource !== 'string' || typeof activeThermistor !== 'string') {
+      return;
+    }
+    const serial = handler.getDeviceSerial();
+    const name = handler.getDisplayName();
+    const state = this.sensorSource.get(serial) ?? { offSensorPolls: 0, warned: false };
+    this.sensorSource.set(serial, state);
+
+    const setToSensor = /^sensor\d+$/.test(tempSource);
+    if (setToSensor && activeThermistor !== tempSource) {
+      state.offSensorPolls += 1;
+      if (!state.warned && state.offSensorPolls >= SENSOR_LOST_AFTER_POLLS) {
+        state.warned = true;
+        this.log.warn(
+          `${name}: the wireless sensor has gone silent — the unit is regulating on its own `
+          + 'thermistor, at the indoor unit, and the humidity and battery shown are the sensor\'s '
+          + 'last. Check its battery first: the unit picks the sensor up again by itself once it '
+          + 'hears it.',
+        );
+      }
+      return;
+    }
+
+    state.offSensorPolls = 0;
+    if (state.warned) {
+      state.warned = false;
+      this.log.info(setToSensor
+        ? `${name}: the wireless sensor is back — the unit is regulating on it again.`
+        : `${name}: the unit is no longer set to use a wireless sensor.`);
     }
   }
 

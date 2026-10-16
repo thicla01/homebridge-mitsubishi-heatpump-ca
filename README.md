@@ -315,7 +315,7 @@ Local status polling every 15s
 ```
 
 The sweep runs only for units whose address neither the v2 reply nor `localControlIps`
-supplied. Four shapes are worth recognising:
+supplied. Five shapes are worth recognising:
 
 - **`the unit rejected our credentials on 3 requests in a row
   (device_authentication_error)`** — the password and cryptoSerial must both belong to
@@ -350,9 +350,18 @@ supplied. Four shapes are worth recognising:
   little: on a real sensor, four reads minutes apart with nothing moved spanned −68 to −45
   dBm. So the verdict is the median of the last 20 polls, warned once below −85 dBm and
   lifted once it is back to −80. The unit regulates on that sensor, so a link that drops
-  out leaves it working from stale readings; moving the sensor closer to the indoor unit,
-  or away from metal and enclosed spots, is the fix. HomeKit has no place for a signal
-  strength, so this lives in the log only.
+  out leaves it on stale readings until it gives up on the sensor (the next shape); moving
+  the sensor closer to the indoor unit, or away from metal and enclosed spots, is the fix.
+  HomeKit has no place for a signal strength, so this lives in the log only.
+- **`<name>: the wireless sensor has gone silent — the unit is regulating on its own
+  thermistor`** — the unit stopped hearing its paired sensor and fell back, by itself, on
+  the thermistor in the indoor unit. Measured on a real sensor by taking its battery out:
+  the unit switched within two minutes, and back within two minutes of the battery going
+  in, without re-pairing. Meanwhile the Home app shows the unit's own temperature, taken
+  where the unit hangs, and the humidity and battery it shows are the sensor's last. A
+  dead battery is the usual cause; distance rarely is — the same sensor, shut in a clothes
+  dryer at the far end of a condo, still reached the unit. Said once, after two polls in a
+  row, and again when the sensor is back. Since 2.3.12.
 
 ### Local-only mode
 
