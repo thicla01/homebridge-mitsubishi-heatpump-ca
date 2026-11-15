@@ -3,9 +3,15 @@
  *
  * HomeKit is Celsius-native: the Home app converts to °F only for display, and a
  * controller writing "72°F" sends whatever Celsius float its own conversion produced.
- * The units accept 0.1°C granularity (live-verified — the cloud stored a 23.3
- * setpoint exactly, never snapping to 23.5), so every whole °F has a 0.1°C
- * representation that displays back as that same whole °F. This module snaps to it.
+ * The Mitsubishi v3 cloud accepts setpoints only on a 0.5°C grid. It took 0.1°C values
+ * until late October 2026; since then every other value is refused with HTTP 400
+ * `invalidSpHeatIncrement` / `invalidSpCoolIncrement` — reported independently by
+ * three projects, and by upstream live on 2026-11-04 (21.0 and 21.5 accepted, 21.3
+ * and 22.7 refused). The LAN adapter still takes 0.1°C values, and units still hold
+ * and report older ones; only cloud writes are checked. This module sits above both
+ * transports, so it snaps every write to the 0.5°C point nearest a whole °F: the
+ * same tap must store the same value whichever transport carries it. Ported from
+ * upstream ukaratay/homebridge-mitsubishi-heatpump 8011c57.
  *
  * Why this is not handled by HAP props. Upstream set `minStep: 0.1` on the setpoint
  * characteristics believing that would make °F round-trip. It does not:
@@ -24,7 +30,11 @@
 
 import type { DeviceProfile } from './settings';
 
-/** Half of the 0.1°C device resolution: the widest gap that is still "the same setpoint". */
+/**
+ * The widest gap that is still "the same setpoint", and the slack every comparison
+ * against a band or a Celsius bound gets: enough for float dirt and for a legacy
+ * 0.1°C reading, nowhere near the 0.5°C that separates two grid points.
+ */
 const SETPOINT_TOLERANCE_C = 0.05;
 
 /** Guard for arithmetic on range bounds that may themselves carry float dirt. */
@@ -39,104 +49,110 @@ export function fToC(f: number): number {
 }
 
 /**
- * The 0.1°C value a whole °F degree is stored as.
+ * The 0.5°C value a whole °F degree is stored as: the nearest one.
  *
- * CEILING, not rounding — this is the whole point of the module, and it is driven
- * by a measured fact about the vendor app rather than by taste.
+ * Nearest keeps the stored value within 0.25°C (0.45°F) of the degree, so the Home
+ * app, which rounds, always shows it back as that same degree. A whole °F never
+ * converts to a .25/.75 tie, and adjacent degrees (0.556°C apart) never share a
+ * grid point — though the grid has points no degree lands on (22.5 is one).
  *
- * The Mitsubishi Comfort app TRUNCATES when it renders Celsius as Fahrenheit; the
- * Home app rounds. Confirmed live 2026-07-27: the Family Room held spCool
- * 22.200001°C, which is 71.96°F, and the Home app showed 72 while the Comfort app
- * showed 71 at the same moment. That one-degree split is the entire C/F complaint.
- *
- * Rounding to 0.1 lands up to 0.09°F BELOW the target degree (72°F → 22.2 →
- * 71.96°F), which a rounding renderer shows correctly and a truncating one shows
- * one degree low. Taking the ceiling instead lands 0 to 0.18°F ABOVE it (72°F →
- * 22.3 → 72.14°F), which is correct under BOTH: truncation floors 72.14 to 72,
- * and rounding is nowhere near the 0.5 needed to reach 73.
- *
- * Cost of the choice: at most 0.0999°C (0.18°F) warmer than the exact conversion,
- * and a stored value that differs by 0.1°C from what a round-to-0.1 writer would
- * have produced for the same degree. Both are far below anything perceptible, and
- * both apps then agree on the number.
+ * Cost of the 0.5°C grid: the Mitsubishi Comfort app TRUNCATES when it renders
+ * Celsius as Fahrenheit (confirmed live by upstream 2026-07-27: 22.200001°C, which
+ * is 71.96°F, showed as 72 in Home and 71 in Comfort). About half the degrees land
+ * just below their °F and show one degree low there (72°F → 22.0°C = 71.6°F). The
+ * 0.1°C grid this replaces avoided that by taking the ceiling; the 0.5°C grid has
+ * no point that is right in both apps for those degrees, and of the two the Home
+ * app is the one kept exact.
  */
 function storedC(f: number): number {
-  const exact = fToC(f);
-  // EPS absorbs float dirt so an exactly-representable degree (68°F = 20°C) is not
-  // pushed up a whole step by a 19.999999999 intermediate.
-  const ceiled = Math.ceil(exact * 10 - EPS) / 10;
-  return Math.round(ceiled * 10) / 10; // clean one-decimal float, never 22.30000000000000004
+  return Math.round(fToC(f) * 2) / 2;
 }
 
 /**
- * Snap a Celsius setpoint to the Celsius the units store for the nearest whole
- * Fahrenheit degree, at the 0.1°C resolution they accept.
+ * Snap a Celsius setpoint to the 0.5°C the units store for the nearest whole
+ * Fahrenheit degree.
  *
- * The result always displays back as the whole °F it came from, in a renderer that
- * rounds AND in one that truncates — see storedC for why that matters here.
+ * The result always displays back as the whole °F it came from in a renderer that
+ * rounds; see storedC for the truncating one.
  */
 export function quantizeSetpointC(c: number): number {
   return storedC(Math.round(cToF(c)));
 }
 
 /**
+ * Whether a whole °F belongs to [min,max]: its stored value is inside, or its exact
+ * conversion is.
+ *
+ * The second clause is what keeps a bound that is itself a whole °F reachable. 60°F
+ * is 15.5555…°C and is stored as 15.5, which the first clause alone would read as
+ * 0.056°C out of a range starting at 60°F, shaving a degree off the slider's end.
+ * The first clause is what keeps the real device ceiling reachable: 88°F is 31.11°C,
+ * outside 10–31, but it is stored as 31.0.
+ *
+ * Upstream gets the same two results from one widened tolerance (0.25°C, half the
+ * grid). That also lets a degree through when both its exact and its stored value
+ * sit outside a bound that is off the grid — a hand-declared 16.2 would admit 61°F,
+ * stored as 16.0. Here such a degree is refused. The tolerance also could not simply
+ * be widened: the AUTO band check and the outward rounding share it, and at 0.25
+ * they would pass a 1.3°C band as the 1.5°C the vendor requires.
+ */
+function degreeFits(f: number, min: number, max: number): boolean {
+  const stored = storedC(f);
+  if (stored >= min - SETPOINT_TOLERANCE_C && stored <= max + SETPOINT_TOLERANCE_C) {
+    return true;
+  }
+  const exact = fToC(f);
+  return exact >= min - EPS && exact <= max + EPS;
+}
+
+/**
  * Clamp to [min,max] AFTER quantizing, staying on the °F grid.
  *
  * A plain `Math.min/Math.max` clamp would hand back the raw bound, which is usually
- * not a whole °F (the real device range 10–31°C is 50–87.8°F) and would reintroduce
- * the half-degree display drift this module exists to remove. Instead, when the
- * quantized value falls outside the range we step along the °F grid toward the
- * interior — ceil at the bottom, floor at the top — and take the first whole °F that
- * lies inside. Note the consequence at a non-whole-°F bound: a request for 88°F
- * against a 31°C max lands on 87°F (30.6°C), not on 31°C/87.8°F, because 87.8 is not
- * a °F the display can show without drift.
- *
- * "Inside" is judged to within half the 0.1°C device resolution, not exactly. A bound
- * that is itself a whole °F — 80°F is 26.6666…°C — is stored as 26.7, which an exact
- * test would read as 0.033°C out of range and reject, making the range's own endpoint
- * unreachable. The allowance cannot loosen a bound that already sits on the 0.1°C grid
- * (every real device profile bound does): both bound and candidate are then multiples
- * of 0.1, so an out-of-range candidate misses by a full 0.1, well past the tolerance.
+ * not a whole °F and need not sit on the 0.5°C grid the cloud accepts. Instead, when
+ * the requested degree falls outside the range we step along the °F grid toward the
+ * interior and take the first whole °F that belongs to it (degreeFits). The real
+ * device range 10–31°C is 50–87.8°F, and 88°F stores as 31.0°C, so both ends are
+ * reachable.
  */
 export function quantizeSetpointInRange(c: number, min: number, max: number): number {
-  const lo = min - SETPOINT_TOLERANCE_C;
-  const hi = max + SETPOINT_TOLERANCE_C;
-
-  const quantized = quantizeSetpointC(c);
-  if (quantized >= lo && quantized <= hi) {
-    return quantized;
+  let f = Math.round(cToF(c));
+  if (degreeFits(f, min, max)) {
+    return storedC(f);
   }
 
-  const step = quantized < min ? 1 : -1;
-  let f = Math.round(cToF(quantized));
-  // Bounded: the widest plausible range is ~50°F, and the walk bails the moment it
-  // steps past the far edge. The isFinite clause makes a NaN input terminate at once.
+  const step = storedC(f) < min ? 1 : -1;
+  // Bounded: the widest plausible range is ~50°F, and the walk bails the moment a
+  // degree lies wholly past the far edge. The isFinite clause makes a NaN input
+  // terminate at once.
   for (let i = 0; i < 128 && Number.isFinite(f); i++) {
     f += step;
-    const candidate = storedC(f);
-    if (candidate >= lo && candidate <= hi) {
-      return candidate;
+    if (degreeFits(f, min, max)) {
+      return storedC(f);
     }
-    if (step === 1 ? candidate > hi : candidate < lo) {
+    const nearest = Math.min(storedC(f), fToC(f));
+    const farthest = Math.max(storedC(f), fToC(f));
+    if (step === 1 ? nearest > max + SETPOINT_TOLERANCE_C : farthest < min - SETPOINT_TOLERANCE_C) {
       break;
     }
   }
 
-  // No whole °F fits inside the range (it is narrower than 1°F, or degenerate).
-  // Fall back to the range edge itself, on the 0.1°C grid, rounded inward so the
-  // result cannot land outside the range.
+  // No whole °F belongs to the range (it is narrower than 1°F, or degenerate).
+  // Fall back to the 0.5°C grid point just inside the edge we came from. A range
+  // that holds no grid point at all has no answer the cloud would take; none is
+  // known to exist.
   return step === 1
-    ? Math.ceil(min * 10 - EPS) / 10
-    : Math.floor(max * 10 + EPS) / 10;
+    ? Math.ceil(min * 2 - EPS) / 2
+    : Math.floor(max * 2 + EPS) / 2;
 }
 
 /**
- * True if two Celsius setpoints are the same to within half a 0.1°C step.
+ * True if two Celsius setpoints are the same to within 0.05°C.
  *
- * Used to decide whether a write is a real change. Values that came out of
- * quantizeSetpointC are at least 0.5°C apart when they differ (1°F ≈ 0.556°C), so the
- * exact-0.05 boundary is unreachable in practice — do not rely on which side it
- * falls, floats put |22.25 - 22.2| at 0.05000000000000071.
+ * Used to decide whether a write is a real change. Values that came out of either
+ * quantizer are at least 0.5°C apart when they differ, so the exact-0.05 boundary is
+ * unreachable in practice — do not rely on which side it falls, floats put
+ * |22.25 - 22.2| at 0.05000000000000071.
  */
 export function sameSetpoint(a: number, b: number): boolean {
   return Math.abs(a - b) < SETPOINT_TOLERANCE_C;
@@ -148,17 +164,17 @@ const CELSIUS_DISPLAY_STEP = 0.5;
 /**
  * Snap to the 0.5°C grid the Home app displays Celsius setpoints on.
  *
- * The °F-anchored ceiling above exists to make one whole Fahrenheit degree survive
- * two renderers that disagree. For an account reading Celsius that trade is pure
- * cost: 22.0°C is 71.6°F, whose nearest degree stores as 22.3, and the Home app's
- * 0.5 grid then shows 22.5 — the setpoint the user just asked for, half a degree
- * higher. Observed live 2026-08-19; 22 is the only point in 20–24 where it shows,
- * because 71.6°F sits almost exactly between two Fahrenheit degrees.
+ * The °F path above picks, for each whole Fahrenheit degree, one point of this same
+ * grid — and skips the points no degree lands on. For an account reading Celsius
+ * that is pure cost: 22.5°C is 72.5°F, which the °F path sends to 73°F and stores as
+ * 23.0, half a degree above the setpoint the user just asked for. (Under the 0.1°C
+ * grid it replaced the same thing happened at 22.0, stored as 22.3 and shown as
+ * 22.5 — observed live 2026-08-19, which is why this path exists.)
  *
- * Snapping to 0.5 instead makes what is stored, what is displayed and what was
- * asked for the same number. The cost is symmetric and one the °F path already
- * pays: a value up to 0.25°C from the request, and a stored setpoint that renders
- * to a whole °F only by chance — which does not matter to someone reading Celsius.
+ * Snapping straight to 0.5 makes what is stored, what is displayed and what was
+ * asked for the same number, at every point of the grid. A stored setpoint then
+ * renders to a whole °F only by chance — which does not matter to someone reading
+ * Celsius. So the two paths share a grid now and are still not interchangeable.
  */
 export function quantizeSetpointCelsius(c: number): number {
   return Math.round(c / CELSIUS_DISPLAY_STEP) * CELSIUS_DISPLAY_STEP;
@@ -200,7 +216,8 @@ export function quantizeSetpointInRangeCelsius(c: number, min: number, max: numb
  *
  * What the vendor app does on a Fahrenheit account is not known. Rounding the
  * pushed edge outward (below) keeps the Celsius distance at or above 1.5 on either
- * grid, which on the whole-°F grid means at least 3 °F.
+ * grid. On the whole-°F grid that can read as two degrees apart (72 °F and 74 °F
+ * store as 22.0 and 23.5), since each degree is stored on the nearest 0.5 °C.
  */
 export const MIN_AUTO_BAND_C = 1.5;
 
@@ -209,13 +226,13 @@ export const MIN_AUTO_BAND_C = 1.5;
  * 0.5 °C for a Celsius account, the stored value of a whole °F otherwise.
  *
  * Outward, not nearest, and that is the point. The pushed edge has to land at least
- * MIN_AUTO_BAND_C from the edge that moved, and nearest can land it short — though
- * not from a value this plugin quantized: an on-grid °F edge plus 1.5 always rounds
- * up to three whole degrees on (checked across the whole range). The short landing
- * comes from an edge set somewhere else, off this grid: heating at 22.0, set in the
- * vendor app on a Celsius account or at the IR remote, read by a Fahrenheit
- * accessory. 22.0 + 1.5 = 23.5 is 74.3 °F; nearest stores 74 °F as 23.4, a 1.4°
- * band. Outward takes 75 °F, 23.9.
+ * MIN_AUTO_BAND_C from the edge that moved, and nearest can land it short. From an
+ * edge on the 0.5 °C grid the target is on the grid too, but may be a point no whole
+ * °F stores as: heating at 22.5, set on a Celsius account, gives 24.0 — fine — while
+ * heating at 21.0 gives 22.5, which no degree lands on; outward takes 73 °F, 23.0.
+ * From an edge off the grid — a legacy 20.9 a unit still holds from before the cloud
+ * enforced 0.5 °C — nearest falls short outright: 20.9 + 1.5 = 22.4 is 72.3 °F, and
+ * 72 °F stores as 22.0, a 1.1° band. Outward takes 73 °F, 23.0.
  */
 export function quantizeOutward(c: number, direction: 1 | -1, celsius: boolean): number {
   if (celsius) {
@@ -224,10 +241,10 @@ export function quantizeOutward(c: number, direction: 1 | -1, celsius: boolean):
       : Math.floor(c / CELSIUS_DISPLAY_STEP + EPS);
     return Math.round(steps * CELSIUS_DISPLAY_STEP * 10) / 10;
   }
-  // storedC ceils each degree onto the 0.1 °C grid, so a degree's stored value can
-  // sit just past its exact conversion. Start one degree back and walk outward to
-  // the first stored value on the far side of `c`. A whole °F is 0.56 °C, so this
-  // ends within three steps; the bound only guards a NaN.
+  // storedC rounds each degree onto the 0.5 °C grid, so a degree's stored value can
+  // sit up to 0.25 °C either side of its exact conversion. Start one degree back and
+  // walk outward to the first stored value on the far side of `c`. A whole °F is
+  // 0.56 °C, so this ends within three steps; the bound only guards a NaN.
   let f = direction === 1 ? Math.floor(cToF(c)) - 1 : Math.ceil(cToF(c)) + 1;
   for (let i = 0; i < 8 && Number.isFinite(f); i++, f += direction) {
     const candidate = storedC(f);

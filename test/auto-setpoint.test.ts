@@ -30,11 +30,10 @@
 //      snap the unit stores 22.2000000000003 or 22.5 and the Mitsubishi app shows
 //      73°F for a 72°F tap.
 //
-// The snap takes the CEILING of the 0.1°C step, not the nearest one, because the
-// Mitsubishi Comfort app truncates when it renders °C as °F while the Home app
-// rounds (measured live 2026-07-27, see storedC in src/temperature.ts). So
-// 71.6°F → 72°F → 22.222…°C stores as 22.3, not 22.2. Every worked arithmetic
-// comment below ends at the ceiling for that reason.
+// The snap takes the 0.5°C point NEAREST the whole °F: the only grid the v3 cloud
+// has accepted since late October 2026 (see storedC in src/temperature.ts). So
+// 71.6°F → 72°F → 22.222…°C stores as 22.0. Until then it took the ceiling of the
+// 0.1°C step (22.3), and every worked arithmetic comment below ended there.
 //
 // Still asserted, unchanged in spirit:
 //   - getHeatingThresholdTemperature -> spHeat,  getCoolingThresholdTemperature -> spCool
@@ -133,9 +132,9 @@ test('setting the heating threshold in AUTO sends spHeat only', async () => {
 
   await handler.setHeatingThresholdTemperature(21);
 
-  // 21°C -> 69.8°F -> nearest whole °F is 70 -> 70°F = 21.111…°C -> stored 21.2.
+  // 21°C -> 69.8°F -> nearest whole °F is 70 -> 70°F = 21.111…°C -> stored 21.0.
   assert.strictEqual(sendCommandCalls.length, 1);
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 21.2 },
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 21 },
     'heating handle writes spHeat, on the °F grid (no spCool, no operationMode)');
 });
 
@@ -189,12 +188,12 @@ test('the AUTO band cannot collapse: no single control writes both edges', async
   // arbitrary order. The 1.5s write hold is keyed per setpoint field, so the two
   // handles cannot supersede each other — both must land, with their own values.
   await Promise.all([
-    handler.setHeatingThresholdTemperature(21),   // -> 70°F -> 21.2
+    handler.setHeatingThresholdTemperature(21),   // -> 70°F -> 21.0
     handler.setCoolingThresholdTemperature(25),   // -> 77°F -> 25
   ]);
 
   assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands),
-    [{ spHeat: 21.2 }, { spCool: 25 }],
+    [{ spHeat: 21 }, { spCool: 25 }],
     'a concurrent two-handle burst sends both edges, each with its own value');
   // In a burst that keeps the band wide, that is. Since 2.3.7 a lone edge moved INTO
   // the vendor's 1.5 °C minimum does write both edges in one command
@@ -204,7 +203,7 @@ test('the AUTO band cannot collapse: no single control writes both edges', async
     assert.strictEqual(Object.keys(call.commands).length, 1,
       'every setpoint command touches exactly one edge');
   }
-  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 21.2);
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 21);
   assert.strictEqual(await handler.getCoolingThresholdTemperature(), 25,
     'the band is still 3.9°C wide, not collapsed to a point');
 });
@@ -217,7 +216,7 @@ test('dragging the band sends two independent commands, not a collapsed pair', a
   await handler.setCoolingThresholdTemperature(25);
 
   assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands),
-    [{ spHeat: 21.2 }, { spCool: 25 }],
+    [{ spHeat: 21 }, { spCool: 25 }],
     'the band stays two-sided; neither write clobbers the other edge');
 });
 
@@ -227,11 +226,11 @@ test('an accepted threshold write optimistically updates cached state', async ()
 
   await handler.setCoolingThresholdTemperature(24);
 
-  // 24°C -> 75.2°F -> 75°F -> 23.888…°C -> stored 23.9. The echo must be the
+  // 24°C -> 75.2°F -> 75°F -> 23.888…°C -> stored 24.0. The echo must be the
   // QUANTIZED value, not the raw 24 HomeKit sent: the handle has to show what the
   // unit will actually hold, or the next poll visibly yanks it and the user
   // re-drags it.
-  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 23.9,
+  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 24,
     'the new spCool is reflected immediately, before the next poll');
   assert.strictEqual(await handler.getHeatingThresholdTemperature(), 20,
     'the heating edge is untouched');
@@ -245,10 +244,10 @@ test('threshold writes to a powered-off unit are cached, not sent', async () => 
 
   await handler.setHeatingThresholdTemperature(22);
 
-  // 22°C -> 71.6°F -> 72°F -> 22.222…°C -> stored 22.3.
+  // 22°C -> 71.6°F -> 72°F -> 22.222…°C -> stored 22.0.
   assert.strictEqual(sendCommandCalls.length, 0,
     'no bare setpoint is sent to an off unit (would 400 modeRequiredWhenDeviceOff)');
-  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22.3,
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22,
     'the value is cached + echoed so the handle holds — quantized, same as a sent write');
 });
 
@@ -264,8 +263,8 @@ test('HEAT-mode heating threshold still sends spHeat only (control)', async () =
 
   await handler.setHeatingThresholdTemperature(22);
 
-  // 22°C -> 71.6°F -> 72°F -> 22.3.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
+  // 22°C -> 71.6°F -> 72°F -> 22.0.
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22 },
     'the heat path writes only its own edge, and carries no operationMode');
 });
 
@@ -275,8 +274,8 @@ test('COOL-mode cooling threshold still sends spCool only (control)', async () =
 
   await handler.setCoolingThresholdTemperature(23);
 
-  // 23°C -> 73.4°F -> 73°F -> 22.777…°C -> stored 22.8.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.8 });
+  // 23°C -> 73.4°F -> 73°F -> 22.777…°C -> stored 23.0.
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23 });
 });
 
 // ---- Post-write poll suppression -----------------------------------------
@@ -290,14 +289,14 @@ test('a poll taken while the adapter is still applying does not undo the write',
   const { handler, accessory } = makeHarness();
   handler.updateFromZone(zone({ spHeat: 20.3 }));
 
-  await handler.setHeatingThresholdTemperature(21);   // -> spHeat 21.2 on the °F grid
+  await handler.setHeatingThresholdTemperature(21);   // -> spHeat 21.0 on the °F grid
 
   // The adapter answers the very next poll with the value it has not replaced yet.
   handler.updateFromZone(zone({ spHeat: 20.3 }));
 
-  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21.2,
+  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21,
     'the stale read must not flap the handle back to the old value');
-  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 21.2,
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 21,
     'and the cache the reconcile compares against still holds what we asked for');
 });
 
@@ -325,7 +324,7 @@ test('holding one setpoint does not freeze the other', async () => {
   // Same poll: a stale spHeat, but a spCool someone really did change.
   handler.updateFromZone(zone({ spHeat: 20.3, spCool: 24 }));
 
-  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21.2,
+  assert.strictEqual(heaterCoolerChar(accessory, 'HeatingThresholdTemperature'), 21,
     'the written field is held');
   assert.strictEqual(heaterCoolerChar(accessory, 'CoolingThresholdTemperature'), 24,
     'the untouched field is not — the guard is per field, not per update');
@@ -334,29 +333,30 @@ test('holding one setpoint does not freeze the other', async () => {
 // ---- Grid follows the displayed unit -------------------------------------
 
 test('a Celsius account keeps the setpoint it asked for', async () => {
-  // 22.0 is the case the user hit: the °F grid stores it as 22.3, which the Home
-  // app then shows as 22.5. On a Celsius account the grid must not do that.
+  // 22.5 is the case that separates the two grids now: the °F grid has no degree
+  // there and stores it as 23.0. (22.0 is the one the user hit under the old 0.1°C
+  // grid, stored as 22.3 and shown as 22.5.) On a Celsius account neither may move.
   const { handler, accessory, sendCommandCalls } = makeHarness();
   (accessory.context as unknown as Record<string, unknown>).displayUnits = 'C';
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(22);
+  await handler.setCoolingThresholdTemperature(22.5);
 
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22 },
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.5 },
     'what is stored is what was asked for');
 });
 
-test('a Fahrenheit account still gets the whole-°F ceiling', async () => {
-  // The °F anchoring exists because the Comfort app truncates while the Home app
-  // rounds; removing it for everyone would bring that one-degree split back.
+test('a Fahrenheit account still gets the whole-°F grid', async () => {
+  // The °F anchoring keeps the degree the Home app shows back equal to the one that
+  // was picked; on the Celsius grid a 22.5 would read back as 72.5°F.
   const { handler, accessory, sendCommandCalls } = makeHarness();
   (accessory.context as unknown as Record<string, unknown>).displayUnits = 'F';
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(22);
+  await handler.setCoolingThresholdTemperature(22.5);
 
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.3 },
-    '72°F stored as 22.3 so both renderers agree');
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23 },
+    '22.5°C is 72.5°F: sent to 73°F, stored on the half degree nearest it');
 });
 
 test('an account with no stated preference behaves as before', async () => {
@@ -365,7 +365,7 @@ test('an account with no stated preference behaves as before', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(22);
+  await handler.setCoolingThresholdTemperature(22.5);
 
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 22.3 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23 }, 'the °F grid, as before');
 });

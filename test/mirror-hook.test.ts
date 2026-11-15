@@ -65,17 +65,18 @@ test('onStatusUpdate fires on an observed (polled) update with the new state', (
 // signature permanently out of step with the value the hardware holds, and every
 // later echo would look like a fresh change and re-push the target.
 //
-// 23°C is deliberately off the °F grid: 23 × 9/5 + 32 = 73.4°F → nearest whole
-// 73°F → (73 − 32) × 5/9 = 22.777…°C → stored at the device's 0.1°C resolution
-// = 22.8. (No device profile is loaded here, so the clamp range is the 10–35
+// 22.5°C is deliberately off the °F grid: 22.5 × 9/5 + 32 = 72.5°F → 73°F →
+// (73 − 32) × 5/9 = 22.777…°C → stored on the nearest 0.5°C = 23.0. (No device
+// profile is loaded here, so the clamp range is the 10–35
 // default and does not move the result.)
 test('onStatusUpdate fires after a HomeKit setpoint change (setter hook)', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'heat', spHeat: 20 })); // seed status
   const seen: number[] = [];
   handler.onStatusUpdate((s: DeviceStatus) => seen.push(s.spHeat));
-  await handler.setHeatingThresholdTemperature(23);
-  assert.ok(seen.includes(22.8), `expected a listener fire with spHeat 22.8, got ${JSON.stringify(seen)}`);
+  await handler.setHeatingThresholdTemperature(22.5);
+  assert.ok(seen.includes(23), `expected a listener fire with spHeat 23, got ${JSON.stringify(seen)}`);
+  assert.ok(!seen.includes(22.5), 'and never with the raw float HomeKit sent');
 });
 
 test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () => {

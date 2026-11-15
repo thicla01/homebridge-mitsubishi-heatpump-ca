@@ -273,21 +273,21 @@ test('the filter indication survives a poll as well', async () => {
 // payload the two transports shape differently (the LAN body drops `power`), so
 // it is where a routing mistake actually costs something.
 //
-// 22°C arrives on the wire as 22.2: setpoints are snapped to the Fahrenheit grid
-// before sending (quantizeSetpointInRange). 22°C = 71.6°F -> nearest whole °F is
-// 72 -> back to Celsius at the 0.1°C device resolution = 22.3. Whichever
+// 22.5°C arrives on the wire as 23: setpoints are snapped to the Fahrenheit grid
+// before sending (quantizeSetpointInRange). 22.5°C = 72.5°F -> 73°F -> 22.78°C ->
+// the nearest 0.5°C = 23.0. Whichever
 // transport carries the write, it carries the same quantized value — the point of
 // quantizing above the transport layer rather than inside it.
-const QUANTIZED_22 = 22.3;
+const QUANTIZED_22_5 = 23;
 
 test('commands prefer the local path when a unit is locally reachable', async () => {
   const local = makeLocalClient();
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.5);
 
-  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: QUANTIZED_22 }], 'sent locally');
+  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: QUANTIZED_22_5 }], 'sent locally');
   assert.strictEqual(sendCommandCalls.length, 0, 'cloud not used');
 });
 
@@ -296,10 +296,10 @@ test('a failed local command falls back to the cloud', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.5);
 
   assert.strictEqual(local.calls.length, 1, 'local attempted first');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: QUANTIZED_22 }], 'then cloud');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: QUANTIZED_22_5 }], 'then cloud');
 });
 
 test('commands skip local when the unit is not locally reachable', async () => {
@@ -307,10 +307,10 @@ test('commands skip local when the unit is not locally reachable', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.5);
 
   assert.strictEqual(local.calls.length, 0, 'local not attempted');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: QUANTIZED_22 }], 'cloud used');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: QUANTIZED_22_5 }], 'cloud used');
 });
 
 test('turning the unit off routes locally as a bare mode write', async () => {

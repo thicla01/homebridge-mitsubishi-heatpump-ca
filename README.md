@@ -35,9 +35,10 @@ liability for damage or loss arising from it.
 - **Fan speed on the tile** — five real speeds plus fan-auto, on a linked Fan service.
 - **Vane control** — swing on the main tile, discrete tilt angles through an opt-in
   `Slats` service.
-- **Display-grid setpoints.** A Fahrenheit account stores every setpoint as the exact
-  Celsius of a whole °F, so the Home app and the Comfort app show the same number; a
-  Celsius account snaps to the 0.5 °C grid the Home app displays, so 22.0 stays 22.0.
+- **Display-grid setpoints.** A Fahrenheit account stores every setpoint on the half
+  degree Celsius nearest a whole °F, so the Home app shows back the degree you picked; a
+  Celsius account snaps to the 0.5 °C grid the Home app displays, so 22.5 stays 22.5.
+  Both are on the 0.5 °C grid, the only one the v3 cloud accepts since late October 2026.
 - **Wireless sensor support.** Units with a paired sensor report its finer temperature
   and humidity, plus battery level with a low-battery warning.
 - **Eve temperature history** — long-term room-temperature graphs in the Eve app
@@ -476,17 +477,20 @@ HomeKit stores temperatures in Celsius and converts for display. The Home app **
 that conversion while the Comfort app **truncates** it, so the same stored value can read
 72°F in one and 71°F in the other.
 
-**Setpoints: solved, on the grid you actually read.** The units accept 0.1°C
-granularity, and every setpoint you write is snapped to the grid of the accessory's
-display units. A Fahrenheit accessory stores the Celsius that displays as the whole °F
-you asked for under *both* renderers — the ceiling of the exact conversion, not the
-nearest 0.1 — so the two apps agree by construction. A Celsius accessory snaps to the
-0.5 °C grid the Home app renders instead, because for a Celsius reader the °F anchor is
-pure cost: 22.0 °C is 71.6 °F, whose nearest whole degree stores as 22.3, which the
-Home app's 0.5 grid then shows as 22.5 — half a degree above what was asked for
-(observed live). On the 0.5 grid, what is stored, what is displayed and what was asked
-for are the same number. This applies to new changes only; a setpoint you have not
-touched keeps whatever value it was last set to.
+**Setpoints: on the grid you actually read, and on the one the cloud accepts.** Since
+late October 2026 the v3 cloud refuses any setpoint that is not a multiple of 0.5 °C
+(HTTP 400 `invalidSpHeatIncrement` / `invalidSpCoolIncrement`), where it used to take
+0.1 °C. Every setpoint you write is therefore snapped to a half degree, chosen by the
+accessory's display units. A Fahrenheit accessory stores the half degree nearest the
+whole °F you asked for, so the Home app, which rounds, shows that degree back. The
+Comfort app truncates instead, and shows about half the degrees one low — 72 °F is
+stored as 22.0 °C, which is 71.6 °F. Until 2.3.13 this plugin stored the ceiling of the
+exact conversion at 0.1 °C (22.3), which read right in both apps; the cloud no longer
+takes those values, and of the two apps the Home app is the one kept exact. A Celsius
+accessory snaps straight to the 0.5 °C grid the Home app renders, because the °F path
+skips the half degrees no whole °F lands on: 22.5 °C would be stored as 23.0. This
+applies to new changes only; a setpoint you have not touched keeps whatever value it was
+last set to, and is moved onto the grid the next time a scene or a tap writes it.
 
 **Current temperature: partly.** Indoor units report measured room temperature in 0.5°C
 steps, a hardware limit, so the displayed value can still differ by ~1°F between apps. A

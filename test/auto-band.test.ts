@@ -104,10 +104,11 @@ test('at the bottom of the range the moved edge gives way too', () => {
 });
 
 test('on the Fahrenheit grid the pushed edge lands on a whole °F, at least 1.5 °C away', () => {
-  // 72 °F is stored as 22.3; cooling at 74 °F (23.4) is a 1.1° band.
+  // 72 °F is stored as 22.0; cooling at 73 °F (23.0) is a 1.0° band.
   const heat72 = quantizeSetpointC(fToC(72));
-  const kept = enforceAutoBand({ spHeat: heat72, spCool: quantizeSetpointC(fToC(74)) },
+  const kept = enforceAutoBand({ spHeat: heat72, spCool: quantizeSetpointC(fToC(73)) },
     'spHeat', false, HEAT, COOL);
+  assert.strictEqual(kept.spCool, 23.5, '74 °F: three half degrees on');
   assert.ok(kept.spCool - kept.spHeat >= MIN_AUTO_BAND_C - 0.05,
     `band ${kept.spHeat}/${kept.spCool} is under 1.5`);
   assert.strictEqual(kept.spCool, quantizeSetpointC(fToC(Math.round(cToF(kept.spCool)))),
@@ -115,19 +116,19 @@ test('on the Fahrenheit grid the pushed edge lands on a whole °F, at least 1.5 
 });
 
 test('the rule itself rounds outward, so an off-grid edge still gets its full 1.5', () => {
-  // Heating 22.0, set in the vendor app on a Celsius account, read by a Fahrenheit
-  // accessory. Nearest would store cooling at 23.4 (74 °F): a 1.4° band.
-  const kept = enforceAutoBand({ spHeat: 22, spCool: 22.5 }, 'spHeat', false, HEAT, COOL);
-  assert.strictEqual(kept.spCool, 23.9, '75 °F — not 23.4, which is 74 °F and 0.1 short');
+  // Heating 20.9: a legacy 0.1 °C value a unit still holds from before the cloud
+  // enforced the 0.5 °C grid, read by a Fahrenheit accessory. 20.9 + 1.5 = 22.4 is
+  // 72.3 °F; nearest would store cooling at 22.0 (72 °F): a 1.1° band.
+  const kept = enforceAutoBand({ spHeat: 20.9, spCool: 21.5 }, 'spHeat', false, HEAT, COOL);
+  assert.strictEqual(kept.spCool, 23, '73 °F — not 22.0, which is 72 °F and 0.4 short');
 });
 
 test('rounding outward never lands short; rounding to nearest does, from an off-grid edge', () => {
-  // Why quantizeOutward exists. From a value this plugin quantized, nearest is
-  // enough — but an edge set in the vendor app on a Celsius account, or at the IR
-  // remote, is not on the °F grid. Heating 22.0 read by a Fahrenheit accessory:
-  // 23.5 rounds to 74 °F, stored as 23.4, a 1.4° band.
-  assert.strictEqual(quantizeSetpointC(22 + MIN_AUTO_BAND_C), 23.4, 'the premise: nearest lands short');
-  assert.strictEqual(quantizeOutward(22 + MIN_AUTO_BAND_C, 1, false), 23.9);
+  // Why quantizeOutward exists. An edge that is off the 0.5 °C grid — a legacy 0.1 °C
+  // value, or one set at the IR remote — puts the target off it too. Heating 20.9
+  // read by a Fahrenheit accessory: 22.4 rounds to 72 °F, stored as 22.0, a 1.1° band.
+  assert.strictEqual(quantizeSetpointC(20.9 + MIN_AUTO_BAND_C), 22, 'the premise: nearest lands short');
+  assert.strictEqual(quantizeOutward(20.9 + MIN_AUTO_BAND_C, 1, false), 23);
 
   let shortNearest = 0;
   for (let c = 10; c <= 33.5; c = Math.round((c + 0.1) * 10) / 10) {

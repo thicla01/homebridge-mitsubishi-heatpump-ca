@@ -23,12 +23,11 @@
 //     and does write a threshold to a unit it just powered down.
 //   * The echoed value is the *quantized* setpoint, not the raw request — writes
 //     are snapped onto the whole-°F grid (src/temperature.ts) before anything
-//     else happens. That is still "the slider holds": 21°C and 21.2°C are the
-//     same 70°F, which is what the user actually asked for and what the Home app
-//     displays. Arithmetic is spelled out at each assertion; its last step is a
-//     CEILING to the device's 0.1°C, not a round, so that the value reads back as
-//     the intended degree in the Comfort app (which truncates) as well as in the
-//     Home app (which rounds). See storedC in src/temperature.ts.
+//     else happens. That is still "the slider holds": 22.5°C and 23°C are the
+//     same 73°F in the Home app, which is what it displays for the value the user
+//     dragged to. Arithmetic is spelled out at each assertion; its last step is
+//     the nearest 0.5°C, the grid the cloud enforces. See storedC in
+//     src/temperature.ts.
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -74,7 +73,7 @@ function makeHarness() {
 /**
  * The characteristic the Home app's slider is bound to, off the primary climate
  * service. Asserting the service exists rather than optional-chaining: a missing
- * HeaterCooler is itself the regression, and `undefined === 21.2` would report it
+ * HeaterCooler is itself the regression, and `undefined === 23` would report it
  * as a wrong value instead of a missing tile.
  */
 function climateChar(accessory: FakeAccessory, id: unknown) {
@@ -128,14 +127,14 @@ test('setting a target temperature while OFF still echoes the value to HomeKit',
   const { handler, accessory } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(21);
+  await handler.setHeatingThresholdTemperature(22.5);
 
-  // 21°C = 69.8°F -> nearest whole °F is 70 -> (70-32)*5/9 = 21.111… -> ceiling
-  // at 0.1°C = 21.2. 21.2°C reads back as 70.16°F, which is the same 70°F the
-  // user asked for under a rounding renderer AND under a truncating one, so the
-  // handle holds where they put it rather than snapping back to the device's 20.
+  // 22.5°C = 72.5°F -> 73°F -> (73-32)*5/9 = 22.777… -> nearest 0.5°C = 23.0.
+  // 23.0°C reads back as 73.4°F, the same 73°F the Home app showed for the drag,
+  // so the handle holds where they put it rather than snapping back to the
+  // device's 20. The raw 22.5 would also hold — asserting 23 pins the quantizer.
   const target = climateChar(accessory, Characteristic.HeatingThresholdTemperature);
-  assert.strictEqual(target.value, 21.2,
+  assert.strictEqual(target.value, 23,
     'HomeKit still reflects the requested value, on the °F grid (slider holds)');
 });
 
@@ -143,11 +142,11 @@ test('setting a target temperature while HEATING still sends the setpoint (contr
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.5);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'heat-mode setpoint is sent to the API');
-  // 22°C = 71.6°F -> 72°F -> (72-32)*5/9 = 22.222… -> ceiling 22.3.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
+  // 22.5°C = 72.5°F -> 73°F -> (73-32)*5/9 = 22.777… -> nearest 0.5°C = 23.0.
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 23 },
     'sends the quantized heat setpoint with no spurious fields');
 });
 

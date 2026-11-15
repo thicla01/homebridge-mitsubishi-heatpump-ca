@@ -57,7 +57,7 @@ const zone = (over: Partial<Adapter> = {}): Zone => ({
   adapter: {
     deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'autoCool',
     fanSpeed: null, airDirection: null,
-    roomTemp: 23, spCool: 26.2, spHeat: 20, spAuto: null, humidity: null,
+    roomTemp: 23, spCool: 26, spHeat: 20, spAuto: null, humidity: null,
     ...over,
   },
 }) as unknown as Zone;
@@ -66,9 +66,24 @@ test('a cooling threshold write matching the current value sends nothing', async
   const { handler, sent } = makeHarness();
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(26.2);
+  await handler.setCoolingThresholdTemperature(26);
 
-  assert.deepStrictEqual(sent, [], 'the unit is already at 26.2 — there is nothing to say');
+  assert.deepStrictEqual(sent, [], 'the unit is already at 26 — there is nothing to say');
+});
+
+test('a re-asserted legacy 0.1°C value is not redundant: it is rewritten onto the grid', async () => {
+  // A unit set before the cloud enforced 0.5°C still holds and reports 26.2. A scene
+  // re-pushing that same 26.2 is no longer a no-op: it quantizes to 26.0 (79°F),
+  // which differs from what the unit holds, so it is sent once — and that moves the
+  // unit onto the only grid the cloud accepts.
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone({ spCool: 26.2 }));
+
+  await handler.setCoolingThresholdTemperature(26.2);
+  assert.deepStrictEqual(sent, [{ spCool: 26 }]);
+
+  await handler.setCoolingThresholdTemperature(26.2);
+  assert.strictEqual(sent.length, 1, 'and only once');
 });
 
 test('a heating threshold write matching the current value sends nothing', async () => {
@@ -87,29 +102,29 @@ test('moving one handle does not re-send the other, even when both are written',
   // Exactly what the Homebridge UI range control does on one adjustment: it writes
   // both edges, only one of which moved.
   await handler.setHeatingThresholdTemperature(20);
-  await handler.setCoolingThresholdTemperature(25.6);
+  await handler.setCoolingThresholdTemperature(25.5);
 
   assert.strictEqual(sent.length, 1, 'only the edge that actually moved is sent');
-  assert.deepStrictEqual(sent[0], { spCool: 25.6 });
+  assert.deepStrictEqual(sent[0], { spCool: 25.5 });
 });
 
 test('a threshold write with a different value is still sent', async () => {
   const { handler, sent } = makeHarness();
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(25.6);
+  await handler.setCoolingThresholdTemperature(25.5);
 
   assert.strictEqual(sent.length, 1, 'a real change must reach the unit');
-  assert.deepStrictEqual(sent[0], { spCool: 25.6 });
+  assert.deepStrictEqual(sent[0], { spCool: 25.5 });
 });
 
 test('a repeat of a value we just wrote is not sent again', async () => {
   const { handler, sent } = makeHarness();
   handler.updateFromZone(zone());
 
-  await handler.setCoolingThresholdTemperature(25.6);
-  await handler.setCoolingThresholdTemperature(25.6);
-  await handler.setCoolingThresholdTemperature(25.6);
+  await handler.setCoolingThresholdTemperature(25.5);
+  await handler.setCoolingThresholdTemperature(25.5);
+  await handler.setCoolingThresholdTemperature(25.5);
 
   assert.strictEqual(sent.length, 1, 'the write is what updates the cache, so repeats are no-ops');
 });

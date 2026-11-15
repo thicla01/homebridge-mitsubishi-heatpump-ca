@@ -19,10 +19,13 @@ accessory per unit (`src/accessory.ts`).
   Fan-only services.
 - Setpoint writes are quantized by `src/temperature.ts` before they reach either
   transport, on the grid of the unit the user is reading: Fahrenheit accessories snap to
-  the Celsius of a whole °F, Celsius accessories to the 0.5 °C grid the Home app
-  displays. The grid is selected per `accessory.context.displayUnits`
-  (`accessory.ts:quantize`) — do not "unify" the two paths: the °F snap on a Celsius
-  reader stored a requested 22.0 as 22.3 and displayed 22.5, observed live 2026-08-19.
+  the half degree Celsius nearest a whole °F, Celsius accessories to the 0.5 °C grid the
+  Home app displays. Both sit on the 0.5 °C grid — the v3 cloud has refused anything
+  else since late October 2026 (`invalidSpHeatIncrement`) — and the grid is selected per
+  `accessory.context.displayUnits` (`accessory.ts:quantize`). Do not "unify" the two
+  paths: the °F path skips the half degrees no whole °F lands on, so on a Celsius
+  reader it stores a requested 22.5 as 23.0 (and, under the 0.1 °C grid it replaced,
+  stored 22.0 as 22.3 and displayed 22.5, observed live 2026-08-19).
 - Under the default `cloudRegion: "us"`, updates arrive by Socket.IO first, cloud
   polling as fallback, LAN polling when local control is up, and commands go local-first
   with per-unit cloud fallback (`accessory.ts:sendDeviceCommand`). Under

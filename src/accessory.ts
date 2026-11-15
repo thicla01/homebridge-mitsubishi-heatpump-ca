@@ -298,11 +298,11 @@ export class KumoThermostatAccessory {
     // around — the second writer simply does not exist any more.
     //
     // minStep stays 0.1 because the grid is Fahrenheit-anchored, not Celsius:
-    // every write is snapped to the exact Celsius of a whole °F by
-    // quantizeSetpointInRange (see src/temperature.ts). A 0.5°C step would force
-    // 72°F to 22.5°C, which reads back as 72.5°F and shows as 73°F in the
-    // Mitsubishi app. Note HAP applies minStep only on the outbound path, so the
-    // quantizer — not this prop — is what actually holds the grid.
+    // every write is snapped to the 0.5°C point nearest a whole °F by
+    // quantizeSetpointInRange (see src/temperature.ts). A 0.5°C minStep would let
+    // the Home slider offer half-degree Celsius steps that are not whole °F. Note
+    // HAP applies minStep only on the outbound path, so the quantizer — not this
+    // prop — is what actually holds the grid.
     const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.1 };
 
     // Give each threshold an in-range value BEFORE narrowing its range.
@@ -2861,12 +2861,12 @@ export class KumoThermostatAccessory {
    */
   private quantize(field: 'spHeat' | 'spCool', temp: number): number {
     const { min, max } = this.setpointRange(field);
-    // Quantize onto the grid of the unit actually being READ. The °F-anchored
-    // ceiling exists to reconcile two Fahrenheit renderers that disagree; for a
-    // Celsius reader it only pushes the setpoint up — 22.0 stored as 22.3 and shown
-    // as 22.5 on the Home app's 0.5 grid. The displayed unit comes from the account
-    // preference (see V2Inventory.celsius) and follows a manual flip in HomeKit, so
-    // the grid always matches what the user sees.
+    // Quantize onto the grid of the unit actually being READ. The °F path keeps the
+    // degree the Home app shows back equal to the one picked; for a Celsius reader
+    // it only moves the setpoint — 22.5 has no whole °F and is stored as 23.0 (under
+    // the 0.1°C grid it replaced, 22.0 was stored as 22.3 and shown as 22.5). The
+    // displayed unit comes from the account preference (see V2Inventory.celsius) and
+    // follows a manual flip in HomeKit, so the grid always matches what the user sees.
     const celsius = this.accessory.context.displayUnits === 'C';
     const q = celsius
       ? quantizeSetpointInRangeCelsius(temp, min, max)
@@ -2923,7 +2923,7 @@ export class KumoThermostatAccessory {
    * AUTO only, which is where the vendor app shows a band at all. Enforcing it in
    * every mode looked safer and is not: in the single-setpoint modes the other edge
    * is invisible, so a push rewrites a setting the user cannot see. Setting a dry
-   * target of 23.9 against a stored heating 23 would have moved heating to 22.3 —
+   * target of 24 against a stored heating 23 would have moved heating to 22.5 —
    * found by test/dry-setpoint.test.ts, whose fixture is a real account's 23/25 —
    * and the user would have met it the next winter. The price of the restriction,
    * stated rather than hidden: a band left narrow or inverted from a single-setpoint

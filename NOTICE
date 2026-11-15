@@ -61,7 +61,7 @@ See CHANGELOG.md for the full list.
 
 LATER PORTS FROM UPSTREAM
 -------------------------
-Five fixes were ported from upstream after the fork point, under the same license,
+Fixes were ported from upstream after the fork point, under the same license. Five
 in 2.3.11 (all in src/accessory.ts, with their tests):
 
   - An ON for an off unit is held through a scene burst and dropped when the burst
@@ -72,6 +72,13 @@ in 2.3.11 (all in src/accessory.ts, with their tests):
   - A refused or failed vane write reverts after HAP stores the written value
     (b09ebc4).
   - An off mirror's optimistic echo uses only what was sent (2845c0e).
+
+And one more in 2.3.13 (src/temperature.ts, with its tests):
+
+  - Each whole Fahrenheit degree is stored on the nearest 0.5 °C, the only grid the
+    v3 cloud accepts since late October 2026 (upstream commit 8011c57). Adapted
+    here: the range clamp admits a degree whose stored value or exact conversion is
+    inside the range, rather than widening one shared tolerance to 0.25 °C.
 
 Upstream's own later NOTICE additions concern code it ported from
 homebridge-mitsubishi-comfort that this distribution does not include.

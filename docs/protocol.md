@@ -66,6 +66,20 @@ cloud reports them read-only and enforces them — a write outside the range ret
 with `{"error":{"<serial>":{"commands":["invalidSpHeatRange"]}}}`. No API can change
 them.
 
+**Since late October 2026 the cloud also enforces a 0.5 °C grid on setpoints.** A
+`spHeat` or `spCool` that is not a multiple of 0.5 °C is refused with HTTP 400 and
+`{"error":{"commands":"invalidSpHeatIncrement"}}` (or `invalidSpCoolIncrement`). It took
+0.1 °C values until then: one report resent the very 23.9 that had been accepted on
+2026-10-26 and saw it refused on 2026-10-30, with library code unchanged. Not measured
+here — a Canadian account cannot reach v3 — but reported independently by three
+projects (nikolairahimi/mitsubishi-comfort#3, burtherman/homebridge-mitsubishi-comfort#30,
+and upstream's `8011c57`, live-checked 2026-11-04: 21.0 and 21.5 accepted, 21.3 and 22.7
+refused). Only writes are checked; units still hold and report older 0.1 °C values, and
+the LAN adapter still accepts them. Since 2.3.13 every setpoint this plugin writes is on
+that grid, on either transport (`src/temperature.ts`). The same reports name a second
+refusal, `modeRequiredWhenDeviceOff`, for any command without a mode sent to a unit that
+is off — fan speed and vane included, which the LAN adapter accepts.
+
 ## Socket.IO
 
 `https://socket-prod.kumocloud.com` (`SOCKET_BASE_URL`), upgraded to `wss://` by
@@ -135,7 +149,7 @@ enforceAutoBand`). Two departures from the app, both deliberate. When a scene or
 moves both edges at once — which the app cannot do — heating is protected and cooling
 yields. And outside AUTO nothing is pushed: the other edge is invisible in the
 single-setpoint modes, so a push there would rewrite a setting the user cannot see (a dry
-target of 23.9 against heating at 23 would have moved heating to 22.3). The price of that
+target of 24 against heating at 23 would have moved heating to 22.5). The price of that
 second choice: a band left narrow or inverted from a single-setpoint mode is not corrected
 on entering AUTO, only the first time an edge moves there.
 

@@ -59,16 +59,16 @@ const zone = (over: Partial<Adapter> = {}): Zone => ({
 
 // NOTE: mirrored setpoints are snapped to the Fahrenheit grid by clampSetpoint,
 // so the expected values below are the grid points, not the source's raw value:
-// 21.5°C is 70.7°F -> 71°F -> 21.7°C; 23°C is 73.4°F -> 73°F -> 22.8°C. A mirror
+// 22.5°C is 72.5°F -> 73°F -> 23.0°C; 25°C is 77°F -> 25.0°C. A mirror
 // target must land on the same displayed degree as its source, which means it has
 // to be on the same grid.
 test('heat mirror sends one combined operationMode + spHeat + raw fan', async () => {
   const { handler, sendCommandCalls, setProfile } = makeHarness();
   setProfile(profile());
   handler.updateFromZone(zone({ operationMode: 'cool' }));
-  await handler.applyMirror({ operationMode: 'heat', power: 1, spHeat: 21.5, spCool: 24, fanSpeed: 'powerful' });
+  await handler.applyMirror({ operationMode: 'heat', power: 1, spHeat: 22.5, spCool: 24, fanSpeed: 'powerful' });
   assert.strictEqual(sendCommandCalls.length, 1);
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'heat', spHeat: 21.7, fanSpeedRaw: 'powerful' });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'heat', spHeat: 23, fanSpeedRaw: 'powerful' });
 });
 
 test('off mirror sends operationMode:off only (no setpoint, no fan)', async () => {
@@ -107,19 +107,18 @@ test('a setpoint above the target range is clamped to the target limit', async (
   handler.updateFromZone(zone({ operationMode: 'heat' }));
   await handler.applyMirror({ operationMode: 'heat', power: 1, spHeat: 35, spCool: 24, fanSpeed: 'auto' });
   // 28°C is 82.4°F, not a whole °F. clampSetpoint steps along the °F grid into
-  // the range rather than handing back the raw bound, so the result is the
-  // largest whole °F that fits: 82°F = 27.8°C. Returning 28 would store an
-  // off-grid value on the mirror target and drift its displayed degree away
-  // from the source's.
-  assert.strictEqual(sendCommandCalls[0].commands.spHeat, 27.8);
+  // the range rather than handing back the raw bound: the largest whole °F that
+  // fits is 82°F, which is 27.78°C and is stored as 28.0 — the bound itself, now
+  // that each degree is stored on the nearest 0.5°C. 83°F would store as 28.5.
+  assert.strictEqual(sendCommandCalls[0].commands.spHeat, 28);
 });
 
 test('dry mirror sends spCool + power when the target uses a dry setpoint', async () => {
   const { handler, sendCommandCalls, setProfile } = makeHarness();
   setProfile(profile({ usesSetPointInDryMode: true }));
   handler.updateFromZone(zone({ operationMode: 'cool' }));
-  await handler.applyMirror({ operationMode: 'dry', power: 1, spHeat: 20, spCool: 23, fanSpeed: 'quiet' });
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'dry', power: 1, spCool: 22.8, fanSpeedRaw: 'quiet' });
+  await handler.applyMirror({ operationMode: 'dry', power: 1, spHeat: 20, spCool: 22.5, fanSpeed: 'quiet' });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'dry', power: 1, spCool: 23, fanSpeedRaw: 'quiet' });
 });
 
 test('a target without dry capability skips a dry mirror', async () => {
@@ -142,8 +141,9 @@ test('cool mirror sends operationMode:cool + spCool + fan', async () => {
   const { handler, sendCommandCalls, setProfile } = makeHarness();
   setProfile(profile());
   handler.updateFromZone(zone({ operationMode: 'heat' }));
+  // 22.3 is what a source still holding a legacy 0.1°C value reports: 72°F, sent as 22.0.
   await handler.applyMirror({ operationMode: 'cool', power: 1, spHeat: 20, spCool: 22.3, fanSpeed: 'auto' });
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'cool', spCool: 22.3, fanSpeedRaw: 'auto' });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { operationMode: 'cool', spCool: 22, fanSpeedRaw: 'auto' });
 });
 
 // ---- the user's caps apply by field, in AUTO too -----------------------------
