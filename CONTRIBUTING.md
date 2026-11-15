@@ -156,7 +156,7 @@ refused for any host but `127.0.0.1` and `localhost`.
 
 ## The `@types/node` floor
 
-`engines.node` promises `>=20.0.0`, but `devDependencies` pins `@types/node` to `^24` —
+`engines.node` promises `>=22.12.0`, but `devDependencies` pins `@types/node` to `^24` —
 deliberately, and against the usual convention of typing to the oldest supported Node.
 The reason is upstream's, in commit `9e799e4`: the definitions had drifted to `^15`
 while the plugin ran on 24, so the compiler was checking against a toolchain nobody
@@ -164,13 +164,13 @@ used, and an invalid Fanv2 characteristic compiled cleanly and only surfaced as 
 runtime warning on the deployed box. Typing to what actually runs catches that class of
 error; typing to the floor catches the opposite one.
 
-The cost of that choice is that the compiler will NOT reject an API added after Node 20,
-which a user on Node 20 would then hit at runtime. So the floor has to be checked by
+The cost of that choice is that the compiler will NOT reject an API added after Node 22,
+which a user on Node 22 would then hit at runtime. So the floor has to be checked by
 hand whenever new platform API is introduced:
 
 ```bash
-git archive HEAD | tar -x -C /tmp/types20 && cd /tmp/types20
-npm install && npm install --save-dev "@types/node@^20"
+git archive HEAD | tar -x -C /tmp/types22 && cd /tmp/types22
+npm install && npm install --save-dev "@types/node@^22"
 npm test          # builds src, compiles the tests, runs them
 ```
 
@@ -178,8 +178,13 @@ Green means nothing in the tree needs a Node newer than the floor `engines` prom
 Note `npm test`, not `tsc --noEmit`: the tests import from `dist/`, so a bare type-check
 in a fresh clone fails on missing modules rather than on anything real.
 
-**Last verified 2026-08-21 at `2.3.0-ca.13`:** clean compile, 512/512 tests against
-`@types/node@20.19.43`. The platform surface is small and old — `fetch` (Node 18),
+The floor was `>=20.0.0` until 2.3.13. It moved to 22.12 when the suite moved to
+Homebridge 2.5.0, whose own floor that is (`^22.12.0 || ^24 || ^26`), six months after
+Node 20 reached end of life. Nothing in `src/` needed the move; the last check against
+the old floor was 512/512 on `@types/node@20.19.43` at `2.3.0-ca.13`.
+
+**Last verified 2026-11-15 at `2.3.13`:** clean compile, 713/713 tests against
+`@types/node@22.20.5`. The platform surface is small and old — `fetch` (Node 18),
 `AbortSignal.timeout` (17.3), and `crypto`/`http`/`net`/`os` — and `tsconfig.json`
 targets ES2018, which holds the language side well below the floor. Re-run the check if
 that inventory grows; bumping the pin past 24 has no upside while the Homebridge hosts

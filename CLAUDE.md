@@ -199,7 +199,7 @@ before Matter is viable. Recover it if the question comes up again:
 ## Working rules
 
 - Run `npm test` before and after any change; this plugin is deployed on real hardware and
-  a regression turns off someone's heat. CI runs the same on Node 20.0 / 22 / 24
+  a regression turns off someone's heat. CI runs the same on Node 22.12 / 24 / 26
   (`.github/workflows/test.yml`).
 - Add the regression test with the fix, in the same style as its neighbours.
 - This fork **is published to npm** as `homebridge-mitsubishi-heatpump-ca`, and the

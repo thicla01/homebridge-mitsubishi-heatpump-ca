@@ -55,7 +55,8 @@ liability for damage or loss arising from it.
 
 ## Installation
 
-Requires **Node.js 20 or newer** and **Homebridge 1.6.0+, including 2.x**.
+Requires **Node.js 22.12 or newer** and **Homebridge 1.6.0+, including 2.x**. (Node 20,
+end of life since April 2026, was dropped in 2.3.13, when Homebridge 2.5.0 dropped it.)
 
 **Install from npm.** In the Homebridge UI, search for
 `homebridge-mitsubishi-heatpump-ca` and install it. From a shell:

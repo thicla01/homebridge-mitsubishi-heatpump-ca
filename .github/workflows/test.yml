@@ -12,11 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         # The low end is the exact floor declared in package.json engines, so the
-        # claim is tested rather than asserted. It is a plain 20.0.0 now: the
-        # runtime has no dependency that has to be `require`d across the ESM
-        # boundary, so the old 20.19 / 22.12 patch floors (the releases that first
-        # carried `require(esm)`, which node-fetch v3 needed) no longer apply.
-        node-version: ['20.0', '22', '24']
+        # claim is tested rather than asserted. It is 22.12 since 2.3.13: that is
+        # the floor of Homebridge 2.5.0 and hap-nodejs 2.3.0, which the suite runs
+        # against (`^22.12.0 || ^24 || ^26`), and Node 20 reached end of life in
+        # April 2026. The plugin's own runtime needs nothing that new — it has no
+        # dependency to `require` across the ESM boundary — the test harness does.
+        node-version: ['22.12', '24', '26']
     steps:
       - uses: actions/checkout@v7
 
